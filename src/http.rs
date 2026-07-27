@@ -2,6 +2,7 @@
 
 use std::fs::{self, File};
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::Path;
@@ -11,6 +12,103 @@ use crate::util;
 
 const LAUNCHER_NAME: &str = "simple-mc-cli";
 const LAUNCHER_VER: &str = env!("CARGO_PKG_VERSION");
+
+// ── Source mode (official vs BMCLAPI mirror) ──────────────────────
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SourceMode {
+    /// Not yet decided — will be resolved after network detection.
+    Auto = 0,
+    /// Use official Mojang/Forge/Fabric/NeoForge URLs.
+    Official = 1,
+    /// Use BMCLAPI mirror (https://bmclapi2.bangbang93.com).
+    BmclApi = 2,
+}
+
+static SOURCE_MODE: AtomicU8 = AtomicU8::new(SourceMode::Auto as u8);
+
+pub fn set_source_mode(mode: SourceMode) {
+    SOURCE_MODE.store(mode as u8, Ordering::SeqCst);
+}
+
+fn get_source_mode() -> SourceMode {
+    match SOURCE_MODE.load(Ordering::SeqCst) {
+        1 => SourceMode::Official,
+        2 => SourceMode::BmclApi,
+        _ => SourceMode::Auto,
+    }
+}
+
+/// Detect network environment: ping Google DNS 3 times (1s apart).
+/// If any ping succeeds → overseas → Official; otherwise → mainland → BmclApi.
+pub fn detect_network() -> SourceMode {
+    for i in 0..3 {
+        if i > 0 {
+            std::thread::sleep(Duration::from_secs(1));
+        }
+        let output = std::process::Command::new("ping")
+            .args(["-c", "1", "-W", "1", "8.8.8.8"])
+            .output();
+        if let Ok(out) = output {
+            if out.status.success() {
+                return SourceMode::Official;
+            }
+        }
+    }
+    SourceMode::BmclApi
+}
+
+/// Resolve source mode: manual override takes priority, otherwise auto-detect.
+pub fn resolve_source_mode(manual: Option<SourceMode>) -> SourceMode {
+    if let Some(m) = manual {
+        if m != SourceMode::Auto {
+            return m;
+        }
+    }
+    let detected = detect_network();
+    set_source_mode(detected);
+    detected
+}
+
+/// BMCLAPI mirror URL transformation.
+/// Replace Mojang/Forge/Fabric/NeoForge official domains with BMCLAPI mirror.
+/// See: https://bmclapidoc.bangbang93.com/
+fn mirror_url(url: &str) -> String {
+    url.replace("https://launchermeta.mojang.com", "https://bmclapi2.bangbang93.com")
+        .replace("https://launcher.mojang.com", "https://bmclapi2.bangbang93.com")
+        .replace(
+            "https://piston-meta.mojang.com",
+            "https://bmclapi2.bangbang93.com",
+        )
+        .replace(
+            "https://resources.download.minecraft.net",
+            "https://bmclapi2.bangbang93.com/assets",
+        )
+        .replace(
+            "https://libraries.minecraft.net",
+            "https://bmclapi2.bangbang93.com/maven",
+        )
+        .replace(
+            "https://maven.minecraftforge.net",
+            "https://bmclapi2.bangbang93.com/maven",
+        )
+        .replace(
+            "https://files.minecraftforge.net",
+            "https://bmclapi2.bangbang93.com/maven",
+        )
+        .replace(
+            "https://meta.fabricmc.net",
+            "https://bmclapi2.bangbang93.com/fabric-meta",
+        )
+        .replace(
+            "https://maven.fabricmc.net",
+            "https://bmclapi2.bangbang93.com/maven",
+        )
+        .replace(
+            "https://maven.neoforged.net",
+            "https://bmclapi2.bangbang93.com/maven",
+        )
+}
 
 /// Result type: (status_code, response_body_bytes) or error string.
 pub type HttpResult = Result<(u16, Vec<u8>), String>;
@@ -25,6 +123,34 @@ pub fn http_request(
     timeout_secs: u64,
     max_retries: u32,
 ) -> HttpResult {
+    http_request_inner(method, url, body_data, json_data, extra_headers, timeout_secs, max_retries, true)
+}
+
+/// Low-level HTTP request without BMCLAPI mirroring (uses original URL directly).
+pub fn http_request_no_mirror(
+    method: &str,
+    url: &str,
+    body_data: Option<&[u8]>,
+    json_data: Option<&serde_json::Value>,
+    extra_headers: Option<&[(&str, &str)]>,
+    timeout_secs: u64,
+    max_retries: u32,
+) -> HttpResult {
+    http_request_inner(method, url, body_data, json_data, extra_headers, timeout_secs, max_retries, false)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn http_request_inner(
+    method: &str,
+    url: &str,
+    body_data: Option<&[u8]>,
+    json_data: Option<&serde_json::Value>,
+    extra_headers: Option<&[(&str, &str)]>,
+    timeout_secs: u64,
+    max_retries: u32,
+    use_mirror: bool,
+) -> HttpResult {
+    let target_url = if use_mirror { mirror_url(url) } else { url.to_string() };
     let mut last_err = String::new();
     let mut last_body: Vec<u8> = Vec::new();
 
@@ -34,8 +160,8 @@ pub fn http_request(
             .build();
 
         let mut req = match method {
-            "POST" => agent.post(url),
-            _ => agent.get(url),
+            "POST" => agent.post(&target_url),
+            _ => agent.get(&target_url),
         };
 
         req = req.set(
@@ -115,6 +241,10 @@ pub fn http_get(url: &str) -> HttpResult {
     http_request("GET", url, None, None, None, 30, 3)
 }
 
+pub fn http_get_no_mirror(url: &str) -> HttpResult {
+    http_request_no_mirror("GET", url, None, None, None, 30, 3)
+}
+
 pub fn http_get_hdrs(url: &str, headers: &[(&str, &str)]) -> HttpResult {
     http_request("GET", url, None, None, Some(headers), 30, 3)
 }
@@ -129,6 +259,7 @@ pub fn http_post_form(url: &str, data: &[u8]) -> HttpResult {
 
 /// Download a file with progress bar and optional SHA-1 verification.
 /// Returns Ok(()) on success, or Err with an error message on failure.
+/// Primary source is determined by SourceMode; falls back to the other source.
 pub fn download_file(
     url: &str,
     dest: &Path,
@@ -164,6 +295,35 @@ pub fn download_file(
         fs::remove_file(dest).ok();
     }
 
+    let mirrored = mirror_url(url);
+    let mode = get_source_mode();
+    let (primary, fallback, primary_label, fallback_label) = match mode {
+        SourceMode::Official => (url, mirrored.as_str(), "official", "mirror"),
+        _ => (mirrored.as_str(), url, "mirror", "official"),
+    };
+
+    // Try primary source
+    let result = download_file_inner(primary, dest, &display_label, sha1_expected, max_retries, show_progress);
+    if result.is_ok() || primary == fallback {
+        return result;
+    }
+
+    // Fall back to the other source
+    crate::warn_msg!(
+        "{} source failed for {}, trying {}...",
+        primary_label, display_label, fallback_label
+    );
+    download_file_inner(fallback, dest, &display_label, sha1_expected, 2, show_progress)
+}
+
+fn download_file_inner(
+    url: &str,
+    dest: &Path,
+    display_label: &str,
+    sha1_expected: Option<&str>,
+    max_retries: u32,
+    show_progress: bool,
+) -> Result<(), String> {
     let mut last_err = String::new();
     for attempt in 0..max_retries {
         let agent = ureq::AgentBuilder::new()
@@ -198,7 +358,7 @@ pub fn download_file(
                             )
                             .unwrap(),
                     );
-                    pb.set_message(display_label.clone());
+                    pb.set_message(display_label.to_string());
                     Some(pb)
                 } else {
                     None
