@@ -76,7 +76,7 @@ mc-launcher uninstall-mod sodium.jar -v 1.21.4
 
 可用 `--loader-version` / `--mod-version` 指定加载器/模组版本。`--fabric`、`--forge`、`--neoforge`、`--loader` 互斥。没有显式选择时，保留自动检测加载器行为（Fabric、NeoForge、Forge 顺序）。
 
-Forge 和 NeoForge 执行官方安装器及其 processors，不再把“只解压 JAR”当作完整安装。旧式不含 `version.json` 的安装器不支持。模组依赖会显示提示，必需依赖可交互确认安装；目前不是完整的依赖冲突求解器。安装模组或执行加载器安装器意味着运行第三方代码，仅使用可信项目。
+Forge 和 NeoForge 执行官方安装器及其 processors，不再把“只解压 JAR”当作完整安装。旧式不含 `version.json` 的安装器不支持。旧版启动器保存的 Forge/NeoForge profile 需要重新运行相应安装命令，避免继续复用不完整安装。模组依赖会显示提示，必需依赖可交互确认安装；目前不是完整的依赖冲突求解器。安装模组或执行加载器安装器意味着运行第三方代码，仅使用可信项目。
 
 禁用/启用/卸载优先匹配完整文件名；模糊查询必须唯一，歧义时不修改任何文件；不会覆盖已有目标。`list-mods` 不会创建空目录。
 
@@ -107,4 +107,4 @@ CI 在 Linux、Windows、macOS 执行上述命令。测试使用本地 HTTP fixt
 
 ## 许可证
 
-沿用项目声明的 `GPL-3.0-only`。本轮改动为原创修复，未复制其他启动器实现；依赖保留各自许可证。
+沿用项目声明的 [`GPL-3.0-only`](LICENSE)，许可证全文取自 SPDX license-list-data 的 GPL-3.0-only 文本。本轮改动为原创修复，未复制其他启动器实现；依赖保留各自许可证。

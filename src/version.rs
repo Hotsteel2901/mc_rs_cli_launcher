@@ -501,4 +501,24 @@ mod tests {
             .download_assets(&json!({"assetIndex":{"id":"test","url":"invalid"}}), 1)
             .is_err());
     }
+    #[test]
+    fn latest_alias_uses_valid_cached_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let vm = VersionManager::new(dir.path());
+        let data = json!({"id":"test","mainClass":"Main","libraries":[],"downloads":{"client":{"url":"invalid"}}});
+        util::atomic_write(
+            &vm.versions_dir.join("test/test.json"),
+            data.to_string().as_bytes(),
+        )
+        .unwrap();
+        let manifest = json!({"latest":{"release":"test","snapshot":"test"},"versions":[{"id":"test","url":"invalid"}]});
+        util::atomic_write(
+            &vm.game_dir.join("version_manifest_v2.json"),
+            manifest.to_string().as_bytes(),
+        )
+        .unwrap();
+        for alias in ["latest", "latest-snapshot"] {
+            assert_eq!(vm.get_version_info(Some(alias)).unwrap().0, "test");
+        }
+    }
 }

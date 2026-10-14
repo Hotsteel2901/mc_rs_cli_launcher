@@ -1084,46 +1084,10 @@ fn resolve_mc_version(mc_version: Option<String>, game_dir: &std::path::Path) ->
 }
 
 fn resolve_mc_version_or_latest(mc_version: Option<String>, game_dir: &std::path::Path) -> String {
-    if let Some(v) = mc_version {
-        let vm = VersionManager::new(game_dir);
-        let manifest = vm.fetch_manifest().unwrap_or_else(|e| {
-            crate::die!(format!("Cannot fetch version manifest: {}", e));
-        });
-        let known: std::collections::HashSet<String> = manifest["versions"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v["id"].as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        if !known.contains(&v) {
-            let mut close: Vec<_> = known
-                .iter()
-                .filter(|kv| kv.starts_with(&v.chars().take(4).collect::<String>()))
-                .cloned()
-                .collect();
-            close.sort();
-            let hint = if close.is_empty() {
-                String::new()
-            } else {
-                let items: Vec<_> = close.iter().rev().take(8).rev().cloned().collect();
-                format!("Did you mean: {}", items.join(", "))
-            };
-            crate::die!(format!("Minecraft version '{}' does not exist.", v), &hint);
-        }
-        return v;
-    }
-
-    let vm = VersionManager::new(game_dir);
-    let manifest = vm.fetch_manifest().unwrap_or_else(|e| {
-        crate::die!(format!("Cannot fetch version manifest: {}", e));
-    });
-    manifest["latest"]["release"]
-        .as_str()
-        .unwrap_or("1.21.4")
-        .to_string()
+    VersionManager::new(game_dir)
+        .get_version_info(mc_version.as_deref())
+        .unwrap_or_else(|e| crate::die!(format!("Cannot resolve Minecraft version: {e}")))
+        .0
 }
 
 fn format_num(n: u64) -> String {

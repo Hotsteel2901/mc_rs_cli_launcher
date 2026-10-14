@@ -18,8 +18,7 @@ impl ModManager {
     /// Get the mods directory for a Minecraft version.
     pub fn mods_dir(&self, mc_version: &str) -> PathBuf {
         crate::util::validate_component(mc_version).unwrap_or_else(|e| crate::die!(e));
-        let d = self.game_dir.join("versions").join(mc_version).join("mods");
-        d
+        self.game_dir.join("versions").join(mc_version).join("mods")
     }
 
     /// List installed Minecraft versions.
