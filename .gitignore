@@ -1,0 +1,7 @@
+/target/
+/minecraft/
+*.log
+*.tmp
+*.part
+.env
+launcher_accounts.json

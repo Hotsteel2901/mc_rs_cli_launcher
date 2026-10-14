@@ -79,8 +79,10 @@ pub fn search_projects(
         params.push(("facets".to_string(), f.to_string()));
     }
 
-    let str_params: Vec<(&str, &str)> =
-        params.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let str_params: Vec<(&str, &str)> = params
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
     api_get("/search", &str_params)
 }
 
@@ -106,12 +108,11 @@ pub fn get_project_versions(
         params.push(("game_versions".to_string(), json_str));
     }
 
-    let str_params: Vec<(&str, &str)> =
-        params.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-    api_get(
-        &format!("/project/{}/version", slug_or_id),
-        &str_params,
-    )
+    let str_params: Vec<(&str, &str)> = params
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    api_get(&format!("/project/{}/version", slug_or_id), &str_params)
 }
 
 /// Get a single version by ID.
@@ -133,14 +134,14 @@ pub fn download_version_files(
     version_data: &serde_json::Value,
     dest_dir: &Path,
     label: &str,
-) -> Vec<PathBuf> {
+) -> crate::error::AppResult<Vec<PathBuf>> {
     let dest = dest_dir;
-    std::fs::create_dir_all(dest).ok();
+    std::fs::create_dir_all(dest)?;
     let mut paths = Vec::new();
 
     let files = version_data["files"].as_array();
     if files.is_none() {
-        return paths;
+        return Err("Mod version contains no downloadable files".into());
     }
     let files = files.unwrap();
 
@@ -165,25 +166,20 @@ pub fn download_version_files(
     let mut downloaded_names = std::collections::HashSet::new();
 
     for f in &selected {
-        let filename = f["filename"].as_str().unwrap_or("unknown.jar");
+        let filename = f["filename"].as_str().ok_or("Mod file has no filename")?;
+        crate::util::validate_component(filename)?;
         let file_path = dest.join(filename);
         let url = f["url"].as_str().unwrap_or("");
 
-        if !file_path.exists() {
-            if let Err(e) = http::download_file(
-                url,
-                &file_path,
-                if label.is_empty() { filename } else { label },
-                None,
-                3,
-                true,
-            ) {
-                crate::warn_msg!("Failed to download {}: {}", filename, e);
-                continue;
-            }
-        } else {
-            crate::info!("{} -- cached", filename);
-        }
+        http::download_file(
+            url,
+            &file_path,
+            if label.is_empty() { filename } else { label },
+            f["hashes"]["sha1"].as_str(),
+            3,
+            true,
+        )
+        .map_err(crate::error::AppError::Http)?;
         paths.push(file_path);
         downloaded_names.insert(filename.to_string());
     }
@@ -195,13 +191,8 @@ pub fn download_version_files(
                 for entry in entries.flatten() {
                     let name = entry.file_name().to_string_lossy().to_string();
                     if name.ends_with(suffix) {
-                        let base = format!(
-                            "{}.jar",
-                            &name[..name.len() - suffix.len()]
-                        );
-                        if downloaded_names.contains(&base)
-                            && entry.path().exists()
-                        {
+                        let base = format!("{}.jar", &name[..name.len() - suffix.len()]);
+                        if downloaded_names.contains(&base) && entry.path().exists() {
                             std::fs::remove_file(entry.path()).ok();
                             crate::info!(
                                 "Removed stale {} jar: {}",
@@ -215,5 +206,8 @@ pub fn download_version_files(
         }
     }
 
-    paths
+    if paths.is_empty() {
+        return Err("No installable mod files found".into());
+    }
+    Ok(paths)
 }

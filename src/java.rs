@@ -14,10 +14,7 @@ const MOJANG_JAVA_MANIFEST: &str =
 
 /// Get the Java major version number.
 pub fn java_major(java_path: &str) -> Option<u32> {
-    let output = Command::new(java_path)
-        .arg("-version")
-        .output()
-        .ok()?;
+    let output = Command::new(java_path).arg("-version").output().ok()?;
 
     let text = String::from_utf8_lossy(&output.stderr);
     // Match "version "1.8.0_..." or "version "17.0.1"..."
@@ -76,7 +73,8 @@ fn scan_java_installations() -> Vec<String> {
     ] {
         if let Ok(jdk_key) = hklm.open_subkey_with_flags(key_path, winreg::enums::KEY_READ) {
             for name in jdk_key.enum_keys().flatten() {
-                if let Ok(sub_key) = jdk_key.open_subkey_with_flags(&name, winreg::enums::KEY_READ) {
+                if let Ok(sub_key) = jdk_key.open_subkey_with_flags(&name, winreg::enums::KEY_READ)
+                {
                     if let Ok(jh) = sub_key.get_value::<String, _>("Path") {
                         let je = Path::new(&jh).join("bin").join(java_exe);
                         if je.exists() {
@@ -89,13 +87,11 @@ fn scan_java_installations() -> Vec<String> {
     }
 
     let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
-    for key_path in &[
-        r"SOFTWARE\Eclipse Adoptium\JDK",
-        r"SOFTWARE\JavaSoft\JDK",
-    ] {
+    for key_path in &[r"SOFTWARE\Eclipse Adoptium\JDK", r"SOFTWARE\JavaSoft\JDK"] {
         if let Ok(jdk_key) = hkcu.open_subkey_with_flags(key_path, winreg::enums::KEY_READ) {
             for name in jdk_key.enum_keys().flatten() {
-                if let Ok(sub_key) = jdk_key.open_subkey_with_flags(&name, winreg::enums::KEY_READ) {
+                if let Ok(sub_key) = jdk_key.open_subkey_with_flags(&name, winreg::enums::KEY_READ)
+                {
                     if let Ok(jh) = sub_key.get_value::<String, _>("Path") {
                         let je = Path::new(&jh).join("bin").join(java_exe);
                         if je.exists() {
@@ -113,11 +109,7 @@ fn scan_java_installations() -> Vec<String> {
         if let Ok(entries) = fs::read_dir(home) {
             let mut jdk_dirs: Vec<_> = entries
                 .flatten()
-                .filter(|e| {
-                    e.file_name()
-                        .to_string_lossy()
-                        .starts_with("jdk-")
-                })
+                .filter(|e| e.file_name().to_string_lossy().starts_with("jdk-"))
                 .collect();
             jdk_dirs.sort_by_key(|e| e.file_name());
             jdk_dirs.reverse();
@@ -157,7 +149,9 @@ fn scan_java_installations() -> Vec<String> {
                             for sd in sub.flatten() {
                                 if sd.path().is_dir() {
                                     let je2 = sd.path().join("bin").join(java_exe);
-                                    if je2.exists() && !scanned.contains(&je2.to_string_lossy().to_string()) {
+                                    if je2.exists()
+                                        && !scanned.contains(&je2.to_string_lossy().to_string())
+                                    {
                                         scanned.push(je2.to_string_lossy().to_string());
                                     }
                                 }
@@ -178,11 +172,7 @@ fn scan_java_installations() -> Vec<String> {
     let java_bin = "java";
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
 
-    for base in &[
-        "/usr/lib/jvm",
-        "/usr/local/opt",
-        "/opt/java",
-    ] {
+    for base in &["/usr/lib/jvm", "/usr/local/opt", "/opt/java"] {
         let bp = Path::new(base);
         if bp.exists() {
             if let Ok(entries) = fs::read_dir(bp) {
@@ -278,10 +268,7 @@ pub fn check_java(required_major: Option<u32>) -> Option<String> {
     let ver = java_major(java);
     if let Some(v) = ver {
         if v < 17 {
-            crate::warn_msg!(
-                "Java {} detected. Minecraft 1.18+ needs Java 17+.",
-                v
-            );
+            crate::warn_msg!("Java {} detected. Minecraft 1.18+ needs Java 17+.", v);
             crate::info!("Found at: {}", java);
         }
     }
@@ -301,7 +288,11 @@ fn mojang_java_platform() -> Option<&'static str> {
 }
 
 /// Download Mojang's bundled Java runtime. Returns path to java executable.
-pub fn download_mojang_java(game_dir: &Path, component: &str, max_workers: usize) -> Option<String> {
+pub fn download_mojang_java(
+    game_dir: &Path,
+    component: &str,
+    max_workers: usize,
+) -> Option<String> {
     let dest_root = game_dir.join("java").join(component);
     let exe_name = if cfg!(windows) { "java.exe" } else { "java" };
 
@@ -342,7 +333,7 @@ pub fn download_mojang_java(game_dir: &Path, component: &str, max_workers: usize
     let mut links: Vec<(PathBuf, String)> = Vec::new();
 
     for (rel, info) in files {
-        let target = dest_root.join(rel);
+        let target = crate::util::safe_join(&dest_root, rel).ok()?;
         match info["type"].as_str() {
             Some("directory") => {
                 fs::create_dir_all(&target).ok();
@@ -353,18 +344,13 @@ pub fn download_mojang_java(game_dir: &Path, component: &str, max_workers: usize
                 let sha1 = raw["sha1"].as_str();
                 if let Some(url) = url {
                     let need_dl = match (target.exists(), sha1) {
-                        (true, Some(expected)) => {
-                            crate::util::sha1_file(&target) != expected
-                        }
+                        (true, Some(expected)) => !crate::util::sha1_file(&target)
+                            .is_ok_and(|hash| hash.eq_ignore_ascii_case(expected)),
                         (true, None) => false,
                         (false, _) => true,
                     };
                     if need_dl {
-                        downloads.push((
-                            url.to_string(),
-                            target.clone(),
-                            sha1.map(String::from),
-                        ));
+                        downloads.push((url.to_string(), target.clone(), sha1.map(String::from)));
                     }
                 }
                 if info["executable"].as_bool().unwrap_or(false) {
@@ -398,14 +384,7 @@ pub fn download_mojang_java(game_dir: &Path, component: &str, max_workers: usize
     let fail = std::sync::atomic::AtomicUsize::new(0);
 
     downloads.par_iter().for_each(|(url, dest, sha1)| {
-        match http::download_file(
-            url,
-            dest,
-            "",
-            sha1.as_deref(),
-            2,
-            false,
-        ) {
+        match http::download_file(url, dest, "", sha1.as_deref(), 2, false) {
             Ok(()) => {
                 let n = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                 let f = fail.load(std::sync::atomic::Ordering::Relaxed);
@@ -414,10 +393,7 @@ pub fn download_mojang_java(game_dir: &Path, component: &str, max_workers: usize
                 let bar: String = (0..25)
                     .map(|i| if i < filled { '\u{2588}' } else { '\u{2591}' })
                     .collect();
-                print!(
-                    "\r  [{:3}%] {} {}/{} files",
-                    pct, bar, n + f, total
-                );
+                print!("\r  [{:3}%] {} {}/{} files", pct, bar, n + f, total);
                 use std::io::Write;
                 std::io::stdout().flush().ok();
             }
@@ -460,7 +436,11 @@ pub fn download_mojang_java(game_dir: &Path, component: &str, max_workers: usize
         crate::warn_msg!("Java runtime downloaded but java executable not found.");
         return None;
     }
-    crate::success!("Java runtime {} installed -> {}", ver_name, dest_root.display());
+    crate::success!(
+        "Java runtime {} installed -> {}",
+        ver_name,
+        dest_root.display()
+    );
     java_bins
 }
 

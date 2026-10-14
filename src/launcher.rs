@@ -24,14 +24,15 @@ pub struct MinecraftLauncher {
 }
 
 impl MinecraftLauncher {
-    pub fn new(game_dir: &Path, threads: usize) -> Self {
-        MinecraftLauncher {
+    pub fn new(game_dir: &Path, threads: usize) -> AppResult<Self> {
+        let game_dir = util::absolute_path(game_dir)?;
+        Ok(MinecraftLauncher {
             game_dir: game_dir.to_path_buf(),
-            accounts: crate::account::AccountManager::new(game_dir),
-            versions: VersionManager::new(game_dir),
+            accounts: crate::account::AccountManager::new(&game_dir)?,
+            versions: VersionManager::new(&game_dir),
             java_path: None,
             threads: threads.clamp(1, 32),
-        }
+        })
     }
 
     /// Set a specific Java path.
@@ -55,9 +56,7 @@ impl MinecraftLauncher {
     fn select_java(&mut self, version_data: &serde_json::Value) -> AppResult<String> {
         let jv = &version_data["javaVersion"];
         let required = jv["majorVersion"].as_u64();
-        let component = jv["component"]
-            .as_str()
-            .unwrap_or("java-runtime-gamma");
+        let component = jv["component"].as_str().unwrap_or("java-runtime-gamma");
 
         // If Java was explicitly set by user
         if let Some(ref explicit) = self.java_path {
@@ -90,14 +89,12 @@ impl MinecraftLauncher {
 
         // Try cached Mojang runtime
         let exe_name = if cfg!(windows) { "java.exe" } else { "java" };
-        let cached = glob::glob(
-            &format!(
-                "{}/java/{}/**/bin/{}",
-                self.game_dir.display(),
-                component,
-                exe_name
-            )
-        )
+        let cached = glob::glob(&format!(
+            "{}/java/{}/**/bin/{}",
+            self.game_dir.display(),
+            component,
+            exe_name
+        ))
         .ok()
         .and_then(|iter| iter.flatten().next())
         .map(|p| p.to_string_lossy().to_string());
@@ -112,11 +109,7 @@ impl MinecraftLauncher {
             "No local Java {} found; fetching Mojang Java runtime...",
             required
         );
-        if let Some(j) = java::download_mojang_java(
-            &self.game_dir,
-            component,
-            self.threads,
-        ) {
+        if let Some(j) = java::download_mojang_java(&self.game_dir, component, self.threads) {
             self.java_path = Some(j.clone());
             return Ok(j);
         }
@@ -151,16 +144,18 @@ impl MinecraftLauncher {
                                 path.display(),
                                 e
                             );
-                            return Ok((None, None));
+                            return Err(AppError::Loader(format!(
+                                "Invalid loader profile {}: {e}",
+                                path.display()
+                            )));
                         }
                     },
                     Err(e) => {
-                        crate::warn_msg!(
-                            "Failed to read loader profile {}: {}",
-                            path.display(),
-                            e
-                        );
-                        return Ok((None, None));
+                        crate::warn_msg!("Failed to read loader profile {}: {}", path.display(), e);
+                        return Err(AppError::Loader(format!(
+                            "Invalid loader profile {}: {e}",
+                            path.display()
+                        )));
                     }
                 };
                 return Ok((Some(l.to_string()), Some(profile)));
@@ -197,11 +192,7 @@ impl MinecraftLauncher {
                         }
                     },
                     Err(e) => {
-                        crate::warn_msg!(
-                            "Failed to read loader profile {}: {}",
-                            path.display(),
-                            e
-                        );
+                        crate::warn_msg!("Failed to read loader profile {}: {}", path.display(), e);
                         continue;
                     }
                 };
@@ -217,12 +208,15 @@ impl MinecraftLauncher {
         &mut self,
         account_data: &mut serde_json::Value,
     ) -> AppResult<(String, String, String, String)> {
-        let acc_type = account_data["type"].as_str().unwrap_or("offline").to_string();
-        let username = account_data["username"]
+        let acc_type = account_data["type"]
+            .as_str()
+            .unwrap_or("offline")
+            .to_string();
+        let mut username = account_data["username"]
             .as_str()
             .unwrap_or("Player")
             .to_string();
-        let user_uuid = account_data["uuid"]
+        let mut user_uuid = account_data["uuid"]
             .as_str()
             .unwrap_or("00000000-0000-0000-0000-000000000000")
             .to_string();
@@ -232,27 +226,22 @@ impl MinecraftLauncher {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs_f64();
-            if now > account_data["expires_at"].as_f64().unwrap_or(0.0) {
+            if now + 60.0 >= account_data["expires_at"].as_f64().unwrap_or(0.0)
+                || account_data["access_token"]
+                    .as_str()
+                    .unwrap_or("")
+                    .is_empty()
+            {
                 crate::info!("Session expired. Attempting silent token refresh...");
                 let mut auth = MicrosoftAuth::new();
-                let mut refresh = account_data["refresh_token"]
+                let refresh = account_data["refresh_token"]
                     .as_str()
                     .unwrap_or("")
                     .to_string();
 
-                // Keychain fallback: if JSON refresh_token is empty, try system keychain
-                if refresh.is_empty() {
-                    if let Some(rt) = self.accounts.get_keychain_refresh_token() {
-                        crate::info!("Using refresh token from system keychain.");
-                        refresh = rt;
-                        // Restore the token back into JSON for future use
-                        account_data["refresh_token"] = serde_json::json!(&refresh);
-                    }
-                }
-
                 if !auth.try_refresh(&refresh) {
                     return Err(AppError::Generic(
-                        "Token refresh failed. Run 'login' again to re-authenticate.".into()
+                        "Token refresh failed. Run 'login' again to re-authenticate.".into(),
                     ));
                 }
 
@@ -268,7 +257,9 @@ impl MinecraftLauncher {
                     &auth.mc_token,
                     &auth.refresh_token,
                     auth.expires_at,
-                );
+                )?;
+                username = auth.username.clone();
+                user_uuid = uid;
                 crate::success!("Token refreshed -- {}", auth.username);
                 auth.mc_token
             } else {
@@ -295,28 +286,21 @@ impl MinecraftLauncher {
         height: Option<u32>,
     ) -> AppResult<i32> {
         let mut account_data = account_data.unwrap_or_else(|| {
-            self.accounts
-                .get_default()
-                .unwrap_or_else(|| {
-                    crate::die!("No account. Run 'login' or 'offline <name>' first.");
-                })
+            self.accounts.get_default().unwrap_or_else(|| {
+                crate::die!("No account. Run 'login' or 'offline <name>' first.");
+            })
         });
 
         let (acc_type, username, user_uuid, access_token) =
             self.ensure_session(&mut account_data)?;
 
-        let (version_id_str, version_data) =
-            self.versions.get_version_info(version_id)?;
+        let (version_id_str, version_data) = self.versions.get_version_info(version_id)?;
         let mc_version = &version_id_str;
 
-        let version_game_dir = self
-            .game_dir
-            .join("versions")
-            .join(mc_version);
-        std::fs::create_dir_all(&version_game_dir).ok();
+        let version_game_dir = self.game_dir.join("versions").join(mc_version);
+        std::fs::create_dir_all(&version_game_dir)?;
 
-        let (loader_name, loader_profile) =
-            self.load_loader_profile(mc_version, loader)?;
+        let (loader_name, loader_profile) = self.load_loader_profile(mc_version, loader)?;
 
         if let Some(ref ln) = loader_name {
             let title = match ln.as_str() {
@@ -338,23 +322,20 @@ impl MinecraftLauncher {
         crate::info!("Game dir: {}\n", version_game_dir.display());
 
         crate::log::step(1, 4, "Downloading client jar...");
-        let client_jar =
-            self.versions
-                .download_client_jar(mc_version, &version_data)?;
+        let client_jar = self
+            .versions
+            .download_client_jar(mc_version, &version_data)?;
 
         let natives_dir = self.game_dir.join("natives").join(mc_version);
-        std::fs::create_dir_all(&natives_dir).ok();
+        std::fs::create_dir_all(&natives_dir)?;
 
         crate::log::step(2, 4, "Downloading libraries...");
-        let lib_jars = self.versions.download_libraries(
-            &version_data,
-            &natives_dir,
-            self.threads,
-        )?;
+        let lib_jars =
+            self.versions
+                .download_libraries(&version_data, &natives_dir, self.threads)?;
 
         crate::log::step(3, 4, "Downloading assets...");
-        let assets_index =
-            self.versions.download_assets(&version_data, self.threads)?;
+        let assets_index = self.versions.download_assets(&version_data, self.threads)?;
 
         crate::log::step(4, 4, "Launching game...");
 
@@ -371,53 +352,48 @@ impl MinecraftLauncher {
                         }
                     }
                     let name = lib["name"].as_str().unwrap_or("");
-                    let rel_path = lib["downloads"]["artifact"]["path"]
-                        .as_str()
-                        .map(String::from)
-                        .unwrap_or_else(|| crate::util::maven_rel_path(name));
+                    let rel_path = match lib["downloads"]["artifact"]["path"].as_str() {
+                        Some(path) => path.to_string(),
+                        None => util::maven_rel_path(name)?,
+                    };
 
-                    let lib_jar = self.game_dir.join("libraries").join(&rel_path);
-                    if !lib_jar.exists() {
+                    let lib_jar = util::safe_join(&self.versions.libraries_dir, &rel_path)?;
+                    if !http::cached_file_valid(
+                        &lib_jar,
+                        lib["downloads"]["artifact"]["sha1"].as_str(),
+                    ) {
                         let url_str = lib["downloads"]["artifact"]["url"]
                             .as_str()
                             .map(String::from)
                             .or_else(|| {
-                                lib["url"].as_str().map(|u| {
-                                    format!(
-                                        "{}/{}",
-                                        u.trim_end_matches('/'),
-                                        rel_path
-                                    )
-                                })
+                                lib["url"]
+                                    .as_str()
+                                    .map(|u| format!("{}/{}", u.trim_end_matches('/'), rel_path))
                             });
 
                         if let Some(ref url) = url_str {
                             if let Err(e) = http::download_file(
                                 url,
                                 &lib_jar,
-                                &lib_jar
-                                    .file_name()
-                                    .unwrap_or_default()
-                                    .to_string_lossy(),
-                                None,
+                                &lib_jar.file_name().unwrap_or_default().to_string_lossy(),
+                                lib["downloads"]["artifact"]["sha1"].as_str(),
                                 2,
                                 false,
                             ) {
-                                crate::warn_msg!(
-                                    "Could not download loader library {}: {}",
-                                    lib_jar.display(),
-                                    e
-                                );
+                                return Err(AppError::Http(format!(
+                                    "Cannot download loader library {}: {e}",
+                                    lib_jar.display()
+                                )));
                             }
                         }
                     }
                     if lib_jar.exists() {
                         extra_cp.push(lib_jar);
                     } else {
-                        crate::warn_msg!(
+                        return Err(AppError::Loader(format!(
                             "Loader library missing: {}",
                             lib_jar.display()
-                        );
+                        )));
                     }
                 }
             }
@@ -451,9 +427,7 @@ impl MinecraftLauncher {
         }
 
         // Build classpath
-        let mut all_cp: Vec<PathBuf> = Vec::with_capacity(
-            1 + lib_jars.len() + extra_cp.len(),
-        );
+        let mut all_cp: Vec<PathBuf> = Vec::with_capacity(1 + lib_jars.len() + extra_cp.len());
         all_cp.push(client_jar);
         all_cp.extend(lib_jars);
         all_cp.extend(extra_cp);
@@ -500,7 +474,11 @@ impl MinecraftLauncher {
                     serde_json::Value::String(s) => jvm_args.push(s.clone()),
                     serde_json::Value::Object(obj) => {
                         if let Some(rules) = obj.get("rules") {
-                            if !VersionManager::rules_allow(rules, false) {
+                            if !VersionManager::rules_allow_with_features(
+                                rules,
+                                false,
+                                &[("has_custom_resolution", width.is_some() || height.is_some())],
+                            ) {
                                 continue;
                             }
                         }
@@ -511,9 +489,7 @@ impl MinecraftLauncher {
                                 }
                                 serde_json::Value::Array(arr) => {
                                     jvm_args.extend(
-                                        arr.iter()
-                                            .filter_map(|v| v.as_str())
-                                            .map(String::from),
+                                        arr.iter().filter_map(|v| v.as_str()).map(String::from),
                                     );
                                 }
                                 _ => {}
@@ -538,10 +514,7 @@ impl MinecraftLauncher {
             jvm_args.insert(0, format!("-Xmx{}M", ram_mb));
         }
         if !has_xms {
-            jvm_args.insert(
-                0,
-                format!("-Xms{}M", (1024u32).min(ram_mb / 2)),
-            );
+            jvm_args.insert(0, format!("-Xms{}M", (1024u32).min(ram_mb / 2)));
         }
 
         // Native path
@@ -549,10 +522,7 @@ impl MinecraftLauncher {
             .iter()
             .any(|a| a.to_lowercase().contains("natives"))
         {
-            jvm_args.push(format!(
-                "-Djava.library.path={}",
-                natives_dir.display()
-            ));
+            jvm_args.push(format!("-Djava.library.path={}", natives_dir.display()));
         }
 
         // Loader JVM args
@@ -565,7 +535,14 @@ impl MinecraftLauncher {
                         }
                         serde_json::Value::Object(obj) => {
                             if let Some(rules) = obj.get("rules") {
-                                if !VersionManager::rules_allow(rules, false) {
+                                if !VersionManager::rules_allow_with_features(
+                                    rules,
+                                    false,
+                                    &[(
+                                        "has_custom_resolution",
+                                        width.is_some() || height.is_some(),
+                                    )],
+                                ) {
                                     continue;
                                 }
                             }
@@ -576,9 +553,7 @@ impl MinecraftLauncher {
                                     }
                                     serde_json::Value::Array(arr) => {
                                         jvm_args.extend(
-                                            arr.iter()
-                                                .filter_map(|v| v.as_str())
-                                                .map(String::from),
+                                            arr.iter().filter_map(|v| v.as_str()).map(String::from),
                                         );
                                     }
                                     _ => {}
@@ -602,7 +577,11 @@ impl MinecraftLauncher {
                     }
                     serde_json::Value::Object(obj) => {
                         if let Some(rules) = obj.get("rules") {
-                            if !VersionManager::rules_allow(rules, false) {
+                            if !VersionManager::rules_allow_with_features(
+                                rules,
+                                false,
+                                &[("has_custom_resolution", width.is_some() || height.is_some())],
+                            ) {
                                 continue;
                             }
                         }
@@ -613,9 +592,7 @@ impl MinecraftLauncher {
                                 }
                                 serde_json::Value::Array(arr) => {
                                     game_args.extend(
-                                        arr.iter()
-                                            .filter_map(|v| v.as_str())
-                                            .map(String::from),
+                                        arr.iter().filter_map(|v| v.as_str()).map(String::from),
                                     );
                                 }
                                 _ => {}
@@ -626,7 +603,7 @@ impl MinecraftLauncher {
                 }
             }
         } else if let Some(mca) = version_data["minecraftArguments"].as_str() {
-            game_args = mca.split(' ').map(String::from).collect();
+            game_args = mca.split_whitespace().map(String::from).collect();
         }
 
         // Loader game args
@@ -639,7 +616,14 @@ impl MinecraftLauncher {
                         }
                         serde_json::Value::Object(obj) => {
                             if let Some(rules) = obj.get("rules") {
-                                if !VersionManager::rules_allow(rules, false) {
+                                if !VersionManager::rules_allow_with_features(
+                                    rules,
+                                    false,
+                                    &[(
+                                        "has_custom_resolution",
+                                        width.is_some() || height.is_some(),
+                                    )],
+                                ) {
                                     continue;
                                 }
                             }
@@ -650,9 +634,7 @@ impl MinecraftLauncher {
                                     }
                                     serde_json::Value::Array(arr) => {
                                         game_args.extend(
-                                            arr.iter()
-                                                .filter_map(|v| v.as_str())
-                                                .map(String::from),
+                                            arr.iter().filter_map(|v| v.as_str()).map(String::from),
                                         );
                                     }
                                     _ => {}
@@ -669,8 +651,7 @@ impl MinecraftLauncher {
         // Offline mode: do not pass auth session/access_token to Minecraft
         if acc_type == "offline" {
             game_args.retain(|arg| {
-                !arg.starts_with("--auth_session")
-                    && !arg.starts_with("--auth_access_token")
+                !arg.starts_with("--auth_session") && !arg.starts_with("--auth_access_token")
             });
         }
 
@@ -700,10 +681,7 @@ impl MinecraftLauncher {
             ("${version_name}", mc_version.clone()),
             (
                 "${version_type}",
-                version_data["type"]
-                    .as_str()
-                    .unwrap_or("release")
-                    .into(),
+                version_data["type"].as_str().unwrap_or("release").into(),
             ),
             (
                 "${game_directory}",
@@ -711,7 +689,12 @@ impl MinecraftLauncher {
             ),
             (
                 "${game_assets}",
-                self.versions.assets_dir.to_string_lossy().to_string(),
+                self.versions
+                    .assets_dir
+                    .join("virtual")
+                    .join(&assets_index)
+                    .to_string_lossy()
+                    .to_string(),
             ),
             (
                 "${assets_root}",
@@ -759,11 +742,19 @@ impl MinecraftLauncher {
             }
         }
 
+        if width.is_some() || height.is_some() {
+            for (flag, value) in [
+                ("--width", width.unwrap_or(854)),
+                ("--height", height.unwrap_or(480)),
+            ] {
+                if !game_args.iter().any(|arg| arg == flag) {
+                    game_args.extend([flag.into(), value.to_string()]);
+                }
+            }
+        }
+
         // Ensure -cp is present
-        if !jvm_args
-            .iter()
-            .any(|a| a == "-cp" || a == "-classpath")
-        {
+        if !jvm_args.iter().any(|a| a == "-cp" || a == "-classpath") {
             jvm_args.push("-cp".into());
             jvm_args.push(classpath);
         }
@@ -772,9 +763,8 @@ impl MinecraftLauncher {
         let java_path = self.select_java(&version_data)?;
         let java_ver = java::java_major(&java_path);
 
-        let mut cmd_parts: Vec<String> = Vec::with_capacity(
-            1 + jvm_args.len() + 1 + game_args.len(),
-        );
+        let mut cmd_parts: Vec<String> =
+            Vec::with_capacity(1 + jvm_args.len() + 1 + game_args.len());
         cmd_parts.push(java_path.clone());
         cmd_parts.extend(jvm_args);
         cmd_parts.push(main_class);
@@ -805,12 +795,10 @@ impl MinecraftLauncher {
         crate::success!("Minecraft PID: {}", pid);
         crate::info!("Waiting for game to close... (Ctrl+C to force quit)\n");
 
-        let status = child.wait().unwrap_or_else(|e| {
-            crate::warn_msg!("Error waiting for Minecraft: {}", e);
-            std::process::ExitStatus::default()
-        });
-
-        Ok(status.code().unwrap_or(0))
+        let status = child
+            .wait()
+            .map_err(|e| AppError::Generic(format!("Error waiting for Minecraft: {e}")))?;
+        Ok(status.code().unwrap_or(1))
     }
 
     /// Download a Minecraft version without launching.
@@ -819,18 +807,17 @@ impl MinecraftLauncher {
         version_id: Option<&str>,
         skip_assets: bool,
     ) -> AppResult<(String, serde_json::Value)> {
-        let (version_id, version_data) =
-            self.versions.get_version_info(version_id)?;
+        let (version_id, version_data) = self.versions.get_version_info(version_id)?;
 
-        let version_game_dir = self
-            .game_dir
-            .join("versions")
-            .join(&version_id);
-        std::fs::create_dir_all(&version_game_dir).ok();
+        let version_game_dir = self.game_dir.join("versions").join(&version_id);
+        std::fs::create_dir_all(&version_game_dir)?;
 
         println!("\n  Target:  Minecraft {}", version_id);
         println!("  Dir:     {}", self.game_dir.display());
-        println!("  Game:    {}  (version-isolated)\n", version_game_dir.display());
+        println!(
+            "  Game:    {}  (version-isolated)\n",
+            version_game_dir.display()
+        );
 
         println!("[1/3] Client jar...");
         let jar = self
@@ -842,14 +829,12 @@ impl MinecraftLauncher {
         println!("[2/3] Libraries + natives...");
         let natives_dir = self.game_dir.join("natives").join(&version_id);
         if natives_dir.exists() {
-            std::fs::remove_dir_all(&natives_dir).ok();
+            std::fs::remove_dir_all(&natives_dir)?;
         }
-        std::fs::create_dir_all(&natives_dir).ok();
-        let lib_jars = self.versions.download_libraries(
-            &version_data,
-            &natives_dir,
-            self.threads,
-        )?;
+        std::fs::create_dir_all(&natives_dir)?;
+        let lib_jars =
+            self.versions
+                .download_libraries(&version_data, &natives_dir, self.threads)?;
         let lib_count = lib_jars.len();
         let lib_mb: f64 = lib_jars
             .iter()
@@ -862,8 +847,7 @@ impl MinecraftLauncher {
             println!("[3/3] Assets skipped (--no-assets).");
         } else {
             println!("[3/3] Assets...");
-            self.versions
-                .download_assets(&version_data, self.threads)?;
+            self.versions.download_assets(&version_data, self.threads)?;
         }
 
         let total_mb = jar_mb + lib_mb;
@@ -885,18 +869,12 @@ impl MinecraftLauncher {
                 acc["username"].as_str().unwrap_or("?"),
                 acc["type"].as_str().unwrap_or("?")
             );
-            println!(
-                "    Launch:  mc-launcher play -v {}",
-                version_id
-            );
+            println!("    Launch:  mc-launcher play -v {}", version_id);
         } else {
             println!("    No account saved yet. Login first:");
             println!("      mc-launcher login");
             println!("    Then launch:");
-            println!(
-                "      mc-launcher play -v {}",
-                version_id
-            );
+            println!("      mc-launcher play -v {}", version_id);
         }
 
         for loader in &["fabric", "forge", "neoforge"] {

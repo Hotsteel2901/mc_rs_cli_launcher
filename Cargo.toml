@@ -27,6 +27,8 @@ thiserror = "1"
 anyhow = "1"
 indicatif = "0.17"
 keyring = "2"
+tempfile = "3"
+getrandom = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"

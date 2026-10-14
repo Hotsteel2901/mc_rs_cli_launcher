@@ -22,10 +22,7 @@ impl FabricManager {
     }
 
     /// Get available Fabric loader versions for a Minecraft version.
-    pub fn get_available_versions(
-        &self,
-        mc_version: Option<&str>,
-    ) -> AppResult<serde_json::Value> {
+    pub fn get_available_versions(&self, mc_version: Option<&str>) -> AppResult<serde_json::Value> {
         let url = if let Some(mcv) = mc_version {
             format!("{}/versions/loader/{}", FABRIC_META, mcv)
         } else {
@@ -64,19 +61,13 @@ impl FabricManager {
         Ok(serde_json::from_slice(&body)?)
     }
 
-    /// Convert a Maven name to a relative path.
-    fn maven_path(name: &str) -> String {
-        let parts: Vec<&str> = name.split(':').collect();
-        let (g, a, v) = (parts[0], parts[1], parts[2]);
-        format!("{}/{}/{}/{}-{}.jar", g.replace('.', "/"), a, v, a, v)
-    }
-
     /// Install Fabric loader.
     pub fn install(
         &self,
         mc_version: &str,
         loader_version_id: Option<&str>,
     ) -> AppResult<(Vec<PathBuf>, serde_json::Value)> {
+        crate::util::validate_component(mc_version)?;
         let versions = self.get_available_versions(Some(mc_version))?;
         let arr = versions.as_array();
 
@@ -121,24 +112,15 @@ impl FabricManager {
 
             for lib in libs {
                 let name = lib["name"].as_str().unwrap_or("");
-                let url_base = lib["url"]
-                    .as_str()
-                    .unwrap_or("https://maven.fabricmc.net/");
-                let rel_path = Self::maven_path(name);
+                let url_base = lib["url"].as_str().unwrap_or("https://maven.fabricmc.net/");
+                let rel_path = crate::util::maven_rel_path(name)?;
                 let jar_path = self.lib_dir.join(&rel_path);
 
-                if !jar_path.exists() {
-                    let full_url =
-                        format!("{}/{}", url_base.trim_end_matches('/'), rel_path);
+                if !http::cached_file_valid(&jar_path, None) {
+                    let full_url = format!("{}/{}", url_base.trim_end_matches('/'), rel_path);
                     let label = name.split(':').nth(1).unwrap_or("unknown");
-                    if let Err(e) = http::download_file(
-                        &full_url,
-                        &jar_path,
-                        label,
-                        None,
-                        3,
-                        false,
-                    ) {
+                    if let Err(e) = http::download_file(&full_url, &jar_path, label, None, 3, false)
+                    {
                         return Err(AppError::Http(format!(
                             "Failed to download Fabric library {}: {}",
                             label, e
@@ -149,25 +131,14 @@ impl FabricManager {
             }
         }
 
-        crate::success!(
-            "Fabric {} installed ({} jars)",
-            loader_ver,
-            all_jars.len()
-        );
+        crate::success!("Fabric {} installed ({} jars)", loader_ver, all_jars.len());
 
         // Save profile
         let profile_path = self
             .lib_dir
             .join("fabric")
             .join(format!("fabric-profile-{}.json", mc_version));
-        if let Some(parent) = profile_path.parent() {
-            std::fs::create_dir_all(parent).ok();
-        }
-        std::fs::write(
-            &profile_path,
-            serde_json::to_string_pretty(&profile).unwrap_or_default(),
-        )
-        .ok();
+        crate::util::atomic_write(&profile_path, &serde_json::to_vec_pretty(&profile)?)?;
 
         Ok((all_jars, profile))
     }
