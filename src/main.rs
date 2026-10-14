@@ -9,9 +9,10 @@ mod error;
 mod fabric;
 mod forge;
 mod http;
+mod installer;
 mod java;
-pub mod log;
 mod launcher;
+pub mod log;
 mod mod_manager;
 mod modrinth;
 mod neoforge;
@@ -46,15 +47,34 @@ fn parse_ram(value: &str) -> Result<u32, String> {
     })?;
     let num: f64 = caps[1].parse().unwrap_or(0.0);
     let unit = caps.get(2).map(|m| m.as_str()).unwrap_or("M");
-    if unit.starts_with('G') {
-        Ok((num * 1024.0) as u32)
+    let mb = if unit.starts_with('G') {
+        num * 1024.0
     } else {
-        Ok(num as u32)
+        num
+    };
+    if !mb.is_finite() || mb < 128.0 || mb > u32::MAX as f64 {
+        return Err("RAM must be between 128 MB and 4294967295 MB".into());
     }
+    Ok(mb as u32)
 }
 
-fn main() {
-    let matches = Command::new("mc-launcher")
+fn parse_component(value: &str) -> Result<String, String> {
+    util::validate_component(value)?;
+    Ok(value.to_string())
+}
+
+fn parse_threads(value: &str) -> Result<usize, String> {
+    let n = value
+        .parse::<usize>()
+        .map_err(|_| "Threads must be an integer from 1 to 32")?;
+    if !(1..=32).contains(&n) {
+        return Err("Threads must be from 1 to 32".into());
+    }
+    Ok(n)
+}
+
+fn build_cli() -> Command {
+    Command::new("mc-launcher")
         .disable_version_flag(true)
         .version(env!("CARGO_PKG_VERSION"))
         .about(
@@ -91,18 +111,17 @@ fn main() {
              mc-launcher logout                      # Clear saved session",
         )
         // Global options
-        .arg(
-            arg!(-d --dir <DIR> "Game directory"),
-        )
+        .arg(arg!(-d --dir <DIR> "Game directory"))
         .arg(
             arg!(-t --threads <N> "Parallel download threads")
-                .value_parser(value_parser!(usize))
+                .value_parser(parse_threads)
                 .default_value("4"),
         )
         .arg(arg!(-j --java <PATH> "Path to Java executable"))
-        .arg(arg!(-v --version <VERSION> "Minecraft version"))
+        .arg(arg!(-v --version <VERSION> "Minecraft version").value_parser(parse_component))
         .arg(
-            arg!(-l --loader <LOADER> "Mod loader filter (fabric, forge, neoforge)"),
+            arg!(-l --loader <LOADER> "Mod loader filter (fabric, forge, neoforge)")
+                .value_parser(["fabric", "forge", "neoforge"]),
         )
         .arg(arg!(--"loader-version" <VERSION> "Specific loader version ID"))
         .arg(arg!(--"mod-version" <ID> "Specific mod version ID"))
@@ -111,45 +130,24 @@ fn main() {
                 .value_parser(parse_ram)
                 .default_value("4096"),
         )
-        .arg(
-            arg!(--width <PIXELS> "Game window width")
-                .value_parser(value_parser!(u32)),
-        )
+        .arg(arg!(--width <PIXELS> "Game window width").value_parser(value_parser!(u32).range(1..)))
         .arg(
             arg!(--height <PIXELS> "Game window height")
-                .value_parser(value_parser!(u32)),
+                .value_parser(value_parser!(u32).range(1..)),
         )
-        .arg(
-            arg!(--fabric "Launch with Fabric loader")
-                .action(ArgAction::SetTrue),
-        )
-        .arg(
-            arg!(--forge "Launch with Forge loader")
-                .action(ArgAction::SetTrue),
-        )
-        .arg(
-            arg!(--neoforge "Launch with NeoForge loader")
-                .action(ArgAction::SetTrue),
-        )
-        .arg(
-            arg!(--"no-assets" "Skip asset downloads")
-                .action(ArgAction::SetTrue),
-        )
+        .arg(arg!(--fabric "Launch with Fabric loader").action(ArgAction::SetTrue))
+        .arg(arg!(--forge "Launch with Forge loader").action(ArgAction::SetTrue))
+        .arg(arg!(--neoforge "Launch with NeoForge loader").action(ArgAction::SetTrue))
+        .arg(arg!(--"no-assets" "Skip asset downloads").action(ArgAction::SetTrue))
         .arg(
             arg!(--official "Force use official Mojang/Forge URLs (no mirror)")
                 .action(ArgAction::SetTrue),
         )
-        .arg(
-            arg!(--bmcl "Force use BMCLAPI mirror (大陆用户推荐)")
-                .action(ArgAction::SetTrue),
-        )
-        .arg(
-            arg!(--"device-code" "Use device code login")
-                .action(ArgAction::SetTrue),
-        )
+        .arg(arg!(--bmcl "Use BMCLAPI where supported (大陆用户推荐)").action(ArgAction::SetTrue))
+        .arg(arg!(--"device-code" "Use device code login").action(ArgAction::SetTrue))
         .arg(
             arg!(--limit <N> "Max search results")
-                .value_parser(value_parser!(u32))
+                .value_parser(value_parser!(u32).range(1..=100))
                 .default_value("10"),
         )
         // Positional: action
@@ -157,24 +155,60 @@ fn main() {
             arg!([ACTION] "Action to perform")
                 .default_value("play")
                 .value_parser([
-                    "login", "offline", "play", "launch", "download",
-                    "logout", "accounts", "list-versions", "list-loaders",
-                    "list-installed", "list-mods", "search", "search-more",
-                    "install-fabric", "install-forge", "install-neoforge",
-                    "install-mod", "disable-mod", "enable-mod", "uninstall-mod",
+                    "login",
+                    "offline",
+                    "play",
+                    "launch",
+                    "download",
+                    "logout",
+                    "accounts",
+                    "list-versions",
+                    "list-loaders",
+                    "list-installed",
+                    "list-mods",
+                    "search",
+                    "search-more",
+                    "install-fabric",
+                    "install-forge",
+                    "install-neoforge",
+                    "install-mod",
+                    "disable-mod",
+                    "enable-mod",
+                    "uninstall-mod",
                 ]),
         )
         // Positional: query
         .arg(arg!([QUERY] "Username (offline) or mod search query / mod slug"))
-        .get_matches();
+        .arg(arg!(--"launcher-version" "Print launcher version").action(ArgAction::Version))
+        .arg(arg!(--verbose "Enable diagnostic logging").action(ArgAction::SetTrue))
+        .group(
+            clap::ArgGroup::new("loader-choice")
+                .args(["loader", "fabric", "forge", "neoforge"])
+                .multiple(false),
+        )
+        .group(
+            clap::ArgGroup::new("source-choice")
+                .args(["official", "bmcl"])
+                .multiple(false),
+        )
+}
+
+fn main() {
+    let matches = build_cli().get_matches();
+    crate::log::set_verbose(matches.get_flag("verbose"));
 
     // Extract options
     let game_dir = PathBuf::from(
         matches
             .get_one::<String>("dir")
             .cloned()
-            .unwrap_or_else(|| crate::util::default_game_dir().to_string_lossy().to_string()),
+            .unwrap_or_else(|| {
+                crate::util::default_game_dir()
+                    .to_string_lossy()
+                    .to_string()
+            }),
     );
+    let game_dir = util::absolute_path(&game_dir).unwrap_or_else(|e| crate::die!(e));
     let threads = *matches.get_one::<usize>("threads").unwrap();
     let mut action = matches.get_one::<String>("ACTION").unwrap().clone();
     let query = matches.get_one::<String>("QUERY").cloned();
@@ -213,7 +247,7 @@ fn main() {
         SourceMode::BmclApi => "BMCLAPI mirror",
         _ => "auto",
     };
-    crate::info!("Download source: {} (fallback enabled)", mode_label);
+    crate::debug_msg!("Download source: {}", mode_label);
 
     // Normalize alias
     if action == "launch" {
@@ -223,9 +257,17 @@ fn main() {
     // Resolve loader from flags
     let loader = resolve_loader(loader_arg, fabric_flag, forge_flag, neoforge_flag);
 
-    let mut launcher = MinecraftLauncher::new(&game_dir, threads);
+    if no_assets && action != "download" {
+        crate::die!("--no-assets is only supported for the download action.");
+    }
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build_global()
+        .unwrap_or_else(|e| crate::die!(format!("Cannot initialize download workers: {e}")));
+    let mut launcher =
+        MinecraftLauncher::new(&game_dir, threads).unwrap_or_else(|e| crate::die!(e));
     if let Some(ref j) = java_path {
-        launcher.set_java(j);
+        launcher.set_java(j).unwrap_or_else(|e| crate::die!(e));
     }
 
     // --- Dispatch ---
@@ -238,17 +280,25 @@ fn main() {
         "list-mods" => cmd_list_mods(&game_dir, mc_version),
         "search" => cmd_search(&game_dir, query, limit, mc_version, loader.as_deref()),
         "search-more" => cmd_search_more(&game_dir, query),
-        "install-fabric" => {
-            cmd_install_fabric(&game_dir, mc_version, loader_version.as_deref())
-        }
-        "install-forge" => {
-            cmd_install_forge(&game_dir, mc_version, loader_version.as_deref())
-        }
-        "install-neoforge" => {
-            cmd_install_neoforge(&game_dir, mc_version, loader_version.as_deref())
-        }
+        "install-fabric" => cmd_install_fabric(&game_dir, mc_version, loader_version.as_deref()),
+        "install-forge" => cmd_install_forge(
+            &game_dir,
+            mc_version,
+            loader_version.as_deref(),
+            java_path.as_deref(),
+        ),
+        "install-neoforge" => cmd_install_neoforge(
+            &game_dir,
+            mc_version,
+            loader_version.as_deref(),
+            java_path.as_deref(),
+        ),
         "install-mod" => cmd_install_mod(
-            &game_dir, query, mc_version, loader.as_deref(), mod_version.as_deref(),
+            &game_dir,
+            query,
+            mc_version,
+            loader.as_deref(),
+            mod_version.as_deref(),
         ),
         "disable-mod" => cmd_disable_mod(&game_dir, query, mc_version),
         "enable-mod" => cmd_enable_mod(&game_dir, query, mc_version),
@@ -257,7 +307,12 @@ fn main() {
         "offline" => cmd_offline(&mut launcher, query.as_deref().unwrap_or("Steve")),
         "download" => cmd_download(&mut launcher, mc_version.as_deref(), no_assets),
         "play" => cmd_play(
-            &mut launcher, mc_version.as_deref(), ram_mb, loader.as_deref(), width, height,
+            &mut launcher,
+            mc_version.as_deref(),
+            ram_mb,
+            loader.as_deref(),
+            width,
+            height,
         ),
         _ => {
             eprintln!("Unknown action: {}", action);
@@ -293,7 +348,7 @@ fn resolve_loader(
 // ─── command implementations ──────────────────────────────────────
 
 fn cmd_logout(launcher: &mut MinecraftLauncher) {
-    launcher.accounts.clear();
+    launcher.accounts.clear().unwrap_or_else(|e| crate::die!(e));
     println!("  Cleared all saved accounts.");
 }
 
@@ -376,7 +431,7 @@ fn cmd_list_loaders() {
         println!("  - {}", l);
     }
     println!("  Built-in loaders:");
-    for l in &["fabric", "forge", "neoforge", "quilt"] {
+    for l in &["fabric", "forge", "neoforge"] {
         println!("  - {}", l);
     }
     crate::info!(
@@ -385,10 +440,7 @@ fn cmd_list_loaders() {
     );
 }
 
-fn cmd_list_installed(
-    game_dir: &std::path::Path,
-    launcher: &MinecraftLauncher,
-) {
+fn cmd_list_installed(game_dir: &std::path::Path, launcher: &MinecraftLauncher) {
     crate::log::header("Locally Installed Minecraft Versions");
     let versions = ModManager::list_installed_versions(game_dir);
     if versions.is_empty() {
@@ -401,8 +453,7 @@ fn cmd_list_installed(
         let vdir = game_dir.join("versions").join(v);
         let jar = vdir.join(format!("{}.jar", v));
         let jar_size = if jar.exists() {
-            let size =
-                jar.metadata().map(|m| m.len()).unwrap_or(0) as f64 / 1_048_576.0;
+            let size = jar.metadata().map(|m| m.len()).unwrap_or(0) as f64 / 1_048_576.0;
             format!("  ({:.1} MB)", size)
         } else {
             String::new()
@@ -420,12 +471,15 @@ fn cmd_list_installed(
                 .join(format!("{}-profile-{}.json", loader, v))
                 .exists()
             {
-                tags.push(match *loader {
-                    "fabric" => "Fabric",
-                    "forge" => "Forge",
-                    "neoforge" => "NeoForge",
-                    _ => loader,
-                }.to_string());
+                tags.push(
+                    match *loader {
+                        "fabric" => "Fabric",
+                        "forge" => "Forge",
+                        "neoforge" => "NeoForge",
+                        _ => loader,
+                    }
+                    .to_string(),
+                );
             }
         }
         if mod_count > 0 {
@@ -529,8 +583,9 @@ fn cmd_search(
         .collect();
 
     for (i, h) in hits.iter().enumerate() {
-        let title =
-            h["title"].as_str().unwrap_or(h["slug"].as_str().unwrap_or("?"));
+        let title = h["title"]
+            .as_str()
+            .unwrap_or(h["slug"].as_str().unwrap_or("?"));
         let desc = h["description"]
             .as_str()
             .unwrap_or("")
@@ -563,9 +618,7 @@ fn cmd_search(
         );
         println!("      categories: {}", categories);
 
-        if let Some(support) =
-            support_map.get(h["project_id"].as_str().unwrap_or(""))
-        {
+        if let Some(support) = support_map.get(h["project_id"].as_str().unwrap_or("")) {
             if !support.is_empty() {
                 println!(
                     "      support: {}",
@@ -599,14 +652,8 @@ fn cmd_search_more(_game_dir: &std::path::Path, query: Option<String>) {
     let title = project["title"].as_str().unwrap_or(&slug);
     crate::log::header(title);
 
-    println!(
-        "  slug:        {}",
-        project["slug"].as_str().unwrap_or("?")
-    );
-    println!(
-        "  project id:  {}",
-        project["id"].as_str().unwrap_or("?")
-    );
+    println!("  slug:        {}", project["slug"].as_str().unwrap_or("?"));
+    println!("  project id:  {}", project["id"].as_str().unwrap_or("?"));
     println!(
         "  downloads:   {}",
         format_num(project["downloads"].as_u64().unwrap_or(0))
@@ -731,9 +778,7 @@ fn cmd_search_more(_game_dir: &std::path::Path, query: Option<String>) {
         let gv: Vec<&str> = v["game_versions"]
             .as_array()
             .map(|arr| {
-                let all: Vec<&str> = arr.iter()
-                    .filter_map(|x| x.as_str())
-                    .collect();
+                let all: Vec<&str> = arr.iter().filter_map(|x| x.as_str()).collect();
                 let start = if all.len() > 4 { all.len() - 4 } else { 0 };
                 all[start..].to_vec()
             })
@@ -772,7 +817,8 @@ fn cmd_install_fabric(
     crate::info!("Target MC version: {}", mc_version);
 
     let fm = FabricManager::new(game_dir);
-    let (all_jars, profile) = fm.install(&mc_version, loader_version)
+    let (all_jars, profile) = fm
+        .install(&mc_version, loader_version)
         .unwrap_or_else(|e| crate::die!(format!("Fabric install failed: {}", e)));
 
     crate::success!("Fabric Loader installed successfully!");
@@ -793,13 +839,15 @@ fn cmd_install_forge(
     game_dir: &std::path::Path,
     mc_version: Option<String>,
     loader_version: Option<&str>,
+    java: Option<&str>,
 ) {
     let mc_version = resolve_mc_version_or_latest(mc_version, game_dir);
     crate::log::header("Install Forge Loader");
     crate::info!("Target MC version: {}", mc_version);
 
     let fm = ForgeManager::new(game_dir);
-    let (installed_id, profile) = fm.install(&mc_version, loader_version)
+    let (installed_id, profile) = fm
+        .install(&mc_version, loader_version, java)
         .unwrap_or_else(|e| crate::die!(format!("Forge install failed: {}", e)));
 
     crate::success!("Forge Loader installed successfully!");
@@ -819,13 +867,15 @@ fn cmd_install_neoforge(
     game_dir: &std::path::Path,
     mc_version: Option<String>,
     loader_version: Option<&str>,
+    java: Option<&str>,
 ) {
     let mc_version = resolve_mc_version_or_latest(mc_version, game_dir);
     crate::log::header("Install NeoForge Loader");
     crate::info!("Target MC version: {}", mc_version);
 
     let nm = NeoForgeManager::new(game_dir);
-    let (installed_id, profile) = nm.install(&mc_version, loader_version)
+    let (installed_id, profile) = nm
+        .install(&mc_version, loader_version, java)
         .unwrap_or_else(|e| crate::die!(format!("NeoForge install failed: {}", e)));
 
     crate::success!("NeoForge Loader installed successfully!");
@@ -849,15 +899,16 @@ fn cmd_install_mod(
     mod_version: Option<&str>,
 ) {
     let slug = query.unwrap_or_else(|| {
-        crate::die!("Please provide a mod slug.\n  Example: mc-launcher install-mod sodium -v 1.21.4");
+        crate::die!(
+            "Please provide a mod slug.\n  Example: mc-launcher install-mod sodium -v 1.21.4"
+        );
     });
     let mc_version = resolve_mc_version(mc_version, game_dir);
 
     crate::log::header(&format!("Install Mod for MC {}", mc_version));
 
     let mm = ModManager::new(game_dir);
-    let (_paths, _version_data, project) =
-        mm.install(&slug, &mc_version, loader, mod_version);
+    let (_paths, _version_data, project) = mm.install(&slug, &mc_version, loader, mod_version);
 
     let title = project["title"].as_str().unwrap_or(&slug);
     let source = project["source"].as_str().unwrap_or("?");
@@ -876,10 +927,7 @@ fn cmd_install_mod(
             .join(format!("{}-profile-{}.json", l, mc_version))
             .exists()
         {
-            println!(
-                "  Launch with: mc-launcher play -v {} --{}",
-                mc_version, l
-            );
+            println!("  Launch with: mc-launcher play -v {} --{}", mc_version, l);
             return;
         }
     }
@@ -887,17 +935,10 @@ fn cmd_install_mod(
         "  Install a loader first, e.g.: mc-launcher install-fabric -v {}",
         mc_version
     );
-    println!(
-        "  Then launch: mc-launcher play -v {} --fabric",
-        mc_version
-    );
+    println!("  Then launch: mc-launcher play -v {} --fabric", mc_version);
 }
 
-fn cmd_disable_mod(
-    game_dir: &std::path::Path,
-    query: Option<String>,
-    mc_version: Option<String>,
-) {
+fn cmd_disable_mod(game_dir: &std::path::Path, query: Option<String>, mc_version: Option<String>) {
     let slug = query.unwrap_or_else(|| crate::die!("Provide a mod slug/name to disable."));
     let mc_version = resolve_mc_version(mc_version, game_dir);
     let mm = ModManager::new(game_dir);
@@ -911,13 +952,8 @@ fn cmd_disable_mod(
     }
 }
 
-fn cmd_enable_mod(
-    game_dir: &std::path::Path,
-    query: Option<String>,
-    mc_version: Option<String>,
-) {
-    let slug =
-        query.unwrap_or_else(|| crate::die!("Provide a mod slug/name to enable."));
+fn cmd_enable_mod(game_dir: &std::path::Path, query: Option<String>, mc_version: Option<String>) {
+    let slug = query.unwrap_or_else(|| crate::die!("Provide a mod slug/name to enable."));
     let mc_version = resolve_mc_version(mc_version, game_dir);
     let mm = ModManager::new(game_dir);
     if mm.enable_mod(&slug, &mc_version) {
@@ -935,8 +971,7 @@ fn cmd_uninstall_mod(
     query: Option<String>,
     mc_version: Option<String>,
 ) {
-    let slug = query
-        .unwrap_or_else(|| crate::die!("Provide a mod slug/name to uninstall."));
+    let slug = query.unwrap_or_else(|| crate::die!("Provide a mod slug/name to uninstall."));
     let mc_version = resolve_mc_version(mc_version, game_dir);
     let mm = ModManager::new(game_dir);
     let deleted = mm.uninstall_mod(&slug, &mc_version);
@@ -970,13 +1005,16 @@ fn cmd_login(launcher: &mut MinecraftLauncher, device_code: bool) {
     }
 
     let uid = crate::util::format_uuid(&auth.uuid);
-    launcher.accounts.set_msa(
-        &auth.username,
-        &uid,
-        &auth.mc_token,
-        &auth.refresh_token,
-        auth.expires_at,
-    );
+    launcher
+        .accounts
+        .set_msa(
+            &auth.username,
+            &uid,
+            &auth.mc_token,
+            &auth.refresh_token,
+            auth.expires_at,
+        )
+        .unwrap_or_else(|e| crate::die!(e));
 
     crate::success!("Logged in as: {}", auth.username);
     crate::info!("Credentials saved. Next steps:");
@@ -986,18 +1024,17 @@ fn cmd_login(launcher: &mut MinecraftLauncher, device_code: bool) {
 
 fn cmd_offline(launcher: &mut MinecraftLauncher, username: &str) {
     crate::log::header(&format!("Offline Mode: {}", username));
-    launcher.accounts.set_offline(username);
+    launcher
+        .accounts
+        .set_offline(username)
+        .unwrap_or_else(|e| crate::die!(e));
     crate::success!("Offline account saved: {}", username);
     crate::info!("Next steps:");
     crate::info!("  mc-launcher download -v <version>   # download a Minecraft version");
     crate::info!("  mc-launcher play -v <version>       # launch the game");
 }
 
-fn cmd_download(
-    launcher: &mut MinecraftLauncher,
-    mc_version: Option<&str>,
-    no_assets: bool,
-) {
+fn cmd_download(launcher: &mut MinecraftLauncher, mc_version: Option<&str>, no_assets: bool) {
     crate::log::header("Download Only");
     launcher
         .download_version(mc_version, no_assets)
@@ -1031,10 +1068,7 @@ fn cmd_play(
 
 // ─── helpers ───────────────────────────────────────────────────────
 
-fn resolve_mc_version(
-    mc_version: Option<String>,
-    game_dir: &std::path::Path,
-) -> String {
+fn resolve_mc_version(mc_version: Option<String>, game_dir: &std::path::Path) -> String {
     if let Some(v) = mc_version {
         return v;
     }
@@ -1049,53 +1083,11 @@ fn resolve_mc_version(
     v
 }
 
-fn resolve_mc_version_or_latest(
-    mc_version: Option<String>,
-    game_dir: &std::path::Path,
-) -> String {
-    if let Some(v) = mc_version {
-        let vm = VersionManager::new(game_dir);
-        let manifest = vm.fetch_manifest().unwrap_or_else(|e| {
-            crate::die!(format!("Cannot fetch version manifest: {}", e));
-        });
-        let known: std::collections::HashSet<String> = manifest["versions"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v["id"].as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        if !known.contains(&v) {
-            let mut close: Vec<_> = known
-                .iter()
-                .filter(|kv| kv.starts_with(&v[..v.len().min(4)]))
-                .cloned()
-                .collect();
-            close.sort();
-            let hint = if close.is_empty() {
-                String::new()
-            } else {
-                let items: Vec<_> = close.iter().rev().take(8).rev().cloned().collect();
-                format!("Did you mean: {}", items.join(", "))
-            };
-            crate::die!(
-                format!("Minecraft version '{}' does not exist.", v),
-                &hint
-            );
-        }
-        return v;
-    }
-
-    let vm = VersionManager::new(game_dir);
-    let manifest = vm.fetch_manifest().unwrap_or_else(|e| {
-        crate::die!(format!("Cannot fetch version manifest: {}", e));
-    });
-    manifest["latest"]["release"]
-        .as_str()
-        .unwrap_or("1.21.4")
-        .to_string()
+fn resolve_mc_version_or_latest(mc_version: Option<String>, game_dir: &std::path::Path) -> String {
+    VersionManager::new(game_dir)
+        .get_version_info(mc_version.as_deref())
+        .unwrap_or_else(|e| crate::die!(format!("Cannot resolve Minecraft version: {e}")))
+        .0
 }
 
 fn format_num(n: u64) -> String {
@@ -1108,4 +1100,55 @@ fn format_num(n: u64) -> String {
         result.push(c);
     }
     result.chars().rev().collect()
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+    #[test]
+    fn command_definition_is_consistent() {
+        build_cli().debug_assert();
+    }
+    #[test]
+    fn rejects_conflicts_and_out_of_range_arguments() {
+        for args in [
+            vec!["--forge", "--fabric"],
+            vec!["--loader", "forge", "--neoforge"],
+            vec!["--official", "--bmcl"],
+            vec!["--threads", "0"],
+            vec!["--threads", "33"],
+            vec!["--width", "0"],
+            vec!["--limit", "101"],
+            vec!["-v", "../escape"],
+            vec!["--loader", "quilt"],
+            vec!["--ram", "0"],
+        ] {
+            assert!(build_cli()
+                .try_get_matches_from(std::iter::once("mc-launcher").chain(args))
+                .is_err());
+        }
+    }
+    #[test]
+    fn ram_units_and_overflows() {
+        assert_eq!(parse_ram("4G").unwrap(), 4096);
+        assert_eq!(parse_ram("1.5 gb").unwrap(), 1536);
+        assert_eq!(parse_ram("2048").unwrap(), 2048);
+        for value in ["", "-1G", "0", "0.1M", "999999999999G", "NaN", "4T"] {
+            assert!(parse_ram(value).is_err());
+        }
+    }
+    #[test]
+    fn launcher_and_minecraft_version_flags_are_distinct() {
+        let parsed = build_cli()
+            .try_get_matches_from(["mc-launcher", "download", "-v", "1.21.4"])
+            .unwrap();
+        assert_eq!(parsed.get_one::<String>("version").unwrap(), "1.21.4");
+        assert_eq!(
+            build_cli()
+                .try_get_matches_from(["mc-launcher", "--launcher-version"])
+                .unwrap_err()
+                .kind(),
+            clap::error::ErrorKind::DisplayVersion
+        );
+    }
 }

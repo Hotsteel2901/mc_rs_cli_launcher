@@ -17,13 +17,8 @@ impl ModManager {
 
     /// Get the mods directory for a Minecraft version.
     pub fn mods_dir(&self, mc_version: &str) -> PathBuf {
-        let d = self
-            .game_dir
-            .join("versions")
-            .join(mc_version)
-            .join("mods");
-        std::fs::create_dir_all(&d).ok();
-        d
+        crate::util::validate_component(mc_version).unwrap_or_else(|e| crate::die!(e));
+        self.game_dir.join("versions").join(mc_version).join("mods")
     }
 
     /// List installed Minecraft versions.
@@ -46,18 +41,16 @@ impl ModManager {
 
         // Sort by version number
         vers.sort_by(|a, b| {
-            let nums_a: Vec<u32> =
-                regex::Regex::new(r"(\d+)")
-                    .unwrap()
-                    .find_iter(a)
-                    .filter_map(|m| m.as_str().parse().ok())
-                    .collect();
-            let nums_b: Vec<u32> =
-                regex::Regex::new(r"(\d+)")
-                    .unwrap()
-                    .find_iter(b)
-                    .filter_map(|m| m.as_str().parse().ok())
-                    .collect();
+            let nums_a: Vec<u32> = regex::Regex::new(r"(\d+)")
+                .unwrap()
+                .find_iter(a)
+                .filter_map(|m| m.as_str().parse().ok())
+                .collect();
+            let nums_b: Vec<u32> = regex::Regex::new(r"(\d+)")
+                .unwrap()
+                .find_iter(b)
+                .filter_map(|m| m.as_str().parse().ok())
+                .collect();
             nums_a.cmp(&nums_b)
         });
         vers
@@ -71,11 +64,13 @@ impl ModManager {
         game_version: Option<&str>,
         loader: Option<&str>,
     ) -> Vec<serde_json::Value> {
-        let mut facets: Vec<serde_json::Value> =
-            vec![serde_json::json!(["project_type:mod"])];
+        let mut facets: Vec<serde_json::Value> = vec![serde_json::json!(["project_type:mod"])];
 
         if let Some(l) = loader {
-            facets.push(serde_json::json!([format!("categories:{}", l.to_lowercase())]));
+            facets.push(serde_json::json!([format!(
+                "categories:{}",
+                l.to_lowercase()
+            )]));
         }
         if let Some(gv) = game_version {
             facets.push(serde_json::json!([format!("versions:{}", gv)]));
@@ -89,10 +84,8 @@ impl ModManager {
             Some(&serde_json::json!(facets)),
         );
 
-        let mut hits: Vec<serde_json::Value> = result["hits"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
+        let mut hits: Vec<serde_json::Value> =
+            result["hits"].as_array().cloned().unwrap_or_default();
         for h in &mut hits {
             h["source"] = serde_json::json!("modrinth");
         }
@@ -173,8 +166,7 @@ impl ModManager {
                         None => true,
                     };
                     if insert {
-                        support
-                            .insert(l.clone(), (top_mc.clone(), mod_ver.clone()));
+                        support.insert(l.clone(), (top_mc.clone(), mod_ver.clone()));
                     }
                 }
             }
@@ -250,6 +242,23 @@ impl ModManager {
         loader: Option<&str>,
         version_id: Option<&str>,
     ) -> (Vec<PathBuf>, serde_json::Value, serde_json::Value) {
+        self.install_inner(
+            slug,
+            mc_version,
+            loader,
+            version_id,
+            &mut std::collections::HashSet::new(),
+        )
+    }
+
+    fn install_inner(
+        &self,
+        slug: &str,
+        mc_version: &str,
+        loader: Option<&str>,
+        version_id: Option<&str>,
+        visiting: &mut std::collections::HashSet<String>,
+    ) -> (Vec<PathBuf>, serde_json::Value, serde_json::Value) {
         crate::info!("Resolving mod: {}...", slug);
         let loader = self.pick_loader(mc_version, loader);
         if let Some(ref l) = loader {
@@ -258,6 +267,11 @@ impl ModManager {
 
         let project = modrinth::get_project(slug);
         let project_id = project["id"].as_str().unwrap_or(slug);
+        if !visiting.insert(project_id.to_string()) {
+            crate::die!(format!(
+                "Cyclic mod dependency detected at {slug}; installation stopped."
+            ));
+        }
 
         let versions = modrinth::get_project_versions(
             project_id,
@@ -280,10 +294,7 @@ impl ModManager {
 
             let support = self.loader_support(project_id);
             if !support.is_empty() {
-                println!(
-                    "\n  Available support for '{}':",
-                    proj_title
-                );
+                println!("\n  Available support for '{}':", proj_title);
                 println!("    {}", Self::format_loader_support(&support));
                 println!();
             }
@@ -301,35 +312,26 @@ impl ModManager {
                 .find(|v| v["id"].as_str() == Some(vid))
                 .cloned()
                 .unwrap_or_else(|| {
-                    crate::die!(format!(
-                        "Version '{}' not found for {}",
-                        vid, proj_title
-                    ));
+                    crate::die!(format!("Version '{}' not found for {}", vid, proj_title));
                 })
         } else {
             // Sort: loader match first, then by date
             versions_arr.sort_by(|a, b| {
                 let a_match = loader.as_ref().is_none_or(|l| {
-                    a["loaders"]
-                        .as_array()
-                        .is_some_and(|arr| {
-                            arr.iter().any(|v| {
-                                v.as_str().is_some_and(|s| {
-                                    s.to_lowercase() == l.to_lowercase()
-                                })
-                            })
+                    a["loaders"].as_array().is_some_and(|arr| {
+                        arr.iter().any(|v| {
+                            v.as_str()
+                                .is_some_and(|s| s.to_lowercase() == l.to_lowercase())
                         })
+                    })
                 });
                 let b_match = loader.as_ref().is_none_or(|l| {
-                    b["loaders"]
-                        .as_array()
-                        .is_some_and(|arr| {
-                            arr.iter().any(|v| {
-                                v.as_str().is_some_and(|s| {
-                                    s.to_lowercase() == l.to_lowercase()
-                                })
-                            })
+                    b["loaders"].as_array().is_some_and(|arr| {
+                        arr.iter().any(|v| {
+                            v.as_str()
+                                .is_some_and(|s| s.to_lowercase() == l.to_lowercase())
                         })
+                    })
                 });
                 if a_match != b_match {
                     if a_match {
@@ -391,7 +393,7 @@ impl ModManager {
         println!("    Loaders:       {}", loaders_str);
 
         // Check dependencies
-        self.check_dependencies(&target, mc_version, loader.as_deref());
+        self.check_dependencies(&target, mc_version, loader.as_deref(), visiting);
 
         let dest_dir = self.mods_dir(mc_version);
         let l = if loader.is_some() {
@@ -399,7 +401,8 @@ impl ModManager {
         } else {
             proj_title.to_string()
         };
-        let paths = modrinth::download_version_files(&target, &dest_dir, &l);
+        let paths = modrinth::download_version_files(&target, &dest_dir, &l)
+            .unwrap_or_else(|e| crate::die!(format!("Mod installation failed: {e}")));
         let total_size: u64 = paths
             .iter()
             .filter_map(|p| p.metadata().ok().map(|m| m.len()))
@@ -411,6 +414,7 @@ impl ModManager {
             dest_dir.display()
         );
 
+        visiting.remove(project_id);
         (paths, target, project)
     }
 
@@ -420,6 +424,7 @@ impl ModManager {
         version_data: &serde_json::Value,
         mc_version: &str,
         loader: Option<&str>,
+        visiting: &mut std::collections::HashSet<String>,
     ) {
         let deps: Vec<&serde_json::Value> = version_data["dependencies"]
             .as_array()
@@ -489,17 +494,14 @@ impl ModManager {
 
             let dep_key_lower = dep_slug.to_lowercase();
             let dep_title_lower = dep_title.to_lowercase().replace(' ', "_");
-            let present = existing_jars.iter().any(|n| {
-                n.contains(&dep_key_lower) || n.contains(&dep_title_lower)
-            });
+            let present = existing_jars
+                .iter()
+                .any(|n| n.contains(&dep_key_lower) || n.contains(&dep_title_lower));
 
             match dep_type {
                 "required" => {
                     if present {
-                        crate::info!(
-                            "[dep: required] {} -- already installed",
-                            dep_title
-                        );
+                        crate::info!("[dep: required] {} -- already installed", dep_title);
                     } else {
                         required_missing.push((
                             dep_title.to_string(),
@@ -511,10 +513,7 @@ impl ModManager {
                 }
                 _ => {
                     if present {
-                        crate::info!(
-                            "[dep: optional] {} -- already installed",
-                            dep_title
-                        );
+                        crate::info!("[dep: optional] {} -- already installed", dep_title);
                     }
                     optional_list.push((
                         dep_title.to_string(),
@@ -535,9 +534,7 @@ impl ModManager {
         crate::log::header("Dependencies");
 
         if !required_missing.is_empty() {
-            println!(
-                "  \x1b[1m\x1b[91m[ MUST INSTALL ] Required dependencies:\x1b[0m"
-            );
+            println!("  \x1b[1m\x1b[91m[ MUST INSTALL ] Required dependencies:\x1b[0m");
             for (title, slug, ver, mc) in &required_missing {
                 println!("    \x1b[91m- {}\x1b[0m", title);
                 println!("      slug:    {}", slug);
@@ -554,9 +551,7 @@ impl ModManager {
         }
 
         if !optional_list.is_empty() {
-            println!(
-                "  \x1b[1m\x1b[93m[ RECOMMENDED ] Optional dependencies:\x1b[0m"
-            );
+            println!("  \x1b[1m\x1b[93m[ RECOMMENDED ] Optional dependencies:\x1b[0m");
             for (title, slug, ver, mc, present) in &optional_list {
                 let mark = if *present {
                     "\x1b[92m[installed]\x1b[0m "
@@ -582,7 +577,7 @@ impl ModManager {
                 "{} required dependency(ies) missing. Install them first, or the mod may not load.",
                 required_missing.len()
             );
-            
+
             // Auto-install required dependencies
             print!("\n  Auto-install missing dependencies? [y/N]: ");
             use std::io::{self, Write};
@@ -593,7 +588,7 @@ impl ModManager {
                 if answer == "y" || answer == "yes" {
                     for (title, slug, _ver, _mc) in &required_missing {
                         crate::info!("Installing dependency: {} ({})", title, slug);
-                        self.install(slug, mc_version, loader, None);
+                        self.install_inner(slug, mc_version, loader, None, visiting);
                         crate::success!("Installed: {}", title);
                     }
                 }
@@ -611,8 +606,11 @@ impl ModManager {
             files.sort_by_key(|e| e.file_name());
             for f in files {
                 let name = f.file_name().to_string_lossy().to_string();
+                if !f.file_type().is_ok_and(|kind| kind.is_file()) {
+                    continue;
+                }
                 let size = f.metadata().map(|m| m.len()).unwrap_or(0);
-                if name.ends_with(".disabled") {
+                if name.ends_with(".jar.disabled") {
                     results.push((name[..name.len() - 9].to_string(), false, size));
                 } else if name.ends_with(".jar") {
                     results.push((name, true, size));
@@ -622,109 +620,122 @@ impl ModManager {
         results
     }
 
-    /// Disable a mod.
+    /// An exact filename wins; fuzzy queries must identify exactly one regular file.
+    fn find_mod(&self, query: &str, mc_version: &str, enabled: Option<bool>) -> Option<PathBuf> {
+        if crate::util::validate_component(query).is_err() {
+            return None;
+        }
+        let candidates: Vec<_> = std::fs::read_dir(self.mods_dir(mc_version))
+            .ok()?
+            .flatten()
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+            .map(|entry| entry.path())
+            .filter(|path| {
+                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                match enabled {
+                    Some(true) => name.ends_with(".jar"),
+                    Some(false) => name.ends_with(".jar.disabled"),
+                    None => name.ends_with(".jar") || name.ends_with(".jar.disabled"),
+                }
+            })
+            .collect();
+        let exact: Vec<_> = candidates
+            .iter()
+            .filter(|path| {
+                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                name == query
+                    || name == format!("{query}.jar")
+                    || name == format!("{query}.jar.disabled")
+            })
+            .collect();
+        if exact.len() == 1 {
+            return Some(exact[0].clone());
+        }
+        let matches: Vec<_> = candidates
+            .iter()
+            .filter(|path| {
+                path.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_lowercase()
+                    .contains(&query.to_lowercase())
+            })
+            .collect();
+        if matches.len() == 1 {
+            return Some(matches[0].clone());
+        }
+        if matches.len() > 1 {
+            crate::warn_msg!(
+                "Ambiguous mod query '{query}'; use an exact filename. No files changed."
+            );
+        }
+        None
+    }
+
     pub fn disable_mod(&self, slug: &str, mc_version: &str) -> bool {
-        let mods_dir = self.mods_dir(mc_version);
-        let target = mods_dir.join(format!("{}.jar", slug));
-        if target.exists() {
-            let new_name = format!("{}.jar.disabled", slug);
-            std::fs::rename(&target, mods_dir.join(&new_name)).is_ok()
-        } else {
-            // Fuzzy match
-            if let Ok(entries) = std::fs::read_dir(&mods_dir) {
-                for entry in entries.flatten() {
-                    let name = entry.file_name().to_string_lossy().to_lowercase();
-                    if name.ends_with(".jar")
-                        && name.contains(&slug.to_lowercase())
-                    {
-                        let new_name =
-                            format!("{}.disabled", entry.file_name().to_string_lossy());
-                        return std::fs::rename(
-                            entry.path(),
-                            mods_dir.join(&new_name),
-                        )
-                        .is_ok();
-                    }
-                }
-            }
-            false
-        }
+        let Some(source) = self.find_mod(slug, mc_version, Some(true)) else {
+            return false;
+        };
+        let dest = source.with_file_name(format!(
+            "{}.disabled",
+            source.file_name().unwrap_or_default().to_string_lossy()
+        ));
+        !dest.exists() && std::fs::rename(source, dest).is_ok()
     }
 
-    /// Enable a disabled mod.
     pub fn enable_mod(&self, slug: &str, mc_version: &str) -> bool {
-        let mods_dir = self.mods_dir(mc_version);
-        let target = mods_dir.join(format!("{}.jar.disabled", slug));
-        if target.exists() {
-            let new_name = &target.file_name().unwrap().to_string_lossy().to_string();
-            std::fs::rename(
-                &target,
-                mods_dir.join(&new_name[..new_name.len() - 9]),
-            )
-            .is_ok()
-        } else {
-            // Fuzzy match
-            if let Ok(entries) = std::fs::read_dir(&mods_dir) {
-                for entry in entries.flatten() {
-                    let name = entry.file_name().to_string_lossy().to_lowercase();
-                    if name.ends_with(".jar.disabled")
-                        && name.contains(&slug.to_lowercase())
-                    {
-                        let old_name =
-                            entry.file_name().to_string_lossy().to_string();
-                        return std::fs::rename(
-                            entry.path(),
-                            mods_dir.join(&old_name[..old_name.len() - 9]),
-                        )
-                        .is_ok();
-                    }
-                }
-            }
-            false
-        }
+        let Some(source) = self.find_mod(slug, mc_version, Some(false)) else {
+            return false;
+        };
+        let dest = source.with_extension("");
+        !dest.exists() && std::fs::rename(source, dest).is_ok()
     }
 
-    /// Uninstall a mod.
     pub fn uninstall_mod(&self, slug: &str, mc_version: &str) -> Vec<String> {
-        let mods_dir = self.mods_dir(mc_version);
-        let mut deleted = Vec::new();
-
-        for pattern in &[
-            format!("{}.jar", slug),
-            format!("{}.jar.disabled", slug),
-        ] {
-            let target = mods_dir.join(pattern);
-            if target.exists() {
-                std::fs::remove_file(&target).ok();
-                deleted.push(
-                    target
-                        .file_name()
-                        .unwrap()
-                        .to_string_lossy()
-                        .to_string(),
-                );
-            }
+        let Some(source) = self.find_mod(slug, mc_version, None) else {
+            return Vec::new();
+        };
+        if std::fs::remove_file(&source).is_ok() {
+            vec![source
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string()]
+        } else {
+            Vec::new()
         }
+    }
+}
 
-        if deleted.is_empty() {
-            // Fuzzy match
-            if let Ok(entries) = std::fs::read_dir(&mods_dir) {
-                for entry in entries.flatten() {
-                    let name = entry.file_name().to_string_lossy().to_lowercase();
-                    if (name.ends_with(".jar") || name.ends_with(".jar.disabled"))
-                        && name.contains(&slug.to_lowercase())
-                    {
-                        let fname = entry
-                            .file_name()
-                            .to_string_lossy()
-                            .to_string();
-                        std::fs::remove_file(entry.path()).ok();
-                        deleted.push(fname);
-                    }
-                }
-            }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn mod_lifecycle_and_ambiguous_queries() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = ModManager::new(dir.path());
+        let mods = manager.mods_dir("1.21.4");
+        std::fs::create_dir_all(&mods).unwrap();
+        for name in ["sodium.jar", "sodium-extra.jar"] {
+            std::fs::write(mods.join(name), b"fixture").unwrap();
         }
-
-        deleted
+        assert!(!manager.disable_mod("sod", "1.21.4"));
+        assert!(manager.uninstall_mod("sod", "1.21.4").is_empty());
+        assert!(manager.disable_mod("sodium.jar", "1.21.4"));
+        assert!(mods.join("sodium.jar.disabled").exists());
+        assert!(manager.enable_mod("sodium.jar.disabled", "1.21.4"));
+        assert_eq!(
+            manager.uninstall_mod("sodium.jar", "1.21.4"),
+            vec!["sodium.jar"]
+        );
+        assert!(mods.join("sodium-extra.jar").exists());
+        assert!(manager.uninstall_mod("../outside", "1.21.4").is_empty());
+    }
+    #[test]
+    fn listing_does_not_create_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = ModManager::new(dir.path());
+        assert!(manager.list_mods("1.21.4").is_empty());
+        assert!(!dir.path().join("versions").exists());
     }
 }

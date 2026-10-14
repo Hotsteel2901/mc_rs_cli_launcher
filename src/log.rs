@@ -135,20 +135,13 @@ macro_rules! die {
 
 pub fn header(title: &str) {
     if !QUIET.load(Ordering::Relaxed) {
-        println!(
-            "\n  {}\n",
-            clr(CLR_BOLD, &format!("=== {} ===", title))
-        );
+        println!("\n  {}\n", clr(CLR_BOLD, &format!("=== {} ===", title)));
     }
 }
 
 pub fn step(n: usize, total: usize, msg: &str) {
     if !QUIET.load(Ordering::Relaxed) {
-        println!(
-            "{} {}",
-            clr(CLR_CYAN, &format!("[{}/{}]", n, total)),
-            msg
-        );
+        println!("{} {}", clr(CLR_CYAN, &format!("[{}/{}]", n, total)), msg);
     }
 }
 

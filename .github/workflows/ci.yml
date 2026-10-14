@@ -1,0 +1,27 @@
+name: Rust CI
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: python .github/scripts/check.py cargo fmt --all -- --check
+      - run: python .github/scripts/check.py cargo test --locked --all-targets
+      - run: python .github/scripts/check.py cargo clippy --locked --all-targets -- -D warnings
+      - run: python .github/scripts/check.py cargo build --locked --release

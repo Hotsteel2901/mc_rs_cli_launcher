@@ -14,15 +14,54 @@ const MS_REDIRECT: &str = "https://login.live.com/oauth20_desktop.srf";
 const MS_SCOPE: &str = "service::user.auth.xboxlive.com::MBI_SSL";
 const MS_AUTH_URL: &str = "https://login.live.com/oauth20_authorize.srf";
 const MS_TOKEN_URL: &str = "https://login.live.com/oauth20_token.srf";
-const MS_DEVICE_AUTH: &str =
-    "https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode";
-const MS_DEVICE_TOKEN: &str =
-    "https://login.microsoftonline.com/consumers/oauth2/v2.0/token";
+const MS_DEVICE_AUTH: &str = "https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode";
+const MS_DEVICE_TOKEN: &str = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token";
 const XBL_AUTH_URL: &str = "https://user.auth.xboxlive.com/user/authenticate";
 const XSTS_AUTH_URL: &str = "https://xsts.auth.xboxlive.com/xsts/authorize";
-const MC_LOGIN_URL: &str =
-    "https://api.minecraftservices.com/authentication/login_with_xbox";
+const MC_LOGIN_URL: &str = "https://api.minecraftservices.com/authentication/login_with_xbox";
 const MC_PROFILE_URL: &str = "https://api.minecraftservices.com/minecraft/profile";
+
+fn client_id() -> String {
+    std::env::var("MC_LAUNCHER_CLIENT_ID")
+        .ok()
+        .filter(|id| !id.trim().is_empty())
+        .unwrap_or_else(|| MS_CLIENT_ID.into())
+}
+
+fn required_string<'a>(data: &'a serde_json::Value, key: &str) -> AppResult<&'a str> {
+    data[key]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| AppError::Generic(format!("Authentication response is missing {key}")))
+}
+
+fn parse_redirect(redirect: &str, expected_state: &str) -> AppResult<String> {
+    let url = url::Url::parse(redirect)?;
+    let expected = url::Url::parse(MS_REDIRECT)?;
+    if url.origin() != expected.origin()
+        || url.path() != expected.path()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return Err("Unexpected OAuth redirect URL".into());
+    }
+    let params: Vec<_> = url.query_pairs().collect();
+    let states: Vec<_> = params.iter().filter(|(key, _)| key == "state").collect();
+    if states.len() != 1 || states[0].1 != expected_state {
+        return Err("OAuth state mismatch. Start login again and use its redirect URL.".into());
+    }
+    if params.iter().any(|(key, _)| key == "error") {
+        return Err("Microsoft authorization was denied".into());
+    }
+    let codes: Vec<_> = params
+        .iter()
+        .filter(|(key, value)| key == "code" && !value.is_empty())
+        .collect();
+    if codes.len() != 1 {
+        return Err("Expected one authorization code in redirect URL".into());
+    }
+    Ok(codes[0].1.to_string())
+}
 
 pub struct MicrosoftAuth {
     pub access_token: String,
@@ -54,9 +93,14 @@ impl MicrosoftAuth {
 
     /// Browser-based Microsoft login. Opens browser, user pastes redirect URL.
     pub fn login(&mut self) -> AppResult<bool> {
+        let mut random = [0u8; 32];
+        getrandom::getrandom(&mut random)
+            .map_err(|e| AppError::Generic(format!("Cannot generate OAuth state: {e}")))?;
+        let state = hex::encode(random);
         let params = form_urlencoded::Serializer::new(String::new())
-            .append_pair("client_id", MS_CLIENT_ID)
+            .append_pair("client_id", &client_id())
             .append_pair("response_type", "code")
+            .append_pair("state", &state)
             .append_pair("scope", MS_SCOPE)
             .append_pair("redirect_uri", MS_REDIRECT)
             .append_pair("prompt", "select_account")
@@ -76,9 +120,7 @@ impl MicrosoftAuth {
         );
         println!("  |  [1/6] Microsoft Login                                      |");
         println!("  |  A browser will open. Sign in with your Microsoft account.  |");
-        println!(
-            "  |  After login, copy the FULL URL from the address bar.       |"
-        );
+        println!("  |  After login, copy the FULL URL from the address bar.       |");
         println!("  |  If browser does not open, go to:                           |");
         println!("  |    {}", auth_url);
         println!(
@@ -91,10 +133,7 @@ impl MicrosoftAuth {
 
         webbrowser::open(&auth_url).ok();
 
-        print!(
-            "{}",
-            log::clr("\x1b[96m", "  Paste redirect URL here: ")
-        );
+        print!("{}", log::clr("\x1b[96m", "  Paste redirect URL here: "));
         io::stdout().flush().ok();
         let mut redirect_url = String::new();
         if io::stdin().read_line(&mut redirect_url).is_err() {
@@ -105,46 +144,34 @@ impl MicrosoftAuth {
             return Err(AppError::Generic("No URL provided.".into()));
         }
 
-        let auth_code = url::Url::parse(&redirect_url)
-            .ok()
-            .and_then(|u| {
-                u.query_pairs()
-                    .find(|(k, _)| k == "code")
-                    .map(|(_, v)| v.to_string())
-            })
-            .unwrap_or_default();
-
-        if auth_code.is_empty() {
-            return Err(AppError::Generic(
-                "Could not find 'code' in the URL. Make sure you copied the FULL URL.".into()
-            ));
-        }
+        let auth_code = parse_redirect(&redirect_url, &state)?;
 
         crate::log::step(2, 6, "Exchanging auth code for Microsoft token...");
         let token_body = form_urlencoded::Serializer::new(String::new())
-            .append_pair("client_id", MS_CLIENT_ID)
+            .append_pair("client_id", &client_id())
             .append_pair("code", &auth_code)
             .append_pair("grant_type", "authorization_code")
             .append_pair("redirect_uri", MS_REDIRECT)
             .append_pair("scope", MS_SCOPE)
             .finish();
 
-        let (status, body) =
-            http::http_post_form(MS_TOKEN_URL, token_body.as_bytes())
-                .map_err(|e| AppError::Generic(format!("Token exchange failed: {}", e)))?;
+        let (status, body) = http::http_post_form(MS_TOKEN_URL, token_body.as_bytes())
+            .map_err(|e| AppError::Generic(format!("Token exchange failed: {}", e)))?;
         if status != 200 {
-            let hint =
-                String::from_utf8_lossy(&body).chars().take(500).collect::<String>();
-            return Err(AppError::Generic(format!("Token exchange failed ({}) -- {}", status, hint)));
+            let hint = String::from_utf8_lossy(&body)
+                .chars()
+                .take(500)
+                .collect::<String>();
+            return Err(AppError::Generic(format!(
+                "Token exchange failed ({}) -- {}",
+                status, hint
+            )));
         }
 
-        let ms_data: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        self.access_token =
-            ms_data["access_token"].as_str().unwrap_or("").into();
-        self.refresh_token =
-            ms_data["refresh_token"].as_str().unwrap_or("").into();
-        self.expires_at =
-            Self::now() + ms_data["expires_in"].as_f64().unwrap_or(3600.0);
+        let ms_data: serde_json::Value = serde_json::from_slice(&body)?;
+        self.access_token = required_string(&ms_data, "access_token")?.into();
+        self.refresh_token = ms_data["refresh_token"].as_str().unwrap_or("").into();
+        self.expires_at = Self::now() + ms_data["expires_in"].as_f64().unwrap_or(3600.0);
 
         match Self::do_full_auth_chain(&self.access_token) {
             Ok((mc, name, id, exp)) => {
@@ -179,31 +206,32 @@ impl MicrosoftAuth {
         );
 
         let dev_body = form_urlencoded::Serializer::new(String::new())
-            .append_pair("client_id", MS_CLIENT_ID)
-            .append_pair("scope", MS_SCOPE)
+            .append_pair("client_id", &client_id())
+            .append_pair("scope", "XboxLive.signin offline_access")
             .finish();
 
-        let (status, body) =
-            http::http_post_form(MS_DEVICE_AUTH, dev_body.as_bytes())
-                .map_err(|e| AppError::Generic(format!("Device code request failed: {}", e)))?;
+        let (status, body) = http::http_post_form(MS_DEVICE_AUTH, dev_body.as_bytes())
+            .map_err(|e| AppError::Generic(format!("Device code request failed: {}", e)))?;
         if status != 200 {
-            let hint =
-                String::from_utf8_lossy(&body).chars().take(500).collect::<String>();
-            return Err(AppError::Generic(format!("Device code request failed ({}) -- {}", status, hint)));
+            let hint = String::from_utf8_lossy(&body)
+                .chars()
+                .take(500)
+                .collect::<String>();
+            return Err(AppError::Generic(format!(
+                "Device code request failed ({}) -- {}",
+                status, hint
+            )));
         }
 
-        let dev_data: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let user_code = dev_data["user_code"].as_str().unwrap_or("");
-        let device_code_val = dev_data["device_code"].as_str().unwrap_or("");
-        let interval = dev_data["interval"].as_u64().unwrap_or(5);
+        let dev_data: serde_json::Value = serde_json::from_slice(&body)?;
+        let user_code = required_string(&dev_data, "user_code")?;
+        let device_code_val = required_string(&dev_data, "device_code")?;
+        let interval = dev_data["interval"].as_u64().unwrap_or(5).clamp(1, 60);
         let expires_in = dev_data["expires_in"].as_u64().unwrap_or(900);
 
         println!("  +------------------------------------------------------+");
         println!("  |   Open:  https://microsoft.com/link                  |");
-        println!(
-            "  |   Enter this code:  {: <33}|",
-            user_code
-        );
+        println!("  |   Enter this code:  {: <33}|", user_code);
         println!(
             "  |   Code expires in {:>2} minutes.                    |",
             expires_in / 60
@@ -211,30 +239,32 @@ impl MicrosoftAuth {
         println!("  +------------------------------------------------------+");
         println!("\n  Waiting for you to complete login...");
 
-        let deadline = Self::now() + expires_in as f64;
+        self.access_token.clear();
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(expires_in.min(3600));
         let mut poll_interval = interval;
 
-        while Self::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_secs(poll_interval));
+        while std::time::Instant::now() < deadline {
+            std::thread::sleep(
+                std::time::Duration::from_secs(poll_interval)
+                    .min(deadline.saturating_duration_since(std::time::Instant::now())),
+            );
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
             let poll_body = form_urlencoded::Serializer::new(String::new())
-                .append_pair("client_id", MS_CLIENT_ID)
-                .append_pair(
-                    "grant_type",
-                    "urn:ietf:params:oauth:grant-type:device_code",
-                )
+                .append_pair("client_id", &client_id())
+                .append_pair("grant_type", "urn:ietf:params:oauth:grant-type:device_code")
                 .append_pair("device_code", device_code_val)
                 .finish();
 
             match http::http_post_form(MS_DEVICE_TOKEN, poll_body.as_bytes()) {
                 Ok((200, body_bytes)) => {
-                    let ms_data: serde_json::Value =
-                        serde_json::from_slice(&body_bytes).unwrap();
-                    self.access_token =
-                        ms_data["access_token"].as_str().unwrap_or("").into();
-                    self.refresh_token =
-                        ms_data["refresh_token"].as_str().unwrap_or("").into();
-                    self.expires_at = Self::now()
-                        + ms_data["expires_in"].as_f64().unwrap_or(3600.0);
+                    let ms_data: serde_json::Value = serde_json::from_slice(&body_bytes)?;
+                    self.access_token = required_string(&ms_data, "access_token")?.into();
+                    self.refresh_token = ms_data["refresh_token"].as_str().unwrap_or("").into();
+                    self.expires_at =
+                        Self::now() + ms_data["expires_in"].as_f64().unwrap_or(3600.0);
                     break;
                 }
                 Ok((_, body_bytes)) => {
@@ -244,29 +274,37 @@ impl MicrosoftAuth {
                         Some("authorization_pending") => {
                             print!(
                                 "\r  Waiting... ({:.0}s left)",
-                                deadline - Self::now()
+                                deadline
+                                    .saturating_duration_since(std::time::Instant::now())
+                                    .as_secs_f64()
                             );
                             io::stdout().flush().ok();
                         }
                         Some("slow_down") => {
-                            poll_interval += 5;
+                            poll_interval = (poll_interval + 5).min(60);
                         }
                         _ => {
-                            let desc = err["error_description"]
-                                .as_str()
-                                .unwrap_or("unknown error");
-                            return Err(AppError::Generic(format!("Device login failed: {}", desc)));
+                            let desc = err["error_description"].as_str().unwrap_or("unknown error");
+                            return Err(AppError::Generic(format!(
+                                "Device login failed: {}",
+                                desc
+                            )));
                         }
                     }
                 }
                 Err(e) => {
-                    return Err(AppError::Generic(format!("Device token request failed: {}", e)));
+                    return Err(AppError::Generic(format!(
+                        "Device token request failed: {}",
+                        e
+                    )));
                 }
             }
         }
 
         if self.access_token.is_empty() {
-            return Err(AppError::Generic("Timed out waiting for device code login.".into()));
+            return Err(AppError::Generic(
+                "Timed out waiting for device code login.".into(),
+            ));
         }
 
         crate::success!("Authenticated with Microsoft!");
@@ -310,12 +348,9 @@ impl MicrosoftAuth {
 
             match http::http_post_json(XBL_AUTH_URL, &xbl_json) {
                 Ok((200, body)) => {
-                    let xbl: serde_json::Value =
-                        serde_json::from_slice(&body).map_err(|e| {
-                            format!("XBL parse error: {}", e)
-                        })?;
-                    xbl_token =
-                        xbl["Token"].as_str().unwrap_or("").to_string();
+                    let xbl: serde_json::Value = serde_json::from_slice(&body)
+                        .map_err(|e| format!("XBL parse error: {}", e))?;
+                    xbl_token = xbl["Token"].as_str().unwrap_or("").to_string();
                     _uhs = xbl["DisplayClaims"]["xui"][0]["uhs"]
                         .as_str()
                         .unwrap_or("")
@@ -340,37 +375,25 @@ impl MicrosoftAuth {
             "TokenType": "JWT",
         });
 
-        let (xsts_status, xsts_body) =
-            http::http_post_json(XSTS_AUTH_URL, &xsts_json)
-                .map_err(|e| format!("XSTS request failed: {}", e))?;
+        let (xsts_status, xsts_body) = http::http_post_json(XSTS_AUTH_URL, &xsts_json)
+            .map_err(|e| format!("XSTS request failed: {}", e))?;
 
         if xsts_status != 200 {
-            let err: serde_json::Value =
-                serde_json::from_slice(&xsts_body).unwrap_or_default();
+            let err: serde_json::Value = serde_json::from_slice(&xsts_body).unwrap_or_default();
             let xerr = err["XErr"].as_i64().unwrap_or(0);
             let msg = match xerr {
-                2148916233 => {
-                    "No Xbox Live profile. Create one at https://www.xbox.com/"
-                }
-                2148916235 => {
-                    "Xbox Live is not available in your country/region."
-                }
-                2148916236 => {
-                    "Adult verification required (South Korea age-gating)."
-                }
-                2148916237 => {
-                    "Adult verification required (South Korea age-gating)."
-                }
-                2148916238 => {
-                    "Child account -- must be added to an Xbox Family by an adult."
-                }
+                2148916233 => "No Xbox Live profile. Create one at https://www.xbox.com/",
+                2148916235 => "Xbox Live is not available in your country/region.",
+                2148916236 => "Adult verification required (South Korea age-gating).",
+                2148916237 => "Adult verification required (South Korea age-gating).",
+                2148916238 => "Child account -- must be added to an Xbox Family by an adult.",
                 _ => "XSTS error",
             };
             return Err(format!("XSTS auth failed: {} (XErr {})", msg, xerr));
         }
 
-        let xsts: serde_json::Value = serde_json::from_slice(&xsts_body)
-            .map_err(|e| format!("XSTS parse error: {}", e))?;
+        let xsts: serde_json::Value =
+            serde_json::from_slice(&xsts_body).map_err(|e| format!("XSTS parse error: {}", e))?;
         let xsts_token = xsts["Token"].as_str().unwrap_or("");
         let xsts_uhs = xsts["DisplayClaims"]["xui"][0]["uhs"]
             .as_str()
@@ -381,23 +404,19 @@ impl MicrosoftAuth {
             "identityToken": format!("XBL3.0 x={};{}", xsts_uhs, xsts_token),
         });
 
-        let (mc_status, mc_body) =
-            http::http_post_json(MC_LOGIN_URL, &mc_json)
-                .map_err(|e| format!("Minecraft login request failed: {}", e))?;
+        let (mc_status, mc_body) = http::http_post_json(MC_LOGIN_URL, &mc_json)
+            .map_err(|e| format!("Minecraft login request failed: {}", e))?;
 
         if mc_status != 200 {
-            return Err(format!(
-                "Minecraft login failed ({})",
-                mc_status
-            ));
+            return Err(format!("Minecraft login failed ({})", mc_status));
         }
 
-        let mc_auth: serde_json::Value = serde_json::from_slice(&mc_body)
-            .map_err(|e| format!("MC auth parse error: {}", e))?;
-        let mc_token =
-            mc_auth["access_token"].as_str().unwrap_or("").to_string();
-        let expires =
-            Self::now() + mc_auth["expires_in"].as_f64().unwrap_or(86400.0);
+        let mc_auth: serde_json::Value =
+            serde_json::from_slice(&mc_body).map_err(|e| format!("MC auth parse error: {}", e))?;
+        let mc_token = required_string(&mc_auth, "access_token")
+            .map_err(|e| e.to_string())?
+            .to_string();
+        let expires = Self::now() + mc_auth["expires_in"].as_f64().unwrap_or(86400.0);
 
         // Minecraft profile
         let (prof_status, prof_body) = http::http_get_hdrs(
@@ -407,16 +426,20 @@ impl MicrosoftAuth {
         .map_err(|e| format!("Profile request failed: {}", e))?;
 
         if prof_status != 200 {
-            return Err(format!(
-                "Minecraft profile fetch failed ({})",
-                prof_status
-            ));
+            return Err(format!("Minecraft profile fetch failed ({})", prof_status));
         }
 
         let profile: serde_json::Value = serde_json::from_slice(&prof_body)
             .map_err(|e| format!("Profile parse error: {}", e))?;
-        let username = profile["name"].as_str().unwrap_or("?").to_string();
-        let uuid = profile["id"].as_str().unwrap_or("?").to_string();
+        let username = required_string(&profile, "name")
+            .map_err(|e| e.to_string())?
+            .to_string();
+        let uuid = required_string(&profile, "id")
+            .map_err(|e| e.to_string())?
+            .to_string();
+        if uuid.len() != 32 || !uuid.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err("Invalid Minecraft profile UUID".into());
+        }
 
         Ok((mc_token, username, uuid, expires))
     }
@@ -424,24 +447,35 @@ impl MicrosoftAuth {
     /// Attempt to refresh an expired Microsoft token.
     pub fn try_refresh(&mut self, refresh_token: &str) -> bool {
         let body = form_urlencoded::Serializer::new(String::new())
-            .append_pair("client_id", MS_CLIENT_ID)
+            .append_pair("client_id", &client_id())
             .append_pair("refresh_token", refresh_token)
             .append_pair("grant_type", "refresh_token")
             .append_pair("scope", MS_SCOPE)
             .finish();
 
-        match http::http_post_form(MS_TOKEN_URL, body.as_bytes()) {
+        let response = http::http_post_form(MS_TOKEN_URL, body.as_bytes());
+        let response = if matches!(&response, Ok((400..=499, _))) {
+            let modern = form_urlencoded::Serializer::new(String::new())
+                .append_pair("client_id", &client_id())
+                .append_pair("refresh_token", refresh_token)
+                .append_pair("grant_type", "refresh_token")
+                .append_pair("scope", "XboxLive.signin offline_access")
+                .finish();
+            http::http_post_form(MS_DEVICE_TOKEN, modern.as_bytes())
+        } else {
+            response
+        };
+        match response {
             Ok((200, data_bytes)) => {
-                let data: serde_json::Value =
-                    serde_json::from_slice(&data_bytes).unwrap();
-                self.access_token =
-                    data["access_token"].as_str().unwrap_or("").to_string();
+                let Ok(data) = serde_json::from_slice::<serde_json::Value>(&data_bytes) else {
+                    return false;
+                };
+                self.access_token = data["access_token"].as_str().unwrap_or("").to_string();
                 self.refresh_token = data["refresh_token"]
                     .as_str()
                     .unwrap_or(refresh_token)
                     .to_string();
-                self.expires_at =
-                    Self::now() + data["expires_in"].as_f64().unwrap_or(3600.0);
+                self.expires_at = Self::now() + data["expires_in"].as_f64().unwrap_or(3600.0);
 
                 match Self::do_full_auth_chain(&self.access_token) {
                     Ok((mc, name, id, exp)) => {
@@ -455,10 +489,7 @@ impl MicrosoftAuth {
                 }
             }
             Ok((status, _)) => {
-                crate::warn_msg!(
-                    "Microsoft token refresh failed ({})",
-                    status
-                );
+                crate::warn_msg!("Microsoft token refresh failed ({})", status);
                 false
             }
             Err(e) => {
@@ -466,5 +497,34 @@ impl MicrosoftAuth {
                 false
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn redirect_origin_state_and_code_are_required() {
+        assert_eq!(
+            parse_redirect(
+                &format!("{MS_REDIRECT}?code=hello%2Bworld&state=nonce"),
+                "nonce"
+            )
+            .unwrap(),
+            "hello+world"
+        );
+        for suffix in [
+            "?code=x",
+            "?code=x&state=wrong",
+            "?state=nonce",
+            "?code=x&state=nonce&state=nonce",
+        ] {
+            assert!(parse_redirect(&format!("{MS_REDIRECT}{suffix}"), "nonce").is_err());
+        }
+        assert!(parse_redirect(
+            "https://example.org/oauth20_desktop.srf?code=x&state=nonce",
+            "nonce"
+        )
+        .is_err());
     }
 }
