@@ -267,7 +267,7 @@ fn main() {
     let mut launcher =
         MinecraftLauncher::new(&game_dir, threads).unwrap_or_else(|e| crate::die!(e));
     if let Some(ref j) = java_path {
-        launcher.set_java(j);
+        launcher.set_java(j).unwrap_or_else(|e| crate::die!(e));
     }
 
     // --- Dispatch ---

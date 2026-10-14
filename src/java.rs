@@ -16,11 +16,28 @@ const MOJANG_JAVA_MANIFEST: &str =
 pub fn java_major(java_path: &str) -> Option<u32> {
     let output = Command::new(java_path).arg("-version").output().ok()?;
 
-    let text = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        return None;
+    }
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
     // Match "version "1.8.0_..." or "version "17.0.1"..."
     let re = regex::Regex::new(r#"version "(?:1\.)?(\d+)"#).ok()?;
     let cap = re.captures(&text)?;
     cap.get(1)?.as_str().parse().ok()
+}
+
+/// Resolve relative executable paths before the game's working directory changes.
+pub fn executable_path(path: &str) -> std::io::Result<String> {
+    let p = Path::new(path);
+    if p.is_relative() && p.components().count() > 1 {
+        Ok(util::absolute_path(p)?.to_string_lossy().to_string())
+    } else {
+        Ok(path.to_string())
+    }
 }
 
 /// Find all Java candidates on the system.
@@ -293,7 +310,8 @@ pub fn download_mojang_java(
     component: &str,
     max_workers: usize,
 ) -> Option<String> {
-    let dest_root = game_dir.join("java").join(component);
+    util::validate_component(component).ok()?;
+    let dest_root = util::absolute_path(&game_dir.join("java").join(component)).ok()?;
     let exe_name = if cfg!(windows) { "java.exe" } else { "java" };
 
     // Check if already downloaded
@@ -336,7 +354,7 @@ pub fn download_mojang_java(
         let target = crate::util::safe_join(&dest_root, rel).ok()?;
         match info["type"].as_str() {
             Some("directory") => {
-                fs::create_dir_all(&target).ok();
+                fs::create_dir_all(&target).ok()?;
             }
             Some("file") => {
                 let raw = &info["downloads"]["raw"];
@@ -364,11 +382,6 @@ pub fn download_mojang_java(
             }
             _ => {}
         }
-    }
-
-    if downloads.is_empty() {
-        let found = find_java_in_dir(&dest_root, exe_name);
-        return found;
     }
 
     crate::info!(
@@ -418,15 +431,24 @@ pub fn download_mojang_java(
             if let Ok(meta) = fs::metadata(t) {
                 let mut perms = meta.permissions();
                 perms.set_mode(perms.mode() | 0o755);
-                fs::set_permissions(t, perms).ok();
+                fs::set_permissions(t, perms).ok()?;
             }
         }
         for (target, link_target) in &links {
+            let parent = target.parent()?;
+            if Path::new(link_target).is_absolute()
+                || !util::absolute_path(&parent.join(link_target))
+                    .ok()?
+                    .starts_with(&dest_root)
+            {
+                crate::warn_msg!("Java manifest contains a link outside the runtime directory.");
+                return None;
+            }
             if !target.exists() {
                 if let Some(parent) = target.parent() {
-                    fs::create_dir_all(parent).ok();
+                    fs::create_dir_all(parent).ok()?;
                 }
-                std::os::unix::fs::symlink(link_target, target).ok();
+                std::os::unix::fs::symlink(link_target, target).ok()?;
             }
         }
     }

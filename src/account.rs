@@ -282,4 +282,29 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn unavailable_keychain_never_falls_back_to_plaintext() {
+        struct Unavailable;
+        impl SecretStore for Unavailable {
+            fn get(&self, _: &str) -> Result<Option<String>, String> {
+                Err("locked".into())
+            }
+            fn set(&self, _: &str, _: &str) -> Result<(), String> {
+                Err("locked".into())
+            }
+            fn delete(&self, _: &str) -> Result<(), String> {
+                Err("locked".into())
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = AccountManager::with_store(dir.path(), Box::new(Unavailable)).unwrap();
+        assert!(manager
+            .set_msa("Steve", "uuid", "access-secret", "refresh-secret", 1.0)
+            .is_err());
+        assert!(!manager.path.exists());
+        let legacy = br#"{"accounts":{"msa":{"type":"msa","access_token":"old"}},"default":"msa"}"#;
+        fs::write(&manager.path, legacy).unwrap();
+        assert!(AccountManager::with_store(dir.path(), Box::new(Unavailable)).is_err());
+        assert_eq!(fs::read(&manager.path).unwrap(), legacy);
+    }
 }

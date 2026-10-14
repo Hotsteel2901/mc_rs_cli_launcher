@@ -26,7 +26,7 @@ pub fn install_profile(
         .as_u64()
         .map(|n| n as u32);
     let java = if let Some(path) = explicit_java {
-        path.to_string()
+        java::executable_path(path)?
     } else {
         java::check_java(required_java).ok_or_else(|| {
             AppError::Loader(format!(

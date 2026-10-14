@@ -35,8 +35,9 @@ impl MinecraftLauncher {
     }
 
     /// Set a specific Java path.
-    pub fn set_java(&mut self, path: &str) {
-        self.java_path = Some(path.to_string());
+    pub fn set_java(&mut self, path: &str) -> AppResult<()> {
+        self.java_path = Some(java::executable_path(path)?);
+        Ok(())
     }
 
     /// Get the Java executable, auto-detecting if necessary.
