@@ -16,12 +16,12 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all -- --check
-      - run: cargo test --locked --all-targets
-      - run: cargo clippy --locked --all-targets -- -D warnings
-      - run: cargo build --locked --release
+      - run: python .github/scripts/check.py cargo fmt --all -- --check
+      - run: python .github/scripts/check.py cargo test --locked --all-targets
+      - run: python .github/scripts/check.py cargo clippy --locked --all-targets -- -D warnings
+      - run: python .github/scripts/check.py cargo build --locked --release

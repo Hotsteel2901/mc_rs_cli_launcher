@@ -6,7 +6,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::auth::MicrosoftAuth;
 use crate::error::{AppError, AppResult};
-use crate::http;
 use crate::java;
 use crate::mod_manager::ModManager;
 use crate::util;
@@ -122,84 +121,40 @@ impl MinecraftLauncher {
         self.java()
     }
 
-    /// Load a loader profile (Fabric/Forge/NeoForge).
+    /// Do not silently turn a requested or previously installed modded instance into vanilla.
     fn load_loader_profile(
         &self,
         mc_version: &str,
         loader: Option<&str>,
     ) -> AppResult<(Option<String>, Option<serde_json::Value>)> {
-        if let Some(l) = loader {
+        util::validate_component(mc_version)?;
+        let candidates = loader
+            .map(|name| vec![name])
+            .unwrap_or_else(|| vec!["fabric", "neoforge", "forge"]);
+        for name in candidates {
+            if !["fabric", "forge", "neoforge"].contains(&name) {
+                return Err("Unsupported loader".into());
+            }
             let path = self
                 .game_dir
                 .join("libraries")
-                .join(l)
-                .join(format!("{}-profile-{}.json", l, mc_version));
-            if path.exists() {
-                let profile: serde_json::Value = match std::fs::read_to_string(&path) {
-                    Ok(s) => match serde_json::from_str(&s) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            crate::warn_msg!(
-                                "Failed to parse loader profile {}: {}",
-                                path.display(),
-                                e
-                            );
-                            return Err(AppError::Loader(format!(
-                                "Invalid loader profile {}: {e}",
-                                path.display()
-                            )));
-                        }
-                    },
-                    Err(e) => {
-                        crate::warn_msg!("Failed to read loader profile {}: {}", path.display(), e);
-                        return Err(AppError::Loader(format!(
-                            "Invalid loader profile {}: {e}",
-                            path.display()
-                        )));
-                    }
-                };
-                return Ok((Some(l.to_string()), Some(profile)));
+                .join(name)
+                .join(format!("{name}-profile-{mc_version}.json"));
+            if !path.exists() {
+                continue;
             }
-            let install_cmd = if l == "fabric" {
-                "install-fabric"
-            } else {
-                &format!("install-{}", l)[..]
-            };
-            return Err(AppError::Loader(format!(
-                "--{} requested but no {} profile found for {}.\nInstall it first: mc-launcher {} -v {}",
-                l, l, mc_version, install_cmd, mc_version
-            )));
-        }
-
-        // Auto-detect
-        for candidate in &["fabric", "neoforge", "forge"] {
-            let path = self
-                .game_dir
-                .join("libraries")
-                .join(candidate)
-                .join(format!("{}-profile-{}.json", candidate, mc_version));
-            if path.exists() {
-                let profile: serde_json::Value = match std::fs::read_to_string(&path) {
-                    Ok(s) => match serde_json::from_str(&s) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            crate::warn_msg!(
-                                "Failed to parse loader profile {}: {}",
-                                path.display(),
-                                e
-                            );
-                            continue;
-                        }
-                    },
-                    Err(e) => {
-                        crate::warn_msg!("Failed to read loader profile {}: {}", path.display(), e);
-                        continue;
-                    }
-                };
-                return Ok((Some(candidate.to_string()), Some(profile)));
+            let profile: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+            if !profile["mainClass"].is_string()
+                || !profile["libraries"].is_array()
+                || (name != "fabric" && profile["profile_format"].as_u64() != Some(1))
+            {
+                return Err(AppError::Loader(format!("Invalid or legacy {name} profile. Reinstall with: mc-launcher install-{name} -v {mc_version}")));
             }
+            return Ok((Some(name.into()), Some(profile)));
         }
-
+        if let Some(name) = loader {
+            return Err(AppError::Loader(format!("No {name} profile for {mc_version}. Run: mc-launcher install-{name} -v {mc_version}")));
+        }
         Ok((None, None))
     }
 
@@ -330,9 +285,14 @@ impl MinecraftLauncher {
         std::fs::create_dir_all(&natives_dir)?;
 
         crate::log::step(2, 4, "Downloading libraries...");
+        let mut library_data = version_data.clone();
+        if let Some(profile) = &loader_profile {
+            library_data["libraries"] =
+                merged_libraries(&version_data["libraries"], &profile["libraries"]);
+        }
         let lib_jars =
             self.versions
-                .download_libraries(&version_data, &natives_dir, self.threads)?;
+                .download_libraries(&library_data, &natives_dir, self.threads)?;
 
         crate::log::step(3, 4, "Downloading assets...");
         let assets_index = self.versions.download_assets(&version_data, self.threads)?;
@@ -340,67 +300,8 @@ impl MinecraftLauncher {
         crate::log::step(4, 4, "Launching game...");
 
         let sep = if cfg!(windows) { ";" } else { ":" };
-        let mut extra_cp: Vec<PathBuf> = Vec::new();
-
-        // Loader libraries
-        if let Some(ref profile) = loader_profile {
-            if let Some(libs) = profile["libraries"].as_array() {
-                for lib in libs {
-                    if let Some(rules) = lib.get("rules") {
-                        if !VersionManager::rules_allow(rules, true) {
-                            continue;
-                        }
-                    }
-                    let name = lib["name"].as_str().unwrap_or("");
-                    let rel_path = match lib["downloads"]["artifact"]["path"].as_str() {
-                        Some(path) => path.to_string(),
-                        None => util::maven_rel_path(name)?,
-                    };
-
-                    let lib_jar = util::safe_join(&self.versions.libraries_dir, &rel_path)?;
-                    if !http::cached_file_valid(
-                        &lib_jar,
-                        lib["downloads"]["artifact"]["sha1"].as_str(),
-                    ) {
-                        let url_str = lib["downloads"]["artifact"]["url"]
-                            .as_str()
-                            .map(String::from)
-                            .or_else(|| {
-                                lib["url"]
-                                    .as_str()
-                                    .map(|u| format!("{}/{}", u.trim_end_matches('/'), rel_path))
-                            });
-
-                        if let Some(ref url) = url_str {
-                            if let Err(e) = http::download_file(
-                                url,
-                                &lib_jar,
-                                &lib_jar.file_name().unwrap_or_default().to_string_lossy(),
-                                lib["downloads"]["artifact"]["sha1"].as_str(),
-                                2,
-                                false,
-                            ) {
-                                return Err(AppError::Http(format!(
-                                    "Cannot download loader library {}: {e}",
-                                    lib_jar.display()
-                                )));
-                            }
-                        }
-                    }
-                    if lib_jar.exists() {
-                        extra_cp.push(lib_jar);
-                    } else {
-                        return Err(AppError::Loader(format!(
-                            "Loader library missing: {}",
-                            lib_jar.display()
-                        )));
-                    }
-                }
-            }
-
-            let loader_label = loader_name.as_deref().unwrap_or("?");
-            crate::info!("{}: {} lib jars", loader_label, extra_cp.len());
-
+        if loader_profile.is_some() {
+            // Every loader discovers mods from gameDir/mods. Do not inject them into the JVM classpath.
             // Mods for Fabric (Forge/NeoForge discover mods on their own)
             let mm = ModManager::new(&self.game_dir);
             let mods_dir = mm.mods_dir(mc_version);
@@ -419,18 +320,14 @@ impl MinecraftLauncher {
                 .collect();
 
             if !mod_jars.is_empty() {
-                if loader_name.as_deref() == Some("fabric") {
-                    extra_cp.extend(mod_jars.iter().cloned());
-                }
                 crate::info!("Mods: {} jar(s)", mod_jars.len());
             }
         }
 
         // Build classpath
-        let mut all_cp: Vec<PathBuf> = Vec::with_capacity(1 + lib_jars.len() + extra_cp.len());
+        let mut all_cp: Vec<PathBuf> = Vec::with_capacity(1 + lib_jars.len());
         all_cp.push(client_jar);
         all_cp.extend(lib_jars);
-        all_cp.extend(extra_cp);
 
         // Deduplicate
         let mut seen = std::collections::HashSet::new();
@@ -440,12 +337,6 @@ impl MinecraftLauncher {
             if seen.insert(key) {
                 deduped.push(p);
             }
-        }
-        if deduped.len() < seen.len() {
-            crate::debug_msg!(
-                "Removed {} duplicate classpath entries",
-                seen.len() - deduped.len()
-            );
         }
         let classpath = deduped
             .iter()
@@ -903,5 +794,52 @@ impl MinecraftLauncher {
     #[allow(dead_code)]
     pub fn assets_dir(&self) -> &Path {
         &self.versions.assets_dir
+    }
+}
+
+/// Loader libraries override the same Maven artifact/classifier, not just identical paths.
+fn merged_libraries(base: &serde_json::Value, child: &serde_json::Value) -> serde_json::Value {
+    let mut merged = Vec::<serde_json::Value>::new();
+    let mut positions = std::collections::HashMap::new();
+    for lib in base
+        .as_array()
+        .into_iter()
+        .flatten()
+        .chain(child.as_array().into_iter().flatten())
+    {
+        if !VersionManager::rules_allow(&lib["rules"], true) {
+            continue;
+        }
+        let name = lib["name"].as_str().unwrap_or("");
+        let (coordinate, extension) = name.split_once('@').unwrap_or((name, "jar"));
+        let parts: Vec<_> = coordinate.split(':').collect();
+        let key = format!(
+            "{}:{}:{}@{}",
+            parts.first().unwrap_or(&""),
+            parts.get(1).unwrap_or(&""),
+            parts.get(3).unwrap_or(&""),
+            extension
+        );
+        if let Some(&position) = positions.get(&key) {
+            merged[position] = lib.clone();
+        } else {
+            positions.insert(key, merged.len());
+            merged.push(lib.clone());
+        }
+    }
+    serde_json::Value::Array(merged)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn loader_library_versions_override_vanilla_without_dropping_classifiers() {
+        let base = serde_json::json!([{"name":"g:a:1"},{"name":"g:a:1:natives-linux"}]);
+        let child = serde_json::json!([{"name":"g:a:2"},{"name":"g:b:1"}]);
+        let merged = merged_libraries(&base, &child);
+        assert_eq!(merged.as_array().unwrap().len(), 3);
+        assert_eq!(merged[0]["name"], "g:a:2");
+        assert_eq!(merged[1]["name"], "g:a:1:natives-linux");
     }
 }

@@ -174,9 +174,6 @@ pub fn http_request_no_mirror(
 pub fn http_get(url: &str) -> HttpResult {
     http_request("GET", url, None, None, None, 30, 3)
 }
-pub fn http_get_no_mirror(url: &str) -> HttpResult {
-    http_request_no_mirror("GET", url, None, None, None, 30, 3)
-}
 pub fn http_get_hdrs(url: &str, headers: &[(&str, &str)]) -> HttpResult {
     http_request_no_mirror("GET", url, None, None, Some(headers), 30, 3)
 }

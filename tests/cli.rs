@@ -120,7 +120,7 @@ fn cached_game_launch_uses_absolute_paths_custom_resolution_and_child_exit_code(
     assert!(args.contains("-Xmx2048M\n"));
     assert!(args.contains("--username\nSteve\n"));
     assert!(args.contains("--width\n1024\n--height\n600\n"));
-    assert!(args.contains(game.to_str().unwrap()));
+    assert!(args.contains(game.canonicalize().unwrap().to_str().unwrap()));
     assert!(!args.contains("${"));
     assert_eq!(
         std::fs::read_to_string(version.join("launch-cwd.txt"))
