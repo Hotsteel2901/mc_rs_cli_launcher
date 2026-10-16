@@ -29,6 +29,8 @@ indicatif = "0.17"
 keyring = "2"
 tempfile = "3"
 getrandom = "0.2"
+hmac = "0.12"
+sha2 = "0.10"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"

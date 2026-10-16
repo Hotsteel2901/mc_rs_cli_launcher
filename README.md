@@ -35,9 +35,12 @@ mc-launcher logout --dir ./minecraft
 
 ### 账号安全
 
-- JSON 只保存用户名、UUID、账号类型和到期时间。Microsoft 访问/刷新令牌仅保存在操作系统钥匙串中，并按游戏目录区分。
-- Linux 桌面需要可用且已解锁的 Secret Service / 系统钥匙串。无钥匙串的无头环境可以使用离线账号，但 Microsoft 登录不会退回到明文存储。
-- 旧版明文账号文件会在读取时迁移；钥匙串写入失败时保留原文件并报错，不静默丢失账号。迁移前存在的备份仍可能包含敏感信息，请自行妥善保管。
+- JSON 只保存用户名、UUID、账号类型和到期时间。Microsoft 访问/刷新令牌优先保存在操作系统钥匙串中，并按游戏目录区分；令牌从不以明文写入磁盘。
+- Linux 桌面需要可用且已解锁的 Secret Service / 系统钥匙串。若钥匙串不可用（例如无 D-Bus 的无头环境），启动器会询问是否改用本地加密文件存储：
+  - 交互式终端中会显示 `[y/N]` 提示，仅在回答 `y`/`yes` 后才启用；之后该游戏目录会记住此选择（下次直接使用，不再询问）。
+  - 非交互环境请设置 `MC_LAUNCHER_ALLOW_FILE_STORE=1` 表示同意、`=0` 表示拒绝；未设置且非交互时不会回退，并给出明确错误。
+  - 本地回退把令牌写入 `launcher_secrets.enc`，用随机密钥 `launcher_secrets.key`（权限 0600）做加密+完整性校验。由于密钥与密文放在一起，其安全性弱于系统钥匙串，仅用于无法使用钥匙串的机器。删除 `launcher_secrets.key` 即可回到“仅使用系统钥匙串”的行为。
+- 旧版明文账号文件会在读取时迁移；安全存储写入失败时保留原文件并报错，不静默丢失账号，也不写回明文。迁移前存在的备份仍可能包含敏感信息，请自行妥善保管。
 - `logout` 清理本启动器本地记录与相应钥匙串条目，不等于在 Microsoft 服务端撤销授权。
 - 浏览器登录校验返回地址和随机 OAuth `state`。不要分享回调 URL、设备验证码或账号文件。
 - 可用 `MC_LAUNCHER_CLIENT_ID` 配置自己的 Microsoft 公共客户端应用 ID。应用需获准访问相应 Xbox/Minecraft API；内置历史客户端 ID 的可用性由 Microsoft 决定，设备码流程还要求应用允许 public-client/device flow。自动测试不验证真实账号授权。
@@ -85,6 +88,8 @@ Forge 和 NeoForge 执行官方安装器及其 processors，不再把“只解�
 ```text
 minecraft/
   launcher_accounts.json       # 非敏感账号元数据
+  launcher_secrets.enc         # 可选：钥匙串不可用时的加密令牌（需用户同意）
+  launcher_secrets.key         # 可选：上述加密文件的本地密钥（0600）
   versions/<mc-version>/       # 该版本的 saves、mods、config、日志及客户端
   libraries/                   # 共享库和加载器 profile
   assets/                      # 资源索引、对象及旧版虚拟资源

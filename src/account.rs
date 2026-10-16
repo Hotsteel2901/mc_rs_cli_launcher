@@ -1,17 +1,39 @@
-//! Account metadata on disk; Microsoft credentials only in the OS keychain.
+//! Account metadata on disk; Microsoft credentials only in the OS keychain,
+//! or in a local encrypted file when the keychain is unavailable and the user
+//! explicitly approves that fallback.
 use crate::error::{AppError, AppResult};
 use crate::util;
+use hmac::{Hmac, Mac};
 use sha1::{Digest, Sha1};
+use sha2::Sha256;
+use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
 use std::fs;
+use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 const ACCOUNTS_FILE: &str = "launcher_accounts.json";
+/// Ciphertext for the opt-in local secret store (hex encoded).
+const SECRETS_FILE: &str = "launcher_secrets.enc";
+/// Random key protecting [`SECRETS_FILE`]; its presence records user consent.
+const SECRETS_KEY_FILE: &str = "launcher_secrets.key";
+/// `1`/`0` overrides the interactive fallback prompt (see README).
+const ALLOW_FILE_STORE_ENV: &str = "MC_LAUNCHER_ALLOW_FILE_STORE";
+
+/// Local key file layout: `[0..ENC_LEN]` encryption key, `[ENC_LEN..]` MAC key.
+const KEY_LEN: usize = 64;
+const ENC_LEN: usize = 32;
+const MAC_LEN: usize = 32;
+const NONCE_LEN: usize = 16;
+
+type HmacSha256 = Hmac<Sha256>;
 
 trait SecretStore {
     fn get(&self, key: &str) -> Result<Option<String>, String>;
     fn set(&self, key: &str, value: &str) -> Result<(), String>;
     fn delete(&self, key: &str) -> Result<(), String>;
 }
+
 struct Keychain;
 impl SecretStore for Keychain {
     fn get(&self, key: &str) -> Result<Option<String>, String> {
@@ -37,6 +59,310 @@ impl SecretStore for Keychain {
     }
 }
 
+/// Whether the encrypted local fallback may be used.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Consent {
+    /// Ask interactively the first time the OS keychain fails.
+    Prompt,
+    /// Approved via `MC_LAUNCHER_ALLOW_FILE_STORE`.
+    Always,
+    /// Refused via `MC_LAUNCHER_ALLOW_FILE_STORE`.
+    Never,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Os,
+    File,
+}
+
+/// OS keychain first; on failure it can switch to an encrypted local file once
+/// the user consents. Secrets are never written in cleartext.
+struct FallbackStore {
+    os: Box<dyn SecretStore>,
+    file: EncryptedFileStore,
+    consent: Consent,
+    mode: Cell<Option<Mode>>,
+    declined: Cell<bool>,
+}
+
+impl FallbackStore {
+    fn new(game_dir: &Path) -> Self {
+        let consent = match std::env::var(ALLOW_FILE_STORE_ENV) {
+            Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" | "y" | "on" => Consent::Always,
+                _ => Consent::Never,
+            },
+            Err(_) => Consent::Prompt,
+        };
+        Self::with_parts(
+            Box::new(Keychain),
+            EncryptedFileStore::new(game_dir),
+            consent,
+        )
+    }
+
+    fn with_parts(os: Box<dyn SecretStore>, file: EncryptedFileStore, consent: Consent) -> Self {
+        Self {
+            os,
+            file,
+            consent,
+            mode: Cell::new(None),
+            declined: Cell::new(false),
+        }
+    }
+
+    fn resolved_mode(&self) -> Mode {
+        if let Some(mode) = self.mode.get() {
+            return mode;
+        }
+        // An already-approved local store wins, so credentials stay in one place.
+        let mode = if self.file.approved() {
+            Mode::File
+        } else {
+            Mode::Os
+        };
+        self.mode.set(Some(mode));
+        mode
+    }
+
+    fn promote_to_file(&self) -> Result<(), String> {
+        self.file.ensure_key()?;
+        self.mode.set(Some(Mode::File));
+        crate::warn_msg!(
+            "Storing Microsoft credentials in the encrypted local file store ({SECRETS_FILE})."
+        );
+        Ok(())
+    }
+
+    fn allow_file(&self, platform_error: &str, prompt: bool) -> Result<(), String> {
+        if self.consent == Consent::Never {
+            return Err(format!(
+                "the encrypted fallback store is disabled by {ALLOW_FILE_STORE_ENV}"
+            ));
+        }
+        if self.file.approved() {
+            return self.promote_to_file();
+        }
+        match self.consent {
+            Consent::Always => self.promote_to_file(),
+            Consent::Never => unreachable!(),
+            Consent::Prompt => {
+                if self.declined.get() || !prompt || !ask_consent(platform_error) {
+                    self.declined.set(true);
+                    return Err(format!(
+                        "no OS keychain is available and the encrypted fallback store was not approved \
+                         (run in a terminal to approve it, or set {ALLOW_FILE_STORE_ENV}=1)"
+                    ));
+                }
+                self.promote_to_file()
+            }
+        }
+    }
+
+    fn run<T>(
+        &self,
+        prompt: bool,
+        op: impl Fn(&dyn SecretStore) -> Result<T, String>,
+    ) -> Result<T, String> {
+        match self.resolved_mode() {
+            Mode::File => op(&self.file),
+            Mode::Os => match op(self.os.as_ref()) {
+                Ok(value) => Ok(value),
+                Err(platform_error) => match self.allow_file(&platform_error, prompt) {
+                    Ok(()) => op(&self.file),
+                    Err(reason) => Err(format!("{reason}; OS keychain error: {platform_error}")),
+                },
+            },
+        }
+    }
+}
+
+impl SecretStore for FallbackStore {
+    fn get(&self, key: &str) -> Result<Option<String>, String> {
+        self.run(true, |store| store.get(key))
+    }
+    fn set(&self, key: &str, value: &str) -> Result<(), String> {
+        self.run(true, |store| store.set(key, value))
+    }
+    fn delete(&self, key: &str) -> Result<(), String> {
+        // Deleting must never block on an interactive prompt.
+        self.run(false, |store| store.delete(key))
+    }
+}
+
+fn ask_consent(platform_error: &str) -> bool {
+    if !std::io::stdin().is_terminal() {
+        return false;
+    }
+    eprintln!();
+    eprintln!("  [WARN] OS keychain is unavailable: {platform_error}");
+    eprintln!(
+        "         Microsoft tokens can instead be kept in an encrypted file in the game directory."
+    );
+    eprintln!(
+        "         It is protected by a random local key ({SECRETS_KEY_FILE}, mode 0600), which is"
+    );
+    eprintln!("         weaker than an OS keychain because the key sits next to the data.");
+    eprint!("         Use the encrypted local store? [y/N] ");
+    let _ = std::io::stderr().flush();
+    let mut answer = String::new();
+    match std::io::stdin().lock().read_line(&mut answer) {
+        Ok(_) => matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes"),
+        Err(_) => false,
+    }
+}
+
+/// Encrypt-then-MAC secret map persisted as a hex file next to the accounts
+/// file. A random per-directory key is stored in a separate `0600` key file.
+struct EncryptedFileStore {
+    data_path: PathBuf,
+    key_path: PathBuf,
+    key: RefCell<Option<[u8; KEY_LEN]>>,
+}
+
+impl EncryptedFileStore {
+    fn new(game_dir: &Path) -> Self {
+        Self {
+            data_path: game_dir.join(SECRETS_FILE),
+            key_path: game_dir.join(SECRETS_KEY_FILE),
+            key: RefCell::new(None),
+        }
+    }
+
+    /// Consent is recorded by the existence of the key file.
+    fn approved(&self) -> bool {
+        self.key_path.exists()
+    }
+
+    fn ensure_key(&self) -> Result<[u8; KEY_LEN], String> {
+        self.load_key()
+    }
+
+    fn load_key(&self) -> Result<[u8; KEY_LEN], String> {
+        if let Some(key) = *self.key.borrow() {
+            return Ok(key);
+        }
+        let key = if self.key_path.exists() {
+            let text = fs::read_to_string(&self.key_path)
+                .map_err(|e| format!("Cannot read {}: {e}", self.key_path.display()))?;
+            let bytes = hex::decode(text.trim())
+                .map_err(|e| format!("Corrupt key file {}: {e}", self.key_path.display()))?;
+            <[u8; KEY_LEN]>::try_from(bytes.as_slice()).map_err(|_| {
+                format!(
+                    "Corrupt key file {}: expected {KEY_LEN} bytes",
+                    self.key_path.display()
+                )
+            })?
+        } else {
+            let mut bytes = [0u8; KEY_LEN];
+            getrandom::getrandom(&mut bytes)
+                .map_err(|e| format!("Cannot generate a local encryption key: {e}"))?;
+            util::atomic_write(&self.key_path, hex::encode(bytes).as_bytes())
+                .map_err(|e| format!("Cannot write {}: {e}", self.key_path.display()))?;
+            bytes
+        };
+        *self.key.borrow_mut() = Some(key);
+        Ok(key)
+    }
+
+    fn read_map(&self) -> Result<BTreeMap<String, String>, String> {
+        if !self.data_path.exists() {
+            return Ok(BTreeMap::new());
+        }
+        let key = self.load_key()?;
+        let text = fs::read_to_string(&self.data_path)
+            .map_err(|e| format!("Cannot read {}: {e}", self.data_path.display()))?;
+        let blob = hex::decode(text.trim())
+            .map_err(|e| format!("Corrupt secrets file {}: {e}", self.data_path.display()))?;
+        if blob.len() < NONCE_LEN + MAC_LEN {
+            return Err(format!(
+                "Corrupt secrets file {}: too short",
+                self.data_path.display()
+            ));
+        }
+        let (nonce, rest) = blob.split_at(NONCE_LEN);
+        let (tag, ciphertext) = rest.split_at(MAC_LEN);
+        if verify_tag(&key[MAC_LEN..], nonce, ciphertext, tag).is_err() {
+            return Err(format!(
+                "Cannot decrypt {}: wrong key or corrupted file",
+                self.data_path.display()
+            ));
+        }
+        let plaintext = xor_keystream(&key[..ENC_LEN], nonce, ciphertext);
+        serde_json::from_slice(&plaintext)
+            .map_err(|e| format!("Corrupt secrets file {}: {e}", self.data_path.display()))
+    }
+
+    fn write_map(&self, map: &BTreeMap<String, String>) -> Result<(), String> {
+        let key = self.load_key()?;
+        let plaintext = serde_json::to_vec(map).map_err(|e| e.to_string())?;
+        let mut nonce = [0u8; NONCE_LEN];
+        getrandom::getrandom(&mut nonce).map_err(|e| format!("Cannot generate a nonce: {e}"))?;
+        let ciphertext = xor_keystream(&key[..ENC_LEN], &nonce, &plaintext);
+        let tag = compute_tag(&key[MAC_LEN..], &nonce, &ciphertext);
+        let mut blob = Vec::with_capacity(NONCE_LEN + MAC_LEN + ciphertext.len());
+        blob.extend_from_slice(&nonce);
+        blob.extend_from_slice(&tag);
+        blob.extend_from_slice(&ciphertext);
+        util::atomic_write(&self.data_path, hex::encode(blob).as_bytes())
+            .map_err(|e| format!("Cannot write {}: {e}", self.data_path.display()))
+    }
+}
+
+impl SecretStore for EncryptedFileStore {
+    fn get(&self, key: &str) -> Result<Option<String>, String> {
+        Ok(self.read_map()?.remove(key))
+    }
+    fn set(&self, key: &str, value: &str) -> Result<(), String> {
+        let mut map = self.read_map()?;
+        map.insert(key.to_string(), value.to_string());
+        self.write_map(&map)
+    }
+    fn delete(&self, key: &str) -> Result<(), String> {
+        let mut map = self.read_map()?;
+        map.remove(key);
+        self.write_map(&map)
+    }
+}
+
+/// HMAC-SHA256 in counter mode: XOR the plaintext with a PRF keystream.
+fn xor_keystream(key: &[u8], nonce: &[u8], data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(data.len());
+    let mut block = [0u8; ENC_LEN];
+    let mut offset = block.len();
+    let mut counter: u64 = 0;
+    for &byte in data {
+        if offset == block.len() {
+            let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts keys of any length");
+            mac.update(nonce);
+            mac.update(&counter.to_be_bytes());
+            block.copy_from_slice(&mac.finalize().into_bytes());
+            counter += 1;
+            offset = 0;
+        }
+        out.push(byte ^ block[offset]);
+        offset += 1;
+    }
+    out
+}
+
+fn compute_tag(key: &[u8], nonce: &[u8], ciphertext: &[u8]) -> [u8; MAC_LEN] {
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts keys of any length");
+    mac.update(nonce);
+    mac.update(ciphertext);
+    let mut tag = [0u8; MAC_LEN];
+    tag.copy_from_slice(&mac.finalize().into_bytes());
+    tag
+}
+
+fn verify_tag(key: &[u8], nonce: &[u8], ciphertext: &[u8], tag: &[u8]) -> Result<(), ()> {
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts keys of any length");
+    mac.update(nonce);
+    mac.update(ciphertext);
+    mac.verify_slice(tag).map_err(|_| ())
+}
+
 pub struct AccountManager {
     path: PathBuf,
     data: serde_json::Value,
@@ -46,7 +372,10 @@ pub struct AccountManager {
 
 impl AccountManager {
     pub fn new(game_dir: &Path) -> AppResult<Self> {
-        Self::with_store(game_dir, Box::new(Keychain))
+        let game_dir = game_dir
+            .canonicalize()
+            .or_else(|_| util::absolute_path(game_dir))?;
+        Self::with_store(&game_dir, Box::new(FallbackStore::new(&game_dir)))
     }
 
     fn with_store(game_dir: &Path, secrets: Box<dyn SecretStore>) -> AppResult<Self> {
@@ -100,8 +429,11 @@ impl AccountManager {
             "refresh_token":account["refresh_token"].as_str().unwrap_or(""),
         });
         // A failed migration leaves the existing file untouched rather than losing credentials.
-        self.secrets.set(&self.secret_key, &credentials.to_string())
-            .map_err(|e| AppError::Generic(format!("Cannot migrate credentials to OS keychain: {e}. Unlock/configure your keychain and retry.")))?;
+        self.secrets
+            .set(&self.secret_key, &credentials.to_string())
+            .map_err(|e| {
+                AppError::Generic(format!("Cannot migrate credentials to a secure store: {e}"))
+            })?;
         if let Some(account) = self.data["accounts"]["msa"].as_object_mut() {
             account.remove("access_token");
             account.remove("refresh_token");
@@ -132,8 +464,9 @@ impl AccountManager {
         }
         let credentials =
             serde_json::json!({"access_token":access_token,"refresh_token":refresh_token});
-        self.secrets.set(&self.secret_key, &credentials.to_string())
-            .map_err(|e| AppError::Generic(format!("Cannot save Microsoft credentials to OS keychain: {e}. No plaintext fallback is used.")))?;
+        self.secrets
+            .set(&self.secret_key, &credentials.to_string())
+            .map_err(|e| AppError::Generic(format!("Cannot save Microsoft credentials: {e}")))?;
         self.data["accounts"]["msa"] = serde_json::json!({"type":"msa","username":username,"uuid":uid,"expires_at":expires_at});
         self.data["default"] = "msa".into();
         self.save()
@@ -170,7 +503,7 @@ impl AccountManager {
                     }
                 }
                 Err(error) => {
-                    crate::warn_msg!("Cannot read OS keychain: {error}");
+                    crate::warn_msg!("Cannot read stored credentials: {error}");
                 }
                 _ => {}
             }
@@ -202,7 +535,7 @@ impl AccountManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{cell::RefCell, collections::HashMap, rc::Rc};
+    use std::{collections::HashMap, rc::Rc};
     #[derive(Clone, Default)]
     struct MemoryStore(Rc<RefCell<HashMap<String, String>>>);
     impl SecretStore for MemoryStore {
@@ -216,6 +549,19 @@ mod tests {
         fn delete(&self, key: &str) -> Result<(), String> {
             self.0.borrow_mut().remove(key);
             Ok(())
+        }
+    }
+
+    struct Unavailable;
+    impl SecretStore for Unavailable {
+        fn get(&self, _: &str) -> Result<Option<String>, String> {
+            Err("locked".into())
+        }
+        fn set(&self, _: &str, _: &str) -> Result<(), String> {
+            Err("locked".into())
+        }
+        fn delete(&self, _: &str) -> Result<(), String> {
+            Err("locked".into())
         }
     }
 
@@ -282,20 +628,9 @@ mod tests {
             );
         }
     }
+
     #[test]
     fn unavailable_keychain_never_falls_back_to_plaintext() {
-        struct Unavailable;
-        impl SecretStore for Unavailable {
-            fn get(&self, _: &str) -> Result<Option<String>, String> {
-                Err("locked".into())
-            }
-            fn set(&self, _: &str, _: &str) -> Result<(), String> {
-                Err("locked".into())
-            }
-            fn delete(&self, _: &str) -> Result<(), String> {
-                Err("locked".into())
-            }
-        }
         let dir = tempfile::tempdir().unwrap();
         let mut manager = AccountManager::with_store(dir.path(), Box::new(Unavailable)).unwrap();
         assert!(manager
@@ -306,5 +641,88 @@ mod tests {
         fs::write(&manager.path, legacy).unwrap();
         assert!(AccountManager::with_store(dir.path(), Box::new(Unavailable)).is_err());
         assert_eq!(fs::read(&manager.path).unwrap(), legacy);
+    }
+
+    #[test]
+    fn encrypted_file_store_round_trip_hides_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let store = EncryptedFileStore::new(dir.path());
+            store.set("msa:abc", "top-secret-value").unwrap();
+        }
+        let raw = fs::read_to_string(dir.path().join(SECRETS_FILE)).unwrap();
+        assert!(!raw.contains("top-secret-value"));
+        let reopened = EncryptedFileStore::new(dir.path());
+        assert_eq!(
+            reopened.get("msa:abc").unwrap().as_deref(),
+            Some("top-secret-value")
+        );
+        assert_eq!(reopened.get("missing").unwrap(), None);
+        reopened.delete("msa:abc").unwrap();
+        assert_eq!(reopened.get("msa:abc").unwrap(), None);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(dir.path().join(SECRETS_KEY_FILE))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+    }
+
+    #[test]
+    fn encrypted_file_store_rejects_tampering() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = EncryptedFileStore::new(dir.path());
+        store.set("k", "v").unwrap();
+        let path = dir.path().join(SECRETS_FILE);
+        let mut blob = hex::decode(fs::read_to_string(&path).unwrap().trim()).unwrap();
+        let last = blob.len() - 1;
+        blob[last] ^= 0x01;
+        fs::write(&path, hex::encode(blob)).unwrap();
+        assert!(EncryptedFileStore::new(dir.path()).get("k").is_err());
+    }
+
+    #[test]
+    fn keychain_failure_falls_back_to_encrypted_file_with_consent() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FallbackStore::with_parts(
+            Box::new(Unavailable),
+            EncryptedFileStore::new(dir.path()),
+            Consent::Always,
+        );
+        let mut manager = AccountManager::with_store(dir.path(), Box::new(store)).unwrap();
+        manager
+            .set_msa("Steve", "uuid", "secret-access", "secret-refresh", 1.0)
+            .unwrap();
+        assert_eq!(
+            manager.get_default().unwrap()["refresh_token"],
+            "secret-refresh"
+        );
+        assert!(!fs::read_to_string(&manager.path)
+            .unwrap()
+            .contains("secret-"));
+        let raw = fs::read_to_string(dir.path().join(SECRETS_FILE)).unwrap();
+        assert!(!raw.contains("secret-access") && !raw.contains("secret-refresh"));
+        assert!(dir.path().join(SECRETS_KEY_FILE).exists());
+    }
+
+    #[test]
+    fn declined_fallback_still_refuses_plaintext() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FallbackStore::with_parts(
+            Box::new(Unavailable),
+            EncryptedFileStore::new(dir.path()),
+            Consent::Never,
+        );
+        let mut manager = AccountManager::with_store(dir.path(), Box::new(store)).unwrap();
+        assert!(manager
+            .set_msa("Steve", "uuid", "secret-access", "secret-refresh", 1.0)
+            .is_err());
+        assert!(!manager.path.exists());
+        assert!(!dir.path().join(SECRETS_FILE).exists());
+        assert!(!dir.path().join(SECRETS_KEY_FILE).exists());
     }
 }
