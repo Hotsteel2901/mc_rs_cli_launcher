@@ -1,6 +1,6 @@
 [package]
 name = "mc-launcher"
-version = "2.1.0"
+version = "2.2.0"
 edition = "2021"
 description = "Simple Minecraft CLI Launcher — Microsoft + offline + Fabric/Forge/NeoForge + Modrinth mods + optional terminal UI"
 authors = ["Hotsteel2901"]

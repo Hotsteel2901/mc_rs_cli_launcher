@@ -20,6 +20,8 @@ pub struct Settings {
     pub threads: usize,
     /// Empty means auto-detect.
     pub java: String,
+    /// "en" (default) or "zh"; TUI-only.
+    pub language: String,
     /// Explicit launch loader: "fabric", "forge", "neoforge" or None for auto.
     pub active_loader: Option<String>,
     /// "auto", "official" or "bmcl".
@@ -37,6 +39,7 @@ impl Default for Settings {
             height: 0,
             threads: DEFAULT_THREADS,
             java: String::new(),
+            language: "en".into(),
             active_loader: None,
             source: "auto".into(),
             reduced_motion: false,
@@ -101,6 +104,10 @@ impl Settings {
             .collect::<String>()
             .trim()
             .to_string();
+        self.language = match self.language.trim().to_ascii_lowercase().as_str() {
+            "zh" | "zh-cn" | "zh_cn" | "cn" | "chinese" | "中文" => "zh".into(),
+            _ => "en".into(),
+        };
         self.active_loader = self
             .active_loader
             .as_deref()
@@ -160,12 +167,14 @@ mod tests {
 
     #[test]
     fn normalization_clamps_hostile_values() {
+        assert_eq!(Settings::default().language, "en");
         let mut settings = Settings {
             ram_mb: 1,
             threads: 999,
             width: 1,
             height: 999_999,
             source: "WEIRD".into(),
+            language: "中文".into(),
             active_loader: Some("../escape".into()),
             active_version: Some("../escape".into()),
             ..Settings::default()
@@ -176,6 +185,7 @@ mod tests {
         assert_eq!(settings.width, 320);
         assert_eq!(settings.height, 4320);
         assert_eq!(settings.source, "auto");
+        assert_eq!(settings.language, "zh");
         assert_eq!(settings.active_loader, None);
         assert_eq!(settings.active_version, None);
     }
@@ -189,6 +199,7 @@ mod tests {
             threads: 8,
             active_loader: Some("FORGE".into()),
             source: "bmcl".into(),
+            language: "zh-CN".into(),
             width: 1280,
             height: 720,
             ..Settings::default()
@@ -199,6 +210,7 @@ mod tests {
         assert!(warning.is_none());
         assert_eq!(loaded, settings);
         assert_eq!(loaded.source_mode(), SourceMode::BmclApi);
+        assert_eq!(loaded.language, "zh");
         assert_eq!(loaded.active_loader.as_deref(), Some("forge"));
 
         std::fs::write(&path, br#"{"ram_mb":3072}"#).unwrap();

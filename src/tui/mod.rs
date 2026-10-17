@@ -7,6 +7,7 @@
 
 pub mod app;
 pub mod config;
+mod i18n;
 mod input;
 mod jobs;
 mod theme;
@@ -19,7 +20,9 @@ use std::time::{Duration, Instant};
 
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{self, Event, KeyEventKind};
-use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
+use crossterm::event::{
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -48,6 +51,7 @@ impl TerminalSession {
             stdout,
             EnterAlternateScreen,
             EnableBracketedPaste,
+            EnableMouseCapture,
             Hide,
             SetTitle("mc-launcher"),
             Clear(ClearType::All)
@@ -57,6 +61,7 @@ impl TerminalSession {
                 stdout,
                 Show,
                 DisableBracketedPaste,
+                DisableMouseCapture,
                 LeaveAlternateScreen,
                 SetTitle("")
             );
@@ -91,6 +96,7 @@ impl TerminalSession {
             stdout,
             Show,
             DisableBracketedPaste,
+            DisableMouseCapture,
             LeaveAlternateScreen,
             SetTitle("mc-launcher")
         )
@@ -113,6 +119,7 @@ impl TerminalSession {
             stdout,
             EnterAlternateScreen,
             EnableBracketedPaste,
+            EnableMouseCapture,
             Hide,
             Clear(ClearType::All)
         ) {
@@ -135,6 +142,7 @@ impl TerminalSession {
             stdout,
             Show,
             DisableBracketedPaste,
+            DisableMouseCapture,
             LeaveAlternateScreen,
             SetTitle("")
         );
@@ -283,6 +291,12 @@ fn event_loop(
                     }
                 }
                 Event::Paste(text) => app.handle_paste(&text),
+                Event::Mouse(mouse) => {
+                    let hit = ui::mouse_action_at(mouse.column, mouse.row);
+                    if let AppCommand::Suspend(task) = app.handle_mouse(mouse, hit) {
+                        suspended = Some(task);
+                    }
+                }
                 Event::Resize(_, _) => {}
                 _ => {}
             }

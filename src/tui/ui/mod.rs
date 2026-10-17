@@ -4,6 +4,7 @@ mod modals;
 mod screens;
 mod widgets;
 
+use std::cell::RefCell;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ratatui::buffer::Buffer;
@@ -13,12 +14,53 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Sparkline};
 use ratatui::Frame;
 
-use crate::tui::app::{App, JobView, LogLine, Screen, SearchFocus};
+use crate::tui::app::{App, JobView, LogLine, MouseAction, Screen, SearchFocus};
+use crate::tui::i18n;
 use crate::tui::jobs::LogLevel;
 use crate::tui::theme;
 use crate::tui::ui::widgets::{account_name, centered_rect, hint, panel};
 
+#[derive(Clone, Copy)]
+struct Hitbox {
+    rect: Rect,
+    action: MouseAction,
+}
+
+thread_local! {
+    static MOUSE_HITBOXES: RefCell<Vec<Hitbox>> = const { RefCell::new(Vec::new()) };
+}
+
+pub(crate) fn reset_mouse_hitboxes() {
+    MOUSE_HITBOXES.with(|boxes| boxes.borrow_mut().clear());
+}
+
+pub(crate) fn register_mouse(rect: Rect, action: MouseAction) {
+    if rect.width == 0 || rect.height == 0 {
+        return;
+    }
+    MOUSE_HITBOXES.with(|boxes| boxes.borrow_mut().push(Hitbox { rect, action }));
+}
+
+/// Topmost registered action under a terminal cell, if any.
+pub(crate) fn mouse_action_at(column: u16, row: u16) -> Option<MouseAction> {
+    MOUSE_HITBOXES.with(|boxes| {
+        boxes
+            .borrow()
+            .iter()
+            .rev()
+            .find(|hitbox| {
+                let rect = hitbox.rect;
+                column >= rect.x
+                    && column < rect.x + rect.width
+                    && row >= rect.y
+                    && row < rect.y + rect.height
+            })
+            .map(|hitbox| hitbox.action)
+    })
+}
+
 pub fn render(frame: &mut Frame, app: &mut App) {
+    reset_mouse_hitboxes();
     let area = frame.area();
     if area.width == 0 || area.height == 0 {
         return;
@@ -184,6 +226,7 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect, t: f64) {
 
     let width = area.width;
     let mut right: Vec<Span<'static>> = Vec::new();
+    let lang = app.lang();
     let has_account = app.current_account().is_some();
     right.push(Span::styled(
         if has_account { "● " } else { "○ " },
@@ -196,7 +239,11 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect, t: f64) {
             .bg(theme::SURFACE),
     ));
     right.push(Span::styled(
-        account_name(app),
+        if has_account {
+            account_name(app)
+        } else {
+            lang.pick("no account", "无账号").to_string()
+        },
         Style::default()
             .fg(if has_account {
                 theme::TEXT
@@ -215,7 +262,7 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect, t: f64) {
             app.settings
                 .active_version
                 .clone()
-                .unwrap_or_else(|| "no version".into()),
+                .unwrap_or_else(|| lang.pick("no version", "无版本").into()),
             Style::default()
                 .fg(theme::mix(theme::CYAN, theme::TEXT, 0.2))
                 .bg(theme::SURFACE),
@@ -227,7 +274,14 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect, t: f64) {
             ));
         }
         right.push(Span::styled(
-            format!("  · {}", app.settings.source),
+            format!(
+                "  · {}",
+                match app.settings.source.as_str() {
+                    "official" => lang.pick("official", "官方"),
+                    "bmcl" => "BMCL",
+                    _ => lang.pick("auto", "自动"),
+                }
+            ),
             Style::default().fg(theme::TEXT_FAINT).bg(theme::SURFACE),
         ));
     }
@@ -245,7 +299,7 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect, t: f64) {
                 Style::default().fg(theme::GREEN_DARK).bg(theme::SURFACE),
             ),
             Span::styled(
-                " cli-first ",
+                app.lang().pick(" cli-first ", " 命令行优先 "),
                 Style::default().fg(theme::TEXT_FAINT).bg(theme::SURFACE),
             ),
         ]);
@@ -303,7 +357,7 @@ fn render_tabs(frame: &mut Frame, app: &App, area: Rect, _t: f64) {
                 .bg(theme::SURFACE_ALT)
         };
         let label = if area.width >= 74 {
-            format!(" {} {} ", screen.icon(), screen.title())
+            format!(" {} {} ", screen.icon(), screen.title(app.lang()))
         } else {
             format!(" {} ", screen.icon())
         };
@@ -314,6 +368,7 @@ fn render_tabs(frame: &mut Frame, app: &App, area: Rect, _t: f64) {
                 .style(Style::default().bg(theme::SURFACE_ALT)),
             chunks[index],
         );
+        register_mouse(chunks[index], MouseAction::Nav(*screen));
     }
 }
 
@@ -388,7 +443,7 @@ fn render_sidebar(frame: &mut Frame, app: &App, area: Rect, t: f64) {
                 }),
         ));
         spans.push(Span::styled(
-            screen.title(),
+            screen.title(app.lang()),
             Style::default()
                 .fg(if active { theme::TEXT } else { theme::TEXT_DIM })
                 .bg(bg)
@@ -400,7 +455,8 @@ fn render_sidebar(frame: &mut Frame, app: &App, area: Rect, t: f64) {
         ));
         if active {
             let right = format!("{} ", index + 1);
-            let used = 2 + screen.icon().chars().count() + 2 + screen.title().chars().count();
+            let used =
+                2 + screen.icon().chars().count() + 2 + screen.title(app.lang()).chars().count();
             if (used + right.len()) < row.width as usize {
                 spans.push(Span::styled(
                     " ".repeat(row.width as usize - used - right.len()),
@@ -414,6 +470,7 @@ fn render_sidebar(frame: &mut Frame, app: &App, area: Rect, t: f64) {
         }
         let paragraph = Paragraph::new(Line::from(spans)).style(Style::default().bg(bg));
         frame.render_widget(paragraph, row);
+        register_mouse(row, MouseAction::Nav(*screen));
     }
 
     if footer_height > 0 && sections[2].height > 0 {
@@ -432,7 +489,11 @@ fn render_sidebar(frame: &mut Frame, app: &App, area: Rect, t: f64) {
                     Style::default().fg(theme::TEXT_DIM).bg(theme::SURFACE),
                 ),
                 Span::styled(
-                    format!("  {} threads", app.settings.threads),
+                    format!(
+                        "  {} {}",
+                        app.settings.threads,
+                        app.lang().pick("threads", "线程")
+                    ),
                     Style::default().fg(theme::TEXT_FAINT).bg(theme::SURFACE),
                 ),
             ]),
@@ -557,26 +618,27 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect, t: f64) {
         .constraints([Constraint::Length(1), Constraint::Length(1)])
         .split(area);
 
+    let lang = app.lang();
     let mut spans: Vec<Span<'static>> = Vec::new();
     if app.search.open {
         match app.search.focus {
             SearchFocus::Input => {
-                spans.extend(hint("type", "query", theme::SURFACE));
-                spans.extend(hint("enter", "search", theme::SURFACE));
-                spans.extend(hint("tab", "results", theme::SURFACE));
+                spans.extend(hint("type", lang.pick("query", "查询"), theme::SURFACE));
+                spans.extend(hint("enter", lang.pick("search", "搜索"), theme::SURFACE));
+                spans.extend(hint("tab", lang.pick("results", "结果"), theme::SURFACE));
             }
             SearchFocus::Results => {
-                spans.extend(hint("↑↓", "select", theme::SURFACE));
-                spans.extend(hint("enter", "install", theme::SURFACE));
-                spans.extend(hint("o", "open", theme::SURFACE));
-                spans.extend(hint("tab", "edit", theme::SURFACE));
+                spans.extend(hint("↑↓", lang.pick("select", "选择"), theme::SURFACE));
+                spans.extend(hint("enter", lang.pick("install", "安装"), theme::SURFACE));
+                spans.extend(hint("o", lang.pick("open", "打开"), theme::SURFACE));
+                spans.extend(hint("tab", lang.pick("edit", "编辑"), theme::SURFACE));
             }
         }
-        spans.extend(hint("esc", "close", theme::SURFACE));
+        spans.extend(hint("esc", lang.pick("close", "关闭"), theme::SURFACE));
     } else if app.modal.is_some() {
-        spans.extend(hint("↑↓", "move", theme::SURFACE));
-        spans.extend(hint("enter", "confirm", theme::SURFACE));
-        spans.extend(hint("esc", "close", theme::SURFACE));
+        spans.extend(hint("↑↓", lang.pick("move", "移动"), theme::SURFACE));
+        spans.extend(hint("enter", lang.pick("confirm", "确认"), theme::SURFACE));
+        spans.extend(hint("esc", lang.pick("close", "关闭"), theme::SURFACE));
     } else {
         let mut items: Vec<(&str, &str)> = Vec::new();
         if app.job.as_ref().is_some_and(JobView::is_running) {
@@ -586,43 +648,43 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect, t: f64) {
         }
         items.extend(match app.screen {
             Screen::Dashboard => vec![
-                ("enter", "play"),
-                ("n", "new version"),
-                ("i", "loader"),
-                ("s", "search mods"),
+                ("enter", lang.pick("play", "启动")),
+                ("n", lang.pick("new version", "新版本")),
+                ("i", lang.pick("loader", "加载器")),
+                ("s", lang.pick("search mods", "搜索模组")),
             ],
             Screen::Versions => vec![
-                ("↑↓", "select"),
-                ("enter", "play"),
-                ("v", "set active"),
-                ("i", "loader"),
-                ("n", "new version"),
+                ("↑↓", lang.pick("select", "选择")),
+                ("enter", lang.pick("play", "启动")),
+                ("v", lang.pick("set active", "设为活跃")),
+                ("i", lang.pick("loader", "加载器")),
+                ("n", lang.pick("new version", "新版本")),
             ],
             Screen::Mods => vec![
-                ("↑↓", "select"),
-                ("space", "toggle"),
-                ("x", "remove"),
-                ("s", "search"),
-                ("v", "version"),
+                ("↑↓", lang.pick("select", "选择")),
+                ("space", lang.pick("toggle", "启停")),
+                ("x", lang.pick("remove", "卸载")),
+                ("s", lang.pick("search", "搜索")),
+                ("v", lang.pick("version", "版本")),
             ],
             Screen::Accounts => vec![
-                ("↑↓", "select"),
-                ("a", "offline"),
-                ("m", "login"),
-                ("d", "default"),
-                ("x", "logout"),
+                ("↑↓", lang.pick("select", "选择")),
+                ("a", lang.pick("offline", "离线")),
+                ("m", lang.pick("login", "登录")),
+                ("d", lang.pick("default", "默认")),
+                ("x", lang.pick("logout", "登出")),
             ],
             Screen::Settings => vec![
-                ("↑↓", "field"),
-                ("←→", "change"),
-                ("enter", "edit"),
-                ("R", "reset"),
+                ("↑↓", lang.pick("field", "选项")),
+                ("←→", lang.pick("change", "调整")),
+                ("enter", lang.pick("edit", "编辑")),
+                ("R", lang.pick("reset", "重置")),
             ],
             Screen::Logs => vec![
-                ("↑↓", "scroll"),
-                ("g / G", "top / follow"),
-                ("f", "follow"),
-                ("c", "clear"),
+                ("↑↓", lang.pick("scroll", "滚动")),
+                ("g / G", lang.pick("top / follow", "顶部 / 跟随")),
+                ("f", lang.pick("follow", "跟随")),
+                ("c", lang.pick("clear", "清空")),
             ],
         });
         // Reserve room for the always-present help and quit hints (20 cells
@@ -638,10 +700,10 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect, t: f64) {
             used += cost;
         }
         if used + 14 <= budget {
-            spans.extend(hint("tab", "switch", theme::SURFACE));
+            spans.extend(hint("tab", lang.pick("switch", "切换"), theme::SURFACE));
         }
-        spans.extend(hint("?", "help", theme::SURFACE));
-        spans.extend(hint("q", "quit", theme::SURFACE));
+        spans.extend(hint("?", lang.pick("help", "帮助"), theme::SURFACE));
+        spans.extend(hint("q", lang.pick("quit", "退出"), theme::SURFACE));
     }
     frame.render_widget(
         Paragraph::new(Line::from(spans)).style(Style::default().bg(theme::SURFACE)),
@@ -685,7 +747,15 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect, t: f64) {
     let right_spans = if area.width >= 80 {
         vec![
             Span::styled(
-                format!("src {}  ·  ", app.settings.source),
+                format!(
+                    "{} {}  ·  ",
+                    lang.pick("src", "源"),
+                    match app.settings.source.as_str() {
+                        "official" => lang.pick("official", "官方"),
+                        "bmcl" => "BMCL",
+                        _ => lang.pick("auto", "自动"),
+                    }
+                ),
                 Style::default().fg(theme::TEXT_FAINT).bg(theme::SURFACE),
             ),
             Span::styled(
@@ -726,10 +796,11 @@ fn render_job_panel(frame: &mut Frame, app: &App, area: Rect, t: f64) {
     let Some(job) = app.job.as_ref() else {
         return;
     };
+    let lang = app.lang();
     let (status_color, status_text) = match &job.finished {
-        None => (theme::GOLD, "RUNNING"),
-        Some(Ok(_)) => (theme::GREEN, "COMPLETE"),
-        Some(Err(_)) => (theme::RED, "FAILED"),
+        None => (theme::GOLD, lang.pick("RUNNING", "进行中")),
+        Some(Ok(_)) => (theme::GREEN, lang.pick("COMPLETE", "完成")),
+        Some(Err(_)) => (theme::RED, lang.pick("FAILED", "失败")),
     };
     let block = panel(
         format!("{} · {}", status_text, job.title),
@@ -781,7 +852,7 @@ fn render_job_panel(frame: &mut Frame, app: &App, area: Rect, t: f64) {
     phase_spans.push(Span::styled(
         format!(
             "  {}  ·  {}/{}  ·  {}",
-            theme::truncate_chars(&job.phase_label, 30),
+            theme::truncate_chars(i18n::localize_job_phase(lang, &job.phase_label), 30),
             phase_index,
             phase_total,
             theme::format_duration(job.elapsed())
@@ -832,7 +903,7 @@ fn render_job_panel(frame: &mut Frame, app: &App, area: Rect, t: f64) {
             Style::default().fg(theme::CYAN).bg(theme::SURFACE),
         ),
         Span::styled(
-            format!("· {} files ", job.done_files),
+            format!("· {} {} ", job.done_files, lang.pick("files", "个文件")),
             Style::default().fg(theme::TEXT_DIM).bg(theme::SURFACE),
         ),
     ];
@@ -844,7 +915,7 @@ fn render_job_panel(frame: &mut Frame, app: &App, area: Rect, t: f64) {
     }
     if job.active_files > 0 {
         stats.push(Span::styled(
-            format!("· {} active ", job.active_files),
+            format!("· {} {} ", job.active_files, lang.pick("active", "活跃")),
             Style::default().fg(theme::TEXT_FAINT).bg(theme::SURFACE),
         ));
     }
@@ -872,7 +943,7 @@ fn render_job_panel(frame: &mut Frame, app: &App, area: Rect, t: f64) {
     }
     if job.finished.is_none() {
         stats.push(Span::styled(
-            "  [c] cancel",
+            lang.pick("  [c] cancel", "  [c] 取消"),
             Style::default().fg(theme::GOLD).bg(theme::SURFACE),
         ));
     }
@@ -880,10 +951,22 @@ fn render_job_panel(frame: &mut Frame, app: &App, area: Rect, t: f64) {
         Paragraph::new(Line::from(stats)).style(Style::default().bg(theme::SURFACE)),
         rows[2],
     );
+    if job.finished.is_none() {
+        let width = rows[2].width.min(18);
+        register_mouse(
+            Rect {
+                x: rows[2].x + rows[2].width.saturating_sub(width),
+                y: rows[2].y,
+                width,
+                height: 1,
+            },
+            MouseAction::JobCancel,
+        );
+    }
 
     if rows[3].height > 0 {
         let message = match &job.finished {
-            Some(Ok(message)) => message.clone(),
+            Some(Ok(message)) => i18n::localize_job_result(lang, message),
             Some(Err(error)) => error.clone(),
             None => job
                 .log_tail
@@ -910,7 +993,7 @@ fn render_job_panel(frame: &mut Frame, app: &App, area: Rect, t: f64) {
                 format!(
                     "  {}{}",
                     if job.finished.is_some() {
-                        "esc dismiss  ·  "
+                        lang.pick("esc dismiss  ·  ", "esc 关闭  ·  ")
                     } else {
                         ""
                     },
@@ -1015,6 +1098,7 @@ fn render_toasts(frame: &mut Frame, app: &App, area: Rect, t: f64) {
             Paragraph::new(line).style(Style::default().bg(theme::SURFACE)),
             inner,
         );
+        register_mouse(rect, MouseAction::Noop);
     }
 }
 
@@ -1110,7 +1194,8 @@ fn render_splash(frame: &mut Frame, area: Rect, app: &App) {
     );
     frame.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
-            "a terminal-native launcher",
+            app.lang()
+                .pick("a terminal-native launcher", "原生终端 Minecraft 启动器"),
             Style::default().fg(theme::TEXT_FAINT).bg(theme::SURFACE),
         )]))
         .alignment(Alignment::Center)
@@ -1136,7 +1221,7 @@ fn render_splash(frame: &mut Frame, area: Rect, app: &App) {
     );
     let dots = ".".repeat((app.frame as usize / 8) % 4);
     spans.push(Span::styled(
-        format!("  loading{dots}"),
+        format!("  {}{dots}", app.lang().pick("loading", "加载中")),
         Style::default().fg(theme::TEXT_FAINT).bg(theme::SURFACE),
     ));
     frame.render_widget(
@@ -1148,7 +1233,8 @@ fn render_splash(frame: &mut Frame, area: Rect, app: &App) {
     if rows[4].height > 0 {
         frame.render_widget(
             Paragraph::new(Line::from(vec![Span::styled(
-                "press any key to skip",
+                app.lang()
+                    .pick("press any key or click to skip", "按任意键或点击跳过"),
                 Style::default()
                     .fg(theme::dim(theme::TEXT_FAINT, 0.25))
                     .bg(theme::SURFACE),
@@ -1214,7 +1300,7 @@ fn render_too_small(frame: &mut Frame, area: Rect, app: &App) {
         )]),
         Line::from(""),
         Line::from(vec![Span::styled(
-            "terminal too small",
+            app.lang().pick("terminal too small", "终端窗口太小"),
             Style::default()
                 .fg(theme::GOLD)
                 .bg(theme::BG)
@@ -1222,12 +1308,22 @@ fn render_too_small(frame: &mut Frame, area: Rect, app: &App) {
         )]),
         Line::from(""),
         Line::from(vec![Span::styled(
-            format!("need at least 52×16 · now {}×{}", area.width, area.height),
+            format!(
+                "{} 52×16 · {} {}×{}",
+                app.lang().pick("need at least", "至少需要"),
+                app.lang().pick("now", "当前"),
+                area.width,
+                area.height
+            ),
             Style::default().fg(theme::TEXT_DIM).bg(theme::BG),
         )]),
         Line::from(""),
         Line::from(vec![Span::styled(
-            format!("{} resize the window", theme::spinner(app.frame)),
+            format!(
+                "{} {}",
+                theme::spinner(app.frame),
+                app.lang().pick("resize the window", "请调整窗口大小")
+            ),
             Style::default().fg(theme::TEXT_FAINT).bg(theme::BG),
         )]),
     ];
@@ -1316,10 +1412,14 @@ mod tests {
     use super::*;
     use crate::progress::TransferEvent;
     use crate::tui::app::{
-        Bootstrap, JobView, Modal, PickerItem, PickerKind, PickerState, Screen, SearchFocus,
+        Bootstrap, ConfirmAction, JobView, Modal, MouseAction, PickerItem, PickerKind, PickerState,
+        Screen, SearchFocus,
     };
     use crate::tui::input::TextInput;
     use crate::tui::jobs::LogLevel;
+    use crossterm::event::{
+        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use std::time::{Duration, Instant};
@@ -1519,6 +1619,164 @@ mod tests {
         assert!(render_at(&mut app, 100, 30).contains('✦'));
     }
 
+    fn find_action(
+        app: &mut App,
+        width: u16,
+        height: u16,
+        predicate: impl Fn(MouseAction) -> bool,
+    ) -> Option<(u16, u16, MouseAction)> {
+        let _ = render_at(app, width, height);
+        for y in 0..height {
+            for x in 0..width {
+                if let Some(action) = mouse_action_at(x, y) {
+                    if predicate(action) {
+                        return Some((x, y, action));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn left_click(x: u16, y: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::empty(),
+        }
+    }
+
+    #[test]
+    fn language_setting_switches_chinese_and_back() {
+        let (mut app, _dir) = app_with_data();
+        app.screen = Screen::Settings;
+        let (x, y, action) = find_action(&mut app, 100, 30, |action| {
+            matches!(action, MouseAction::SettingsIncrease(0))
+        })
+        .expect("language value hitbox");
+        let _ = app.handle_mouse(left_click(x, y), Some(action));
+        assert_eq!(app.settings.language, "zh");
+        let chinese = render_at(&mut app, 100, 30);
+        let compact: String = chinese.chars().filter(|ch| !ch.is_whitespace()).collect();
+        assert!(compact.contains("偏好设置"), "{chinese}");
+        assert!(compact.contains("界面语言"), "{chinese}");
+
+        let (x, y, action) = find_action(&mut app, 100, 30, |action| {
+            matches!(action, MouseAction::SettingsDecrease(0))
+        })
+        .expect("language value hitbox");
+        let _ = app.handle_mouse(left_click(x, y), Some(action));
+        assert_eq!(app.settings.language, "en");
+        let english = render_at(&mut app, 100, 30);
+        assert!(english.contains("PREFERENCES"), "{english}");
+
+        app.screen = Screen::Settings;
+        app.settings_cursor = 0;
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::empty()));
+        assert_eq!(app.settings.language, "zh");
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::empty()));
+        assert_eq!(app.settings.language, "en");
+    }
+
+    #[test]
+    fn mouse_can_navigate_click_rows_and_handle_modals() {
+        let (mut app, _dir) = app_with_data();
+        app.screen = Screen::Dashboard;
+        let (x, y, action) = find_action(&mut app, 100, 30, |action| {
+            matches!(action, MouseAction::Nav(Screen::Versions))
+        })
+        .expect("versions nav hitbox");
+        let _ = app.handle_mouse(left_click(x, y), Some(action));
+        assert_eq!(app.screen, Screen::Versions);
+
+        app.screen = Screen::Mods;
+        let (x, y, action) = find_action(&mut app, 100, 30, |action| {
+            matches!(action, MouseAction::ModsRow(1))
+        })
+        .expect("mod row hitbox");
+        let _ = app.handle_mouse(left_click(x, y), Some(action));
+        assert_eq!(app.mod_sel, 1);
+
+        app.modal = Some(Modal::Confirm {
+            title: "Clear activity".into(),
+            lines: vec!["Clear all entries?".into()],
+            action: ConfirmAction::ClearLogs,
+            danger: false,
+        });
+        let (x, y, action) = find_action(&mut app, 100, 30, |action| {
+            matches!(action, MouseAction::ConfirmNo)
+        })
+        .expect("confirm no hitbox");
+        let _ = app.handle_mouse(left_click(x, y), Some(action));
+        assert!(app.modal.is_none());
+
+        app.modal = Some(Modal::Picker(PickerState::new(
+            "Download Minecraft",
+            "enter select",
+            PickerKind::RemoteVersions,
+            vec![
+                PickerItem {
+                    id: "1.21.4".into(),
+                    label: "1.21.4".into(),
+                    meta: "release".into(),
+                    tag: "release".into(),
+                    installed: true,
+                },
+                PickerItem {
+                    id: "1.21.3".into(),
+                    label: "1.21.3".into(),
+                    meta: "release".into(),
+                    tag: "release".into(),
+                    installed: false,
+                },
+            ],
+        )));
+        let (x, y, action) = find_action(&mut app, 100, 30, |action| {
+            matches!(action, MouseAction::PickerRow(1))
+        })
+        .expect("picker row hitbox");
+        let _ = app.handle_mouse(left_click(x, y), Some(action));
+        match app.modal.as_ref() {
+            Some(Modal::Picker(picker)) => assert_eq!(picker.selected, 1),
+            _ => panic!("picker modal missing"),
+        }
+        let _ = app.handle_mouse(left_click(x, y), Some(action));
+        assert!(matches!(app.modal, Some(Modal::Confirm { .. })));
+    }
+
+    #[test]
+    fn mouse_click_skips_the_splash() {
+        let (mut app, _dir) = app_with_data();
+        app.splash_until = Some(Instant::now() + Duration::from_secs(30));
+        assert!(app.splash_active());
+        let _ = app.handle_mouse(left_click(1, 1), None);
+        assert!(!app.splash_active());
+    }
+
+    #[test]
+    fn mouse_wheel_moves_settings_cursor() {
+        let (mut app, _dir) = app_with_data();
+        app.screen = Screen::Settings;
+        let _ = render_at(&mut app, 100, 30);
+        let scroll = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 10,
+            row: 10,
+            modifiers: KeyModifiers::empty(),
+        };
+        let _ = app.handle_mouse(scroll, None);
+        assert_eq!(app.settings_cursor, 1);
+        let scroll = MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 10,
+            row: 10,
+            modifiers: KeyModifiers::empty(),
+        };
+        let _ = app.handle_mouse(scroll, None);
+        assert_eq!(app.settings_cursor, 0);
+    }
+
     #[test]
     fn renders_empty_workspace_and_onboarding() {
         let dir = tempfile::tempdir().unwrap();
@@ -1708,6 +1966,43 @@ mod tests {
         app.java_path = Some("/usr/lib/jvm/java-21/bin/java".into());
         app.screen = Screen::Dashboard;
         println!("=== CLEAN 100x30 ===\n{}", render_at(&mut app, 100, 30));
+
+        app.settings.language = "zh".into();
+        app.toasts.clear();
+        for (name, screen) in [
+            ("DASHBOARD", Screen::Dashboard),
+            ("VERSIONS", Screen::Versions),
+            ("MODS", Screen::Mods),
+            ("ACCOUNTS", Screen::Accounts),
+            ("SETTINGS", Screen::Settings),
+            ("LOGS", Screen::Logs),
+        ] {
+            app.screen = screen;
+            println!("=== ZH {name} ===\n{}", render_at(&mut app, 110, 34));
+        }
+        app.screen = Screen::Mods;
+        app.search.open = true;
+        app.search.focus = SearchFocus::Input;
+        app.search.input.set("sodium");
+        app.search.results = crate::tui::app::parse_search_hits(&serde_json::json!({
+            "hits": [
+                {"slug":"sodium","title":"Sodium","description":"Modern rendering engine that greatly improves performance","author":"jelly","downloads":4200000,"categories":["fabric","optimization"]}
+            ]
+        }));
+        app.search.list_state.select(Some(0));
+        println!("=== ZH SEARCH ===\n{}", render_at(&mut app, 110, 34));
+        app.search.open = false;
+        app.modal = Some(Modal::Help { scroll: 0 });
+        println!("=== ZH HELP ===\n{}", render_at(&mut app, 110, 34));
+        app.modal = Some(Modal::Confirm {
+            title: "卸载模组".into(),
+            lines: vec!["从当前版本移除 sodium.jar？".into()],
+            action: ConfirmAction::ClearLogs,
+            danger: true,
+        });
+        println!("=== ZH CONFIRM ===\n{}", render_at(&mut app, 110, 34));
+        app.modal = None;
+        app.settings.language = "en".into();
 
         for screen in [
             Screen::Versions,

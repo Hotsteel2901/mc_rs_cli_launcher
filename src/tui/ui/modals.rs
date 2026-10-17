@@ -4,11 +4,15 @@
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap,
+};
 use ratatui::Frame;
 
-use crate::tui::app::{App, Modal, PickerState};
+use crate::tui::app::{App, Modal, MouseAction, PickerState};
+use crate::tui::i18n::Lang;
 use crate::tui::theme;
+use crate::tui::ui::register_mouse;
 use crate::tui::ui::widgets::{centered_rect, input_line, panel};
 
 pub fn render(frame: &mut Frame, app: &App, area: Rect, t: f64) {
@@ -19,6 +23,8 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, t: f64) {
     // cannot blend colors, so a clean stage beats a noisy half-visible card.
     frame.render_widget(Clear, area);
     frame.render_widget(Block::default().style(Style::default().bg(theme::BG)), area);
+    register_mouse(area, MouseAction::CloseModal);
+    let lang = app.lang();
     match modal {
         Modal::Help { scroll } => help(frame, app, area, *scroll, t),
         Modal::Confirm {
@@ -26,25 +32,27 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect, t: f64) {
             lines,
             action: _,
             danger,
-        } => confirm(frame, title, lines, *danger, area, t),
-        Modal::Input {
-            title,
-            hint,
-            input,
-            action: _,
-            error,
-        } => input_modal(frame, title, hint, input, error.as_deref(), area, t),
-        Modal::Picker(picker) => picker_modal(frame, picker, area, t),
-        Modal::Login { selected } => login(frame, *selected, area, t),
+        } => confirm(frame, lang, title, lines, *danger, area, t),
+        Modal::Input { .. } => input_modal(frame, lang, modal, area, t),
+        Modal::Picker(picker) => picker_modal(frame, lang, picker, area, t),
+        Modal::Login { selected } => login(frame, lang, *selected, area, t),
     }
 }
 
 fn help(frame: &mut Frame, app: &App, area: Rect, scroll: usize, t: f64) {
     let rect = centered_rect(area, 90, 92, area.height.saturating_sub(4).min(32));
     frame.render_widget(Clear, rect);
-    let block = panel("HELP · mc-launcher", theme::GREEN, true, t, theme::SURFACE);
+    let lang = app.lang();
+    let block = panel(
+        lang.pick("HELP · mc-launcher", "帮助 · mc-launcher"),
+        theme::GREEN,
+        true,
+        t,
+        theme::SURFACE,
+    );
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
+    register_mouse(rect, MouseAction::Noop);
     let lines = help_lines(app);
     let content_height = inner.height.saturating_sub(1) as usize;
     let max_scroll = lines.len().saturating_sub(content_height);
@@ -73,9 +81,11 @@ fn help(frame: &mut Frame, app: &App, area: Rect, scroll: usize, t: f64) {
         frame.render_widget(
             Paragraph::new(Line::from(vec![Span::styled(
                 format!(
-                    " {}/{}  ·  ↑↓ scroll  ·  esc close",
+                    " {}/{}  ·  ↑↓ {}  ·  esc {}",
                     (scroll + 1).min(max_scroll + 1),
-                    max_scroll + 1
+                    max_scroll + 1,
+                    app.lang().pick("scroll", "滚动"),
+                    app.lang().pick("close", "关闭")
                 ),
                 Style::default().fg(theme::TEXT_FAINT).bg(theme::SURFACE),
             )]))
@@ -86,6 +96,8 @@ fn help(frame: &mut Frame, app: &App, area: Rect, scroll: usize, t: f64) {
 }
 
 fn help_lines(app: &App) -> Vec<Line<'static>> {
+    let lang = app.lang();
+    let tr = |en: &'static str, zh: &'static str| lang.pick(en, zh);
     let key = |text: &str| {
         Span::styled(
             format!(" {text} "),
@@ -115,7 +127,10 @@ fn help_lines(app: &App) -> Vec<Line<'static>> {
     };
     vec![
         Line::from(theme::gradient_text_bg(
-            "mc-launcher  ·  terminal frontend",
+            tr(
+                "mc-launcher  ·  terminal frontend",
+                "mc-launcher  ·  终端前端",
+            ),
             theme::GREEN,
             theme::CYAN,
             theme::SURFACE,
@@ -123,96 +138,115 @@ fn help_lines(app: &App) -> Vec<Line<'static>> {
             true,
         )),
         Line::from(vec![Span::styled(
-            "The CLI remains the primary interface. The TUI reuses the same core.",
+            tr(
+                "The CLI remains the primary interface. The TUI reuses the same core.",
+                "CLI 仍是主要接口，TUI 复用同一份核心。",
+            ),
             Style::default().fg(theme::TEXT_FAINT).bg(theme::SURFACE),
         )]),
         Line::from(""),
-        section("GLOBAL"),
-        Line::from(vec![key("tab / shift+tab"), desc("switch screen")]),
-        Line::from(vec![key("1 … 6"), desc("jump to a screen directly")]),
-        Line::from(vec![key("?"), desc("this help")]),
-        Line::from(vec![key("j"), desc("show or hide the job panel")]),
-        Line::from(vec![key("c"), desc("cancel a running task")]),
+        section(tr("GLOBAL", "全局")),
+        Line::from(vec![key("tab / shift+tab"), desc(tr("switch screen", "切换界面"))]),
+        Line::from(vec![key("1 … 6"), desc(tr("jump to a screen directly", "直接跳转到界面"))]),
+        Line::from(vec![key("?"), desc(tr("this help", "显示此帮助"))]),
+        Line::from(vec![key("j"), desc(tr("show or hide the job panel", "显示/隐藏任务面板"))]),
+        Line::from(vec![key("c"), desc(tr("cancel a running task", "取消正在运行的任务"))]),
         Line::from(vec![
             key("esc"),
-            desc("back to dashboard / dismiss a finished job"),
+            desc(tr("back to dashboard / dismiss a finished job", "返回概览 / 关闭已完成任务")),
         ]),
         Line::from(vec![
             key("q / ctrl+c"),
-            desc("quit safely (terminal is restored)"),
+            desc(tr("quit safely (terminal is restored)", "安全退出（恢复终端）")),
         ]),
         Line::from(""),
-        section("DASHBOARD"),
-        Line::from(vec![key("enter / p"), desc("play the active instance")]),
+        section(tr("DASHBOARD", "概览")),
+        Line::from(vec![key("enter / p"), desc(tr("play the active instance", "启动活跃实例"))]),
         Line::from(vec![
             key("n"),
-            desc("browse and download Minecraft versions"),
+            desc(tr("browse and download Minecraft versions", "浏览并下载 Minecraft 版本")),
         ]),
         Line::from(vec![
             key("i"),
-            desc("select or install Fabric / Forge / NeoForge"),
+            desc(tr("select or install Fabric / Forge / NeoForge", "选择或安装 Fabric / Forge / NeoForge")),
         ]),
-        Line::from(vec![key("s"), desc("search Modrinth")]),
-        Line::from(vec![key("a"), desc("accounts")]),
+        Line::from(vec![key("s"), desc(tr("search Modrinth", "搜索 Modrinth"))]),
+        Line::from(vec![key("a"), desc(tr("accounts", "账号"))]),
         Line::from(""),
-        section("VERSIONS"),
-        Line::from(vec![key("↑ / ↓"), desc("choose a version")]),
-        Line::from(vec![key("enter"), desc("play the selected version")]),
-        Line::from(vec![key("v"), desc("make it the active instance")]),
+        section(tr("VERSIONS", "版本")),
+        Line::from(vec![key("↑ / ↓"), desc(tr("choose a version", "选择版本"))]),
+        Line::from(vec![key("enter"), desc(tr("play the selected version", "启动所选版本"))]),
+        Line::from(vec![key("v"), desc(tr("make it the active instance", "设为活跃实例"))]),
         Line::from(vec![
             key("i"),
-            desc("select or install a loader for the active version"),
+            desc(tr("select or install a loader for the active version", "为活跃版本选择或安装加载器")),
         ]),
-        Line::from(vec![key("n"), desc("download another version")]),
+        Line::from(vec![key("n"), desc(tr("download another version", "下载其他版本"))]),
         Line::from(""),
-        section("MODS"),
+        section(tr("MODS", "模组")),
         Line::from(vec![
             key("space"),
-            desc("enable / disable the selected jar"),
+            desc(tr("enable / disable the selected jar", "启用/禁用所选 JAR")),
         ]),
-        Line::from(vec![key("x"), desc("uninstall after confirmation")]),
+        Line::from(vec![key("x"), desc(tr("uninstall after confirmation", "确认后卸载"))]),
         Line::from(vec![
             key("s / /"),
-            desc("search Modrinth with version + loader facets"),
+            desc(tr("search Modrinth with version + loader facets", "按版本与加载器筛选搜索 Modrinth")),
         ]),
-        Line::from(vec![key("v"), desc("switch the active Minecraft version")]),
+        Line::from(vec![key("v"), desc(tr("switch the active Minecraft version", "切换活跃 Minecraft 版本"))]),
         Line::from(""),
-        section("ACCOUNTS"),
-        Line::from(vec![key("a"), desc("add an offline profile")]),
+        section(tr("ACCOUNTS", "账号")),
+        Line::from(vec![key("a"), desc(tr("add an offline profile", "添加离线档案"))]),
         Line::from(vec![
             key("m"),
-            desc("Microsoft browser or device-code login"),
+            desc(tr("Microsoft browser or device-code login", "Microsoft 浏览器/设备码登录")),
         ]),
-        Line::from(vec![key("d"), desc("set the selected account as default")]),
-        Line::from(vec![key("x"), desc("log out and delete local tokens")]),
+        Line::from(vec![key("d"), desc(tr("set the selected account as default", "将所选账号设为默认"))]),
+        Line::from(vec![key("x"), desc(tr("log out and delete local tokens", "登出并删除本地令牌"))]),
         Line::from(""),
-        section("SETTINGS"),
-        Line::from(vec![key("↑ / ↓"), desc("choose a preference")]),
-        Line::from(vec![key("← / →"), desc("adjust it")]),
-        Line::from(vec![key("enter"), desc("edit Java path / toggle options")]),
-        Line::from(vec![key("R"), desc("restore defaults")]),
+        section(tr("SETTINGS", "设置")),
+        Line::from(vec![key("↑ / ↓"), desc(tr("choose a preference", "选择偏好项"))]),
+        Line::from(vec![key("← / →"), desc(tr("adjust it", "调整数值"))]),
+        Line::from(vec![key("enter"), desc(tr("edit Java path / toggle options", "编辑 Java 路径/切换开关"))]),
+        Line::from(vec![key("R"), desc(tr("restore defaults", "恢复默认值"))]),
         Line::from(""),
-        section("FILES"),
+        section(tr("FILES", "文件")),
         Line::from(vec![Span::styled(
-            format!(" game dir  {}", app.game_dir.display()),
+            format!(
+                " {}  {}",
+                tr("game dir", "游戏目录"),
+                app.game_dir.display()
+            ),
             Style::default().fg(theme::TEXT_FAINT).bg(theme::SURFACE),
         )]),
         Line::from(vec![Span::styled(
             format!(
-                " config    {}",
+                " {}    {}",
+                tr("config", "配置"),
                 crate::tui::config::Settings::path(&app.game_dir).display()
             ),
             Style::default().fg(theme::TEXT_FAINT).bg(theme::SURFACE),
         )]),
         Line::from(""),
         Line::from(vec![Span::styled(
-            "Downloads verify SHA-1 and publish atomically; the UI never bypasses those checks.",
+            tr(
+                "Downloads verify SHA-1 and publish atomically; the UI never bypasses those checks.",
+                "下载会校验 SHA-1 并原子发布；界面不会绕过这些检查。",
+            ),
             Style::default().fg(theme::TEXT_FAINT).bg(theme::SURFACE),
         )]),
     ]
 }
 
-fn confirm(frame: &mut Frame, title: &str, lines: &[String], danger: bool, area: Rect, t: f64) {
+fn confirm(
+    frame: &mut Frame,
+    lang: Lang,
+    title: &str,
+    lines: &[String],
+    danger: bool,
+    area: Rect,
+    t: f64,
+) {
     let width = area.width.saturating_sub(8).min(68);
     let height = (lines.len() as u16 + 7).min(area.height);
     let rect = centered_rect(area, 90, width, height);
@@ -221,10 +255,32 @@ fn confirm(frame: &mut Frame, title: &str, lines: &[String], danger: bool, area:
     let block = panel(title.to_string(), color, true, t, theme::SURFACE);
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
+    register_mouse(rect, MouseAction::Noop);
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(2)])
         .split(inner);
+    if rows[1].height > 0 {
+        let half = rows[1].width / 2;
+        register_mouse(
+            Rect {
+                x: rows[1].x,
+                y: rows[1].y,
+                width: half,
+                height: rows[1].height,
+            },
+            MouseAction::ConfirmYes,
+        );
+        register_mouse(
+            Rect {
+                x: rows[1].x + half,
+                y: rows[1].y,
+                width: rows[1].width - half,
+                height: rows[1].height,
+            },
+            MouseAction::ConfirmNo,
+        );
+    }
     let mut content = Vec::new();
     for line in lines {
         content.push(Line::from(vec![Span::styled(
@@ -248,7 +304,11 @@ fn confirm(frame: &mut Frame, title: &str, lines: &[String], danger: bool, area:
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                " confirm   ",
+                if lang == Lang::Chinese {
+                    " 确认   "
+                } else {
+                    " confirm   "
+                },
                 Style::default().fg(theme::TEXT_DIM).bg(theme::SURFACE),
             ),
             Span::styled(
@@ -259,7 +319,7 @@ fn confirm(frame: &mut Frame, title: &str, lines: &[String], danger: bool, area:
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                " cancel",
+                lang.pick(" cancel", " 取消"),
                 Style::default().fg(theme::TEXT_DIM).bg(theme::SURFACE),
             ),
         ]);
@@ -272,20 +332,24 @@ fn confirm(frame: &mut Frame, title: &str, lines: &[String], danger: bool, area:
     }
 }
 
-fn input_modal(
-    frame: &mut Frame,
-    title: &str,
-    hint: &str,
-    input: &crate::tui::input::TextInput,
-    error: Option<&str>,
-    area: Rect,
-    t: f64,
-) {
+fn input_modal(frame: &mut Frame, lang: Lang, modal: &Modal, area: Rect, t: f64) {
+    let Modal::Input {
+        title,
+        hint,
+        input,
+        error,
+        ..
+    } = modal
+    else {
+        return;
+    };
+    let error = error.as_deref();
     let rect = centered_rect(area, 88, 68, 9);
     frame.render_widget(Clear, rect);
     let block = panel(title.to_string(), theme::GREEN, true, t, theme::SURFACE);
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
+    register_mouse(rect, MouseAction::Noop);
     if inner.height < 3 {
         return;
     }
@@ -342,7 +406,7 @@ fn input_modal(
         )]));
     } else {
         footer.push(Line::from(vec![Span::styled(
-            "enter save · esc cancel",
+            lang.pick("enter save · esc cancel", "回车保存 · esc 取消"),
             Style::default().fg(theme::TEXT_FAINT).bg(theme::SURFACE),
         )]));
     }
@@ -360,13 +424,14 @@ fn input_modal(
     }
 }
 
-fn picker_modal(frame: &mut Frame, picker: &PickerState, area: Rect, t: f64) {
+fn picker_modal(frame: &mut Frame, lang: Lang, picker: &PickerState, area: Rect, t: f64) {
     let desired = (picker.items.len() as u16 + 8).clamp(12, 30);
     let rect = centered_rect(area, 94, 96, desired.min(area.height.saturating_sub(4)));
     frame.render_widget(Clear, rect);
     let block = panel(picker.title.clone(), theme::CYAN, true, t, theme::SURFACE);
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
+    register_mouse(rect, MouseAction::Noop);
     if inner.height < 6 {
         return;
     }
@@ -395,7 +460,7 @@ fn picker_modal(frame: &mut Frame, picker: &PickerState, area: Rect, t: f64) {
                 true,
                 t,
                 theme::SURFACE,
-                "type to filter…",
+                lang.pick("type to filter…", "输入以筛选…"),
             )
             .spans,
         )
@@ -413,9 +478,9 @@ fn picker_modal(frame: &mut Frame, picker: &PickerState, area: Rect, t: f64) {
                     theme::spinner((t * 10.0) as u64)
                 )
             } else if picker.filtered.is_empty() {
-                " no matches".to_string()
+                format!(" {}", lang.pick("no matches", "无匹配"))
             } else {
-                format!(" {} item(s)", picker.filtered.len())
+                format!(" {} {}", picker.filtered.len(), lang.pick("item(s)", "项"))
             },
             Style::default().fg(theme::TEXT_FAINT).bg(theme::SURFACE),
         )]))
@@ -427,7 +492,10 @@ fn picker_modal(frame: &mut Frame, picker: &PickerState, area: Rect, t: f64) {
         frame.render_widget(
             Paragraph::new(vec![
                 Line::from(vec![Span::styled(
-                    "✕  Could not load remote versions",
+                    lang.pick(
+                        "✕  Could not load remote versions",
+                        "✕  无法加载远程版本列表",
+                    ),
                     Style::default()
                         .fg(theme::RED)
                         .bg(theme::SURFACE)
@@ -440,7 +508,7 @@ fn picker_modal(frame: &mut Frame, picker: &PickerState, area: Rect, t: f64) {
                 )]),
                 Line::from(""),
                 Line::from(vec![Span::styled(
-                    "r retry · esc close",
+                    lang.pick("r retry · esc close", "r 重试 · esc 关闭"),
                     Style::default().fg(theme::TEXT_FAINT).bg(theme::SURFACE),
                 )]),
             ])
@@ -478,14 +546,14 @@ fn picker_modal(frame: &mut Frame, picker: &PickerState, area: Rect, t: f64) {
             Paragraph::new(vec![
                 Line::from(""),
                 Line::from(vec![Span::styled(
-                    "No versions match the filter.",
+                    lang.pick("No versions match the filter.", "没有符合筛选条件的版本。"),
                     Style::default()
                         .fg(theme::TEXT_DIM)
                         .bg(theme::SURFACE)
                         .add_modifier(Modifier::BOLD),
                 )]),
                 Line::from(vec![Span::styled(
-                    "Backspace to widen the filter.",
+                    lang.pick("Backspace to widen the filter.", "退格键放宽筛选条件。"),
                     Style::default().fg(theme::TEXT_FAINT).bg(theme::SURFACE),
                 )]),
             ])
@@ -504,6 +572,14 @@ fn picker_modal(frame: &mut Frame, picker: &PickerState, area: Rect, t: f64) {
                     "snapshot" => theme::GOLD,
                     "installed" | "active" => theme::CYAN,
                     _ => theme::TEXT_FAINT,
+                };
+                let tag_text = match item.tag.as_str() {
+                    "release" => lang.pick("release", "正式版"),
+                    "snapshot" => lang.pick("snapshot", "快照"),
+                    "installed" => lang.pick("installed", "已安装"),
+                    "active" => lang.pick("active", "当前"),
+                    "new" => lang.pick("install new", "安装"),
+                    other => other,
                 };
                 let inner_width = rows[2].width as usize;
                 let label_width = if inner_width < 60 { 12 } else { 18 };
@@ -530,7 +606,7 @@ fn picker_modal(frame: &mut Frame, picker: &PickerState, area: Rect, t: f64) {
                 ];
                 if !item.tag.is_empty() {
                     spans.push(Span::styled(
-                        format!(" {} ", item.tag),
+                        format!(" {tag_text} "),
                         Style::default().fg(tag_color).bg(theme::mix(
                             theme::SURFACE,
                             tag_color,
@@ -540,7 +616,11 @@ fn picker_modal(frame: &mut Frame, picker: &PickerState, area: Rect, t: f64) {
                 }
                 if item.installed && item.tag != "installed" && item.tag != "active" {
                     spans.push(Span::styled(
-                        " ✓ installed ",
+                        if lang == Lang::Chinese {
+                            " ✓ 已安装 "
+                        } else {
+                            " ✓ installed "
+                        },
                         Style::default().fg(theme::GREEN).bg(theme::mix(
                             theme::SURFACE,
                             theme::GREEN,
@@ -559,9 +639,24 @@ fn picker_modal(frame: &mut Frame, picker: &PickerState, area: Rect, t: f64) {
                     .fg(theme::TEXT),
             )
             .style(Style::default().bg(theme::SURFACE));
-        let mut state = picker.list_state.clone();
-        state.select(Some(picker.selected));
+        let visible = rows[2].height as usize;
+        let offset = window_offset(picker.selected, picker.filtered.len(), visible);
+        let mut state = ListState::default()
+            .with_offset(offset)
+            .with_selected(Some(picker.selected));
         frame.render_stateful_widget(list, rows[2], &mut state);
+        let count = visible.min(picker.filtered.len().saturating_sub(offset));
+        for slot in 0..count {
+            register_mouse(
+                Rect {
+                    x: rows[2].x,
+                    y: rows[2].y + slot as u16,
+                    width: rows[2].width,
+                    height: 1,
+                },
+                MouseAction::PickerRow(offset + slot),
+            );
+        }
     }
 
     let hint_text = picker.hint.clone();
@@ -575,25 +670,51 @@ fn picker_modal(frame: &mut Frame, picker: &PickerState, area: Rect, t: f64) {
     );
 }
 
-fn login(frame: &mut Frame, selected: usize, area: Rect, t: f64) {
+fn window_offset(selected: usize, len: usize, visible: usize) -> usize {
+    if visible == 0 || len <= visible {
+        0
+    } else {
+        selected
+            .saturating_sub(visible - 1)
+            .min(len.saturating_sub(visible))
+    }
+}
+
+fn login(frame: &mut Frame, lang: Lang, selected: usize, area: Rect, t: f64) {
     let rect = centered_rect(area, 92, 70, 14);
     frame.render_widget(Clear, rect);
-    let block = panel("MICROSOFT LOGIN", theme::CYAN, true, t, theme::SURFACE);
+    let block = panel(
+        lang.pick("MICROSOFT LOGIN", "Microsoft 登录"),
+        theme::CYAN,
+        true,
+        t,
+        theme::SURFACE,
+    );
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
+    register_mouse(rect, MouseAction::Noop);
     if inner.height < 8 {
         return;
     }
     let options = [
         (
-            "Browser",
-            "Opens your default browser, then waits for the callback.",
-            "fastest · recommended",
+            lang.pick("Browser", "浏览器"),
+            lang.pick(
+                "Opens your default browser, then waits for the callback.",
+                "打开默认浏览器，然后等待回调。",
+            ),
+            lang.pick("fastest · recommended", "最快 · 推荐"),
         ),
         (
-            "Device code",
-            "Shows a short code to enter at microsoft.com/link.",
-            "works on remote/headless-ish terminals",
+            lang.pick("Device code", "设备码"),
+            lang.pick(
+                "Shows a short code to enter at microsoft.com/link.",
+                "显示一个短代码，在 microsoft.com/link 输入。",
+            ),
+            lang.pick(
+                "works on remote/headless-ish terminals",
+                "适用于远程/无头环境",
+            ),
         ),
     ];
     let rows = Layout::default()
@@ -610,11 +731,17 @@ fn login(frame: &mut Frame, selected: usize, area: Rect, t: f64) {
     frame.render_widget(
         Paragraph::new(vec![
             Line::from(vec![Span::styled(
-                "The TUI leaves the alternate screen while signing in.",
+                lang.pick(
+                    "The TUI leaves the alternate screen while signing in.",
+                    "登录期间 TUI 会暂时离开备用屏幕。",
+                ),
                 Style::default().fg(theme::TEXT_FAINT).bg(theme::SURFACE),
             )]),
             Line::from(vec![Span::styled(
-                "Credentials stay in the OS keychain or approved encrypted store.",
+                lang.pick(
+                    "Credentials stay in the OS keychain or approved encrypted store.",
+                    "凭据保存在系统钥匙串或已确认的加密存储中。",
+                ),
                 Style::default().fg(theme::TEXT_FAINT).bg(theme::SURFACE),
             )]),
         ])
@@ -661,10 +788,14 @@ fn login(frame: &mut Frame, selected: usize, area: Rect, t: f64) {
             Paragraph::new(vec![title, description]).style(Style::default().bg(bg)),
             inner,
         );
+        register_mouse(rect, MouseAction::LoginRow(index));
     }
     frame.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
-            "↑↓ choose · enter continue · esc cancel",
+            lang.pick(
+                "↑↓ choose · enter continue · esc cancel",
+                "↑↓ 选择 · 回车继续 · esc 取消",
+            ),
             Style::default().fg(theme::TEXT_FAINT).bg(theme::SURFACE),
         )]))
         .alignment(Alignment::Center)

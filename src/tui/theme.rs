@@ -147,6 +147,50 @@ pub fn truncate_chars(value: &str, max: usize) -> String {
     out
 }
 
+/// Terminal cell width for the characters used in the UI. This is a compact
+/// approximation of Unicode East Asian Width: CJK, Hangul, fullwidth forms and
+/// emoji take two cells; everything else takes one. Combining marks are rare in
+/// labels and are not specially handled.
+pub fn char_width(ch: char) -> usize {
+    let code = ch as u32;
+    if code == 0 {
+        return 0;
+    }
+    if (0x0300..=0x036F).contains(&code) {
+        return 0;
+    }
+    if (0x1100..=0x115F).contains(&code)
+        || (0x2E80..=0xA4CF).contains(&code)
+        || (0xAC00..=0xD7A3).contains(&code)
+        || (0xF900..=0xFAFF).contains(&code)
+        || (0xFE10..=0xFE19).contains(&code)
+        || (0xFE30..=0xFE6F).contains(&code)
+        || (0xFF00..=0xFF60).contains(&code)
+        || (0xFFE0..=0xFFE6).contains(&code)
+        || (0x1F300..=0x1FAFF).contains(&code)
+        || (0x20000..=0x3FFFD).contains(&code)
+    {
+        2
+    } else {
+        1
+    }
+}
+
+pub fn display_width(value: &str) -> usize {
+    value.chars().map(char_width).sum()
+}
+
+/// Pad a label to a terminal-cell width. Used for aligned key/value rows where
+/// `format!` width counts chars and would misalign CJK text.
+pub fn pad_width(value: &str, width: usize) -> String {
+    let used = display_width(value);
+    if used >= width {
+        value.to_string()
+    } else {
+        format!("{value}{}", " ".repeat(width - used))
+    }
+}
+
 /// Remove CSI/OSC escape sequences from process logs before rendering them.
 pub fn strip_ansi(value: &str) -> String {
     let mut out = String::with_capacity(value.len());

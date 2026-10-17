@@ -1,6 +1,6 @@
 # mc-launcher TUI
 
-`mc-launcher tui` 是同一个 CLI 二进制里的全屏终端前端。它不是 GUI，也不替代命令行：所有下载、校验、账号存储、加载器安装和启动逻辑仍然来自原来的 CLI 核心；TUI 只是把这些能力组织成一个可键盘操作、带实时进度和动效的界面。
+`mc-launcher tui` 是同一个 CLI 二进制里的全屏终端前端。它不是 GUI，也不替代命令行：所有下载、校验、账号存储、加载器安装和启动逻辑仍然来自原来的 CLI 核心；TUI 只是把这些能力组织成一个可键盘和鼠标操作、带实时进度和动效的界面。
 
 ```sh
 mc-launcher tui
@@ -13,7 +13,7 @@ mc-launcher --dir ./minecraft tui
 ## 界面
 
 ```text
- ◆ mclauncher  v2.1.0                 ◆ cli-first                ● Steve  ·  1.21.4 · Fabric  · auto
+ ◆ mclauncher  v2.2.0                 ◆ cli-first                ● Steve  ·  1.21.4 · Fabric  · auto
 ────────────────────────────────────────────────────────────────────────────────────────────────────
 ╭────────────────────╮ ╭ INSTANCE ─────────────────────────────────────────────────────────────────╮
 │      ▄██████▄      │ │M I N E C R A F T                            ╭────────────────────────────╮│
@@ -22,7 +22,7 @@ mc-launcher --dir ./minecraft tui
 │     ████  ████     │ │◆ 1.21.4  ·  Fabric  ·  1 mod                ╰────────────────────────────╯│
 │     ▀▀██████▀▀     │ │◉ Steve  ·  OFFLINE                                                        │
 │     mc launcher    │ │                                             RAM  4 GB                     │
-│       v2.1.0       │ │                                             LOAD Fabric                   │
+│       v2.2.0       │ │                                             LOAD Fabric                   │
 │                    │ │                                             PATH ~/minecraft/versions/... │
 │▌ ◈ Dashboard    1  │ ╰───────────────────────────────────────────────────────────────────────────╯
 │                    │
@@ -54,9 +54,9 @@ mc-launcher --dir ./minecraft tui
 | Versions | 本地版本列表、详情、设为活跃、启动、下载远程版本、选择/安装 Fabric/Forge/NeoForge |
 | Mods | 已安装模组列表、启用/禁用、卸载、按当前版本与加载器搜索 Modrinth、安装 |
 | Accounts | 账号列表、默认账号、离线账号、Microsoft 浏览器/设备码登录、登出 |
-| Settings | 内存、窗口尺寸、下载线程、官方/BMCLAPI 源、Java 路径、减少动效、开场动画 |
+| Settings | 界面语言（English / 中文）、内存、窗口尺寸、下载线程、官方/BMCLAPI 源、Java 路径、减少动效、开场动画 |
 | Activity | 完整活动日志、实时追踪、暂停跟随、清空 |
-| 全局 | 后台任务面板、分阶段进度、实时传输速度、每文件百分比、取消任务、Toast、帮助 |
+| 全局 | 后台任务面板、分阶段进度、实时传输速度、每文件百分比、取消任务、Toast、帮助；底部状态栏与任务面板 |
 
 ## 快捷键
 
@@ -73,6 +73,14 @@ mc-launcher --dir ./minecraft tui
 | `j` | 显示/隐藏任务面板 |
 | `c` | 取消正在运行的任务（任一界面） |
 | `q` / `Ctrl+C` | 退出（终端会恢复；运行中的任务会被取消） |
+
+### 鼠标
+
+- 点击开场动画可跳过；点击侧栏或顶部标签切换界面；点击 Dashboard 主按钮、统计卡和最近活动面板执行对应动作。
+- 点击列表行选中；双击同一行执行主要动作（启动版本、启停模组、设为默认账号、安装搜索结果、确认选择器条目）。
+- 点击设置值左半区减小/切换，右半区增大/切换；点击设置行只移动光标。
+- 单击确认框按钮执行；双击登录方式或选择器条目确认。点击弹窗外部关闭弹窗。滚轮可滚动选择、设置项、帮助和活动日志。
+- 终端捕获鼠标时，按住 `Shift` 再拖选通常仍可使用终端自身的文本选择（具体取决于终端模拟器）。
 
 ### Dashboard
 
@@ -118,8 +126,8 @@ mc-launcher --dir ./minecraft tui
 
 | 按键 | 行为 |
 | --- | --- |
-| `←` / `→` | 调整当前项 |
-| `Enter` | 编辑 Java 路径 / 切换开关 |
+| `←` / `→` | 调整当前项（语言项会切换 English / 中文） |
+| `Enter` | 编辑 Java 路径 / 切换开关 / 切换界面语言 |
 | `s` | 立即保存（修改通常会自动保存） |
 | `R` | 恢复默认值（保留活跃版本） |
 
@@ -135,6 +143,8 @@ mc-launcher --dir ./minecraft tui
 
 ## 配置
 
+界面语言默认为 English。打开 Settings，第一项「Language / 界面语言」即可切换到中文，立即生效并写入 `language`。
+
 配置保存在游戏目录（`--dir`）下的 `launcher_tui.json`，由 TUI 自动维护，不含任何令牌：
 
 ```json
@@ -144,6 +154,7 @@ mc-launcher --dir ./minecraft tui
   "height": 720,
   "threads": 4,
   "java": "",
+  "language": "en",
   "active_loader": "fabric",
   "source": "auto",
   "reduced_motion": false,
@@ -155,6 +166,7 @@ mc-launcher --dir ./minecraft tui
 - `ram_mb`：512–32768，512 MB 步进。
 - `width` / `height`：0 表示交给 Minecraft 决定；其余会限制在安全范围。
 - `threads`：1–32。
+- `language`：`en`（默认）或 `zh`；在 Settings 第一项切换后立即生效并保存。命令行与日志中的底层工具输出仍保持英文。
 - `active_loader`：`fabric` / `forge` / `neoforge`，或用 `null` 表示自动选择第一个已安装加载器；未安装的加载器会先要求安装。
 - `source`：`auto` / `official` / `bmcl`。
 - `java`：空表示自动检测。
@@ -178,7 +190,7 @@ mc-launcher --dir ./minecraft tui
 - `src/tui/ui/`：布局、各界面、弹窗、Toast、粒子、Splash。
 - `src/tui/theme.rs`：真彩色主题、渐变、缓动、进度条。
 - `src/progress.rs`：CLI 与 TUI 共用的下载进度总线，以及跨进程的 `@@MC_TUI@@` JSON 进度行。
-- 自动测试使用 `TestBackend` 在 120×40、100×32、80×24、60×20、52×16 和过小尺寸下渲染全部界面、弹窗、任务状态、搜索、Splash、Toast 与粒子。开发验证中还使用伪终端冒烟测试检查进入/离开备用屏幕、括号粘贴开关、按键退出和退出码。
+- 自动测试使用 `TestBackend` 在 120×40、100×32、80×24、60×20、52×16 和过小尺寸下渲染全部界面、弹窗、任务状态、搜索、Splash、Toast 与粒子；同时验证中英文切换、鼠标热区点击/滚轮和弹窗按钮。开发验证中还使用伪终端冒烟测试检查进入/离开备用屏幕、括号粘贴与鼠标模式开关、按键退出和退出码。
 - `mc-launcher tui` 在非 TTY 下会明确失败，不会阻塞 CI。
 
 ## 为什么还是 CLI-only

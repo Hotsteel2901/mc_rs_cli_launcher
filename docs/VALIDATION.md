@@ -54,8 +54,6 @@ Windows 少一项是因为假 Java shell 脚本启动测试仅在 Unix 上运行
 3. 在系统钥匙串已解锁时进行 Microsoft 登录、重启启动器、会话刷新、logout；确认 JSON 无令牌，钥匙串条目正确清理。
 4. 分别在独立目录安装 Fabric / Forge / NeoForge，启动到主菜单；添加兼容模组后检查依赖与加载器选择。
 5. 断网后启动文件齐全的指定版本；检查缺文件/过期认证会明确报错，不假装启动成功。
-
-5. 断网后启动文件齐全的指定版本；检查缺文件/过期认证会明确报错，不假装启动成功。
 6. 在真实终端中运行 `mc-launcher tui`，验证调整窗口、切换界面、取消下载/安装、退出后终端恢复；在 Windows Terminal / macOS Terminal 上分别检查真彩色和按键行为。
 
 ## TUI 新增验证（2026-10-17，本地 Linux）
@@ -70,6 +68,18 @@ Windows 少一项是因为假 Java shell 脚本启动测试仅在 Unix 上运行
 - 非 TTY：`mc-launcher tui` 输出交互式终端错误并立即退出，未创建游戏目录或配置。
 
 尚未完成：Windows/macOS 真实终端的视觉效果与子进程树清理分支、真实 Forge/NeoForge 安装器在 TUI 中的长时间运行与取消、真实 Microsoft 登录在 TUI 挂起/恢复后的钥匙串回退交互。这些仍属于发布前人工验收范围。
+
+## TUI 中英双语与鼠标验证（2026-10-17，本地 Linux）
+
+- `cargo fmt --all -- --check`
+- `cargo clippy --locked --all-targets -- -D warnings`
+- `cargo test --locked --all-targets`：82 个单元测试 + 6 个 CLI 集成测试通过（另有 1 个手动预览测试默认忽略）。新增用例覆盖 `language` 配置归一化、Settings 第一项即时切换中英文、侧栏/列表/设置值/确认按钮/选择器的鼠标热区、弹窗关闭和滚轮移动。
+- `cargo build --locked --release`
+- 伪终端（PTY）100×32：启动、点击/按键跳过 Splash、发送鼠标按下/释放与滚轮事件、切换界面、帮助、`q` 退出；确认进入/离开备用屏幕、括号粘贴和鼠标捕获启用/禁用、退出码 0。
+- 伪终端（PTY）中文配置：`launcher_tui.json` 写入 `language: "zh"` 后启动并切换到 Settings，确认 Dashboard、Settings、侧栏、状态栏显示中文，宽字符对齐正常，退出码 0。搜索、帮助与确认框的中文渲染另由 `TestBackend` 人工预览核对。
+- 中英文界面在 110×34 下人工渲染核对：中文模式面板标题、字段、描述、按钮、帮助、确认框、选择器与状态栏均切换；英文仍是默认并保留原测试断言。宽字符在 `TestBackend` 转储中按单元格显示为间隙，但真实终端显示正常。
+
+尚未完成：Windows Terminal / macOS Terminal / 其他终端模拟器的鼠标协议差异、按住 Shift 文本选择的实际行为，以及真实中文输入法在搜索框中的组合输入。这些仍属于发布前人工验收范围。
 
 ## 仍有的产品边界
 

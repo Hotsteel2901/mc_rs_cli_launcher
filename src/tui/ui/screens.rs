@@ -7,12 +7,14 @@ use std::time::Duration;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::tui::app::{App, Screen, SearchFocus};
+use crate::tui::app::{App, MouseAction, Screen, SearchFocus};
+use crate::tui::i18n::Lang;
 use crate::tui::theme;
 use crate::tui::ui::log_line;
+use crate::tui::ui::register_mouse;
 use crate::tui::ui::widgets::{badge, empty_state, input_line, mini_panel, panel, soft_badge};
 
 pub fn render_screen(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
@@ -59,7 +61,14 @@ fn dashboard(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
 }
 
 fn hero(frame: &mut Frame, app: &App, area: Rect, t: f64) {
-    let block = panel("INSTANCE", theme::GREEN, true, t, theme::SURFACE);
+    let lang = app.lang();
+    let block = panel(
+        lang.pick("INSTANCE", "实例"),
+        theme::GREEN,
+        true,
+        t,
+        theme::SURFACE,
+    );
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height < 3 || inner.width < 30 {
@@ -97,7 +106,7 @@ fn hero(frame: &mut Frame, app: &App, area: Rect, t: f64) {
     }
     if app.versions.is_empty() {
         lines.push(Line::from(vec![Span::styled(
-            "No instance yet.",
+            lang.pick("No instance yet.", "还没有游戏实例。"),
             Style::default()
                 .fg(theme::TEXT)
                 .bg(theme::SURFACE)
@@ -109,7 +118,9 @@ fn hero(frame: &mut Frame, app: &App, area: Rect, t: f64) {
             .active_version
             .clone()
             .unwrap_or_else(|| "?".into());
-        let loader = app.active_loader().unwrap_or_else(|| "Vanilla".into());
+        let loader = app
+            .active_loader()
+            .unwrap_or_else(|| lang.pick("Vanilla", "原版").into());
         let mods = app
             .current_version()
             .map(|row| row.mods_enabled)
@@ -126,7 +137,13 @@ fn hero(frame: &mut Frame, app: &App, area: Rect, t: f64) {
             Span::styled(
                 format!(
                     "  ·  {loader}  ·  {mods} {}",
-                    if mods == 1 { "mod" } else { "mods" }
+                    if lang == Lang::Chinese {
+                        "个模组"
+                    } else if mods == 1 {
+                        "mod"
+                    } else {
+                        "mods"
+                    }
                 ),
                 Style::default().fg(theme::TEXT_DIM).bg(theme::SURFACE),
             ),
@@ -152,7 +169,7 @@ fn hero(frame: &mut Frame, app: &App, area: Rect, t: f64) {
             Span::styled(
                 format!(
                     "  ·  {}{}",
-                    account.kind.to_ascii_uppercase(),
+                    account_kind_label(lang, &account.kind),
                     if expiry.is_empty() {
                         String::new()
                     } else {
@@ -166,7 +183,7 @@ fn hero(frame: &mut Frame, app: &App, area: Rect, t: f64) {
         lines.push(Line::from(vec![
             Span::styled("◌ ", Style::default().fg(theme::RED).bg(theme::SURFACE)),
             Span::styled(
-                "No account · press a to add one",
+                lang.pick("No account · press a to add one", "没有账号 · 按 a 添加"),
                 Style::default().fg(theme::TEXT_DIM).bg(theme::SURFACE),
             ),
         ]));
@@ -177,17 +194,17 @@ fn hero(frame: &mut Frame, app: &App, area: Rect, t: f64) {
         lines.push(Line::from(vec![
             Span::styled("1 ", Style::default().fg(theme::GOLD).bg(theme::SURFACE)),
             Span::styled(
-                "account  ",
+                lang.pick("account  ", "账号  "),
                 Style::default().fg(theme::TEXT_DIM).bg(theme::SURFACE),
             ),
             Span::styled("2 ", Style::default().fg(theme::GOLD).bg(theme::SURFACE)),
             Span::styled(
-                "version  ",
+                lang.pick("version  ", "版本  "),
                 Style::default().fg(theme::TEXT_DIM).bg(theme::SURFACE),
             ),
             Span::styled("3 ", Style::default().fg(theme::GOLD).bg(theme::SURFACE)),
             Span::styled(
-                "play",
+                lang.pick("play", "启动"),
                 Style::default().fg(theme::TEXT_DIM).bg(theme::SURFACE),
             ),
         ]));
@@ -200,11 +217,26 @@ fn hero(frame: &mut Frame, app: &App, area: Rect, t: f64) {
     );
 
     let action = if app.versions.is_empty() {
-        ("↓", "DOWNLOAD", "press n", theme::GOLD)
+        (
+            "↓",
+            lang.pick("DOWNLOAD", "下载"),
+            lang.pick("press n", "按 n"),
+            theme::GOLD,
+        )
     } else if app.current_account().is_none() {
-        ("◉", "ADD ACCOUNT", "press a", theme::CYAN)
+        (
+            "◉",
+            lang.pick("ADD ACCOUNT", "添加账号"),
+            lang.pick("press a", "按 a"),
+            theme::CYAN,
+        )
     } else {
-        ("▶", "PLAY", "press enter", theme::GREEN)
+        (
+            "▶",
+            lang.pick("PLAY", "启动"),
+            lang.pick("press enter", "按回车"),
+            theme::GREEN,
+        )
     };
     let action_area = Rect {
         x: right.x,
@@ -223,6 +255,7 @@ fn hero(frame: &mut Frame, app: &App, area: Rect, t: f64) {
         .style(Style::default().bg(theme::mix(theme::SURFACE, action.3, 0.1)));
     let action_inner = action_block.inner(action_area);
     frame.render_widget(action_block, action_area);
+    register_mouse(action_area, MouseAction::DashboardPrimary);
     let button_lines = vec![
         Line::from(vec![
             Span::styled(
@@ -264,11 +297,13 @@ fn hero(frame: &mut Frame, app: &App, area: Rect, t: f64) {
             width: right.width,
             height: right.height.saturating_sub(5),
         };
-        let loader = app.active_loader().unwrap_or_else(|| "Vanilla".into());
+        let loader = app
+            .active_loader()
+            .unwrap_or_else(|| lang.pick("Vanilla", "原版").into());
         let details = vec![
             Line::from(vec![
                 Span::styled(
-                    "RAM  ",
+                    lang.pick("RAM  ", "内存  "),
                     Style::default().fg(theme::TEXT_FAINT).bg(theme::SURFACE),
                 ),
                 Span::styled(
@@ -278,7 +313,7 @@ fn hero(frame: &mut Frame, app: &App, area: Rect, t: f64) {
             ]),
             Line::from(vec![
                 Span::styled(
-                    "LOAD ",
+                    lang.pick("LOAD ", "加载器 "),
                     Style::default().fg(theme::TEXT_FAINT).bg(theme::SURFACE),
                 ),
                 Span::styled(
@@ -288,7 +323,7 @@ fn hero(frame: &mut Frame, app: &App, area: Rect, t: f64) {
             ]),
             Line::from(vec![
                 Span::styled(
-                    "PATH ",
+                    lang.pick("PATH ", "路径 "),
                     Style::default().fg(theme::TEXT_FAINT).bg(theme::SURFACE),
                 ),
                 Span::styled(
@@ -319,24 +354,29 @@ fn stats(frame: &mut Frame, app: &App, area: Rect, t: f64) {
             Constraint::Ratio(1, 4),
         ])
         .split(area);
+    let lang = app.lang();
     let latest = app
         .versions
         .first()
         .map(|row| row.id.clone())
-        .unwrap_or_else(|| "none".into());
+        .unwrap_or_else(|| lang.pick("none", "无").into());
     let active_mods = app.current_version();
     let mods_value = active_mods
         .map(|row| format!("{}", row.mods_enabled))
         .unwrap_or_else(|| "0".into());
     let mods_hint = active_mods
-        .map(|row| format!("{} disabled", row.mods_disabled))
-        .unwrap_or_else(|| "no version".into());
+        .map(|row| format!("{} {}", row.mods_disabled, lang.pick("disabled", "已禁用")))
+        .unwrap_or_else(|| lang.pick("no version", "无版本").into());
     let java_value = if app.java_probing {
-        format!("detecting{}", ".".repeat((app.frame as usize / 8) % 4))
+        format!(
+            "{}{}",
+            lang.pick("detecting", "检测中"),
+            ".".repeat((app.frame as usize / 8) % 4)
+        )
     } else if let Some(major) = app.java_major {
         format!("Java {major}")
     } else {
-        "not found".into()
+        lang.pick("not found", "未找到").into()
     };
     let java_hint = if app.java_probing {
         "scanning system…".to_string()
@@ -353,39 +393,43 @@ fn stats(frame: &mut Frame, app: &App, area: Rect, t: f64) {
     stat_card(
         frame,
         chunks[0],
-        "VERSIONS",
+        lang.pick("VERSIONS", "版本"),
         &format!("{}", app.versions.len()),
         &latest,
         theme::CYAN,
         t,
     );
+    register_mouse(chunks[0], MouseAction::StatVersions);
     stat_card(
         frame,
         chunks[1],
-        "MODS ACTIVE",
+        lang.pick("MODS ACTIVE", "已启用模组"),
         &mods_value,
         &mods_hint,
         theme::PURPLE,
         t,
     );
+    register_mouse(chunks[1], MouseAction::StatMods);
     stat_card(
         frame,
         chunks[2],
-        "MEMORY",
+        lang.pick("MEMORY", "内存"),
         &app.settings.ram_label(),
-        &format!("{} threads", app.settings.threads),
+        &format!("{} {}", app.settings.threads, lang.pick("threads", "线程")),
         theme::GOLD,
         t,
     );
+    register_mouse(chunks[2], MouseAction::StatSettings);
     stat_card(
         frame,
         chunks[3],
-        "JAVA",
+        lang.pick("JAVA", "JAVA"),
         &java_value,
         &java_hint,
         theme::BLUE,
         t,
     );
+    register_mouse(chunks[3], MouseAction::StatSettings);
 }
 
 fn stat_card(
@@ -421,7 +465,11 @@ fn stat_card(
 
 fn activity(frame: &mut Frame, app: &App, area: Rect, t: f64) {
     let block = panel(
-        "RECENT ACTIVITY  ·  l for the full log",
+        if app.lang() == crate::tui::i18n::Lang::Chinese {
+            "最近活动 · l 查看完整日志"
+        } else {
+            "RECENT ACTIVITY  ·  l for the full log"
+        },
         theme::PINK,
         false,
         t,
@@ -429,6 +477,7 @@ fn activity(frame: &mut Frame, app: &App, area: Rect, t: f64) {
     );
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    register_mouse(area, MouseAction::DashboardActivity);
     if inner.height == 0 || inner.width == 0 {
         return;
     }
@@ -437,8 +486,11 @@ fn activity(frame: &mut Frame, app: &App, area: Rect, t: f64) {
             frame,
             area,
             "≡",
-            "Quiet in here",
-            &["Actions and background jobs appear here."],
+            app.lang().pick("Quiet in here", "暂无记录"),
+            &[app.lang().pick(
+                "Actions and background jobs appear here.",
+                "操作和后台任务会显示在这里。",
+            )],
             theme::PINK,
             t,
         );
@@ -473,7 +525,11 @@ fn versions(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
 
 fn list_versions(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
     let block = panel(
-        format!("INSTALLED · {}", app.versions.len()),
+        format!(
+            "{} · {}",
+            app.lang().pick("INSTALLED", "已安装"),
+            app.versions.len()
+        ),
         theme::CYAN,
         true,
         t,
@@ -486,10 +542,16 @@ fn list_versions(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
             frame,
             area,
             "▤",
-            "No versions installed",
+            app.lang().pick("No versions installed", "尚未安装版本"),
             &[
-                "Press n to browse Minecraft versions.",
-                "Downloads are checked and cached.",
+                app.lang().pick(
+                    "Press n to browse Minecraft versions.",
+                    "按 n 浏览 Minecraft 版本。",
+                ),
+                app.lang().pick(
+                    "Downloads are checked and cached.",
+                    "下载会校验摘要并使用缓存。",
+                ),
             ],
             theme::CYAN,
             t,
@@ -515,7 +577,11 @@ fn list_versions(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
                 .map(|value| shorten_loader(value))
                 .unwrap_or_else(|| "—".into());
             let mods = if row.mods_enabled + row.mods_disabled > 0 {
-                format!("{}m", row.mods_enabled + row.mods_disabled)
+                format!(
+                    "{}{}",
+                    row.mods_enabled + row.mods_disabled,
+                    app.lang().pick("m", "个")
+                )
             } else {
                 String::new()
             };
@@ -581,11 +647,35 @@ fn list_versions(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
         .highlight_symbol("▌")
         .highlight_style(Style::default().bg(theme::mix(theme::SURFACE, theme::CYAN, 0.16)))
         .style(Style::default().bg(theme::SURFACE));
-    frame.render_stateful_widget(list, inner, &mut app.version_state);
+    let visible = inner.height as usize;
+    let offset = window_offset(app.version_sel, app.versions.len(), visible);
+    let mut state = ListState::default()
+        .with_offset(offset)
+        .with_selected(Some(app.version_sel));
+    frame.render_stateful_widget(list, inner, &mut state);
+    let count = visible.min(app.versions.len().saturating_sub(offset));
+    for slot in 0..count {
+        register_mouse(
+            Rect {
+                x: inner.x,
+                y: inner.y + slot as u16,
+                width: inner.width,
+                height: 1,
+            },
+            MouseAction::VersionsRow(offset + slot),
+        );
+    }
 }
 
 fn version_detail(frame: &mut Frame, app: &App, area: Rect, t: f64) {
-    let block = panel("VERSION DETAIL", theme::CYAN, true, t, theme::SURFACE);
+    let lang = app.lang();
+    let block = panel(
+        lang.pick("VERSION DETAIL", "版本详情"),
+        theme::CYAN,
+        true,
+        t,
+        theme::SURFACE,
+    );
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let Some(row) = app.selected_version() else {
@@ -593,8 +683,11 @@ fn version_detail(frame: &mut Frame, app: &App, area: Rect, t: f64) {
             frame,
             area,
             "▤",
-            "Select a version",
-            &["Installed versions and their loader state appear here."],
+            lang.pick("Select a version", "选择一个版本"),
+            &[lang.pick(
+                "Installed versions and their loader state appear here.",
+                "这里显示已安装版本及其加载器状态。",
+            )],
             theme::CYAN,
             t,
         );
@@ -620,7 +713,12 @@ fn version_detail(frame: &mut Frame, app: &App, area: Rect, t: f64) {
             ),
             Span::styled("  ", Style::default().bg(theme::SURFACE)),
             soft_badge(
-                row.kind.clone(),
+                match row.kind.as_str() {
+                    "release" => lang.pick("release", "正式版"),
+                    "snapshot" => lang.pick("snapshot", "快照"),
+                    other => other,
+                }
+                .to_string(),
                 match row.kind.as_str() {
                     "release" => theme::GREEN,
                     "snapshot" => theme::GOLD,
@@ -630,7 +728,7 @@ fn version_detail(frame: &mut Frame, app: &App, area: Rect, t: f64) {
             ),
             Span::styled(" ", Style::default().bg(theme::SURFACE)),
             if is_active {
-                badge("ACTIVE", theme::GREEN, theme::SURFACE)
+                badge(lang.pick("ACTIVE", "当前"), theme::GREEN, theme::SURFACE)
             } else {
                 Span::styled("", Style::default().bg(theme::SURFACE))
             },
@@ -638,26 +736,29 @@ fn version_detail(frame: &mut Frame, app: &App, area: Rect, t: f64) {
         Line::from(""),
     ];
     lines.push(kv(
-        "Loader",
+        lang.pick("Loader", "加载器"),
         if row.loaders.is_empty() {
-            "Vanilla".into()
+            lang.pick("Vanilla", "原版").into()
         } else {
             row.loaders.join(" + ")
         },
         theme::PURPLE,
     ));
     lines.push(kv(
-        "Mods",
+        lang.pick("Mods", "模组"),
         format!(
-            "{} enabled · {} disabled",
-            row.mods_enabled, row.mods_disabled
+            "{} {} · {} {}",
+            row.mods_enabled,
+            lang.pick("enabled", "启用"),
+            row.mods_disabled,
+            lang.pick("disabled", "禁用")
         ),
         theme::PURPLE,
     ));
     lines.push(kv(
-        "Client jar",
+        lang.pick("Client jar", "客户端 JAR"),
         if row.jar_size == 0 {
-            "missing".into()
+            lang.pick("missing", "缺失").into()
         } else {
             theme::format_bytes(row.jar_size)
         },
@@ -667,9 +768,13 @@ fn version_detail(frame: &mut Frame, app: &App, area: Rect, t: f64) {
             theme::TEXT_DIM
         },
     ));
-    lines.push(kv("Modified", age_label(row.age), theme::TEXT_DIM));
     lines.push(kv(
-        "Directory",
+        lang.pick("Modified", "修改时间"),
+        age_label(lang, row.age),
+        theme::TEXT_DIM,
+    ));
+    lines.push(kv(
+        lang.pick("Directory", "目录"),
         theme::truncate_chars(
             &version_dir.display().to_string(),
             inner.width.saturating_sub(15) as usize,
@@ -681,9 +786,12 @@ fn version_detail(frame: &mut Frame, app: &App, area: Rect, t: f64) {
         Span::styled("◈ ", Style::default().fg(theme::GREEN).bg(theme::SURFACE)),
         Span::styled(
             if is_active {
-                "This is the active instance."
+                lang.pick("This is the active instance.", "这是当前活跃实例。")
             } else {
-                "Press v to make this the active instance."
+                lang.pick(
+                    "Press v to make this the active instance.",
+                    "按 v 将其设为活跃实例。",
+                )
             },
             Style::default().fg(theme::TEXT_DIM).bg(theme::SURFACE),
         ),
@@ -698,7 +806,7 @@ fn version_detail(frame: &mut Frame, app: &App, area: Rect, t: f64) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            " play this version",
+            lang.pick(" play this version", " 启动此版本"),
             Style::default().fg(theme::TEXT_DIM).bg(theme::SURFACE),
         ),
     ]));
@@ -711,7 +819,7 @@ fn version_detail(frame: &mut Frame, app: &App, area: Rect, t: f64) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            " install a loader",
+            lang.pick(" install a loader", " 选择 / 安装加载器"),
             Style::default().fg(theme::TEXT_DIM).bg(theme::SURFACE),
         ),
     ]));
@@ -724,7 +832,7 @@ fn version_detail(frame: &mut Frame, app: &App, area: Rect, t: f64) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            " download another version",
+            lang.pick(" download another version", " 下载其他版本"),
             Style::default().fg(theme::TEXT_DIM).bg(theme::SURFACE),
         ),
     ]));
@@ -753,15 +861,21 @@ fn mods(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
 }
 
 fn list_mods(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
+    let lang = app.lang();
     let version = app
         .settings
         .active_version
         .clone()
-        .unwrap_or_else(|| "no version".into());
+        .unwrap_or_else(|| lang.pick("no version", "无版本").into());
     let enabled = app.mods.iter().filter(|row| row.enabled).count();
     let disabled = app.mods.len() - enabled;
     let block = panel(
-        format!("MODS · {version} · {enabled} on / {disabled} off"),
+        format!(
+            "{} · {version} · {enabled} {} / {disabled} {}",
+            lang.pick("MODS", "模组"),
+            lang.pick("on", "启用"),
+            lang.pick("off", "禁用")
+        ),
         theme::PURPLE,
         true,
         t,
@@ -774,8 +888,11 @@ fn list_mods(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
             frame,
             area,
             "❖",
-            "No active version",
-            &["Download a version, then install mods."],
+            lang.pick("No active version", "没有活跃版本"),
+            &[lang.pick(
+                "Download a version, then install mods.",
+                "先下载一个版本，再安装模组。",
+            )],
             theme::PURPLE,
             t,
         );
@@ -786,10 +903,13 @@ fn list_mods(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
             frame,
             area,
             "❖",
-            "No mods installed",
+            lang.pick("No mods installed", "尚未安装模组"),
             &[
-                "Press s to search Modrinth.",
-                "Mods install into this version's mods folder.",
+                lang.pick("Press s to search Modrinth.", "按 s 搜索 Modrinth。"),
+                lang.pick(
+                    "Mods install into this version's mods folder.",
+                    "模组会安装到此版本的 mods 目录。",
+                ),
             ],
             theme::PURPLE,
             t,
@@ -853,11 +973,35 @@ fn list_mods(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
         .highlight_symbol("▌")
         .highlight_style(Style::default().bg(theme::mix(theme::SURFACE, theme::PURPLE, 0.16)))
         .style(Style::default().bg(theme::SURFACE));
-    frame.render_stateful_widget(list, inner, &mut app.mod_state);
+    let visible = inner.height as usize;
+    let offset = window_offset(app.mod_sel, app.mods.len(), visible);
+    let mut state = ListState::default()
+        .with_offset(offset)
+        .with_selected(Some(app.mod_sel));
+    frame.render_stateful_widget(list, inner, &mut state);
+    let count = visible.min(app.mods.len().saturating_sub(offset));
+    for slot in 0..count {
+        register_mouse(
+            Rect {
+                x: inner.x,
+                y: inner.y + slot as u16,
+                width: inner.width,
+                height: 1,
+            },
+            MouseAction::ModsRow(offset + slot),
+        );
+    }
 }
 
 fn mod_detail(frame: &mut Frame, app: &App, area: Rect, t: f64) {
-    let block = panel("MOD DETAIL", theme::PURPLE, true, t, theme::SURFACE);
+    let lang = app.lang();
+    let block = panel(
+        lang.pick("MOD DETAIL", "模组详情"),
+        theme::PURPLE,
+        true,
+        t,
+        theme::SURFACE,
+    );
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let Some(row) = app.selected_mod() else {
@@ -865,8 +1009,11 @@ fn mod_detail(frame: &mut Frame, app: &App, area: Rect, t: f64) {
             frame,
             area,
             "❖",
-            "Select a mod",
-            &["Space toggles a mod.", "x removes it from this version."],
+            lang.pick("Select a mod", "选择一个模组"),
+            &[
+                lang.pick("Space toggles a mod.", "空格启用 / 禁用模组。"),
+                lang.pick("x removes it from this version.", "x 从当前版本中卸载。"),
+            ],
             theme::PURPLE,
             t,
         );
@@ -891,9 +1038,9 @@ fn mod_detail(frame: &mut Frame, app: &App, area: Rect, t: f64) {
         Line::from(""),
         Line::from(vec![
             if row.enabled {
-                badge("ENABLED", theme::GREEN, theme::SURFACE)
+                badge(lang.pick("ENABLED", "已启用"), theme::GREEN, theme::SURFACE)
             } else {
-                badge("DISABLED", theme::GOLD, theme::SURFACE)
+                badge(lang.pick("DISABLED", "已禁用"), theme::GOLD, theme::SURFACE)
             },
             Span::styled("  ", Style::default().bg(theme::SURFACE)),
             Span::styled(
@@ -902,9 +1049,13 @@ fn mod_detail(frame: &mut Frame, app: &App, area: Rect, t: f64) {
             ),
         ]),
         Line::from(""),
-        kv("File", theme::one_line(&row.file, 200), theme::TEXT_DIM),
         kv(
-            "Folder",
+            lang.pick("File", "文件"),
+            theme::one_line(&row.file, 200),
+            theme::TEXT_DIM,
+        ),
+        kv(
+            lang.pick("Folder", "目录"),
             mods_dir
                 .map(|path| {
                     theme::truncate_chars(
@@ -919,7 +1070,10 @@ fn mod_detail(frame: &mut Frame, app: &App, area: Rect, t: f64) {
         Line::from(vec![
             Span::styled("◈ ", Style::default().fg(theme::PURPLE).bg(theme::SURFACE)),
             Span::styled(
-                "Disabled mods are renamed with a .disabled suffix.",
+                lang.pick(
+                    "Disabled mods are renamed with a .disabled suffix.",
+                    "禁用模组会重命名并加上 .disabled 后缀。",
+                ),
                 Style::default().fg(theme::TEXT_FAINT).bg(theme::SURFACE),
             ),
         ]),
@@ -933,7 +1087,7 @@ fn mod_detail(frame: &mut Frame, app: &App, area: Rect, t: f64) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                " toggle",
+                lang.pick(" toggle", " 启用 / 禁用"),
                 Style::default().fg(theme::TEXT_DIM).bg(theme::SURFACE),
             ),
         ]),
@@ -946,7 +1100,7 @@ fn mod_detail(frame: &mut Frame, app: &App, area: Rect, t: f64) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                " uninstall",
+                lang.pick(" uninstall", " 卸载"),
                 Style::default().fg(theme::TEXT_DIM).bg(theme::SURFACE),
             ),
         ]),
@@ -959,7 +1113,7 @@ fn mod_detail(frame: &mut Frame, app: &App, area: Rect, t: f64) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                " search Modrinth",
+                lang.pick(" search Modrinth", " 搜索 Modrinth"),
                 Style::default().fg(theme::TEXT_DIM).bg(theme::SURFACE),
             ),
         ]),
@@ -988,8 +1142,9 @@ fn accounts(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
 }
 
 fn list_accounts(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
+    let lang = app.lang();
     let block = panel(
-        format!("ACCOUNTS · {}", app.accounts.len()),
+        format!("{} · {}", lang.pick("ACCOUNTS", "账号"), app.accounts.len()),
         theme::GOLD,
         true,
         t,
@@ -1002,10 +1157,10 @@ fn list_accounts(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
             frame,
             area,
             "◉",
-            "No accounts yet",
+            lang.pick("No accounts yet", "还没有账号"),
             &[
-                "Press a to add an offline profile.",
-                "Press m for Microsoft login.",
+                lang.pick("Press a to add an offline profile.", "按 a 添加离线档案。"),
+                lang.pick("Press m for Microsoft login.", "按 m 使用 Microsoft 登录。"),
             ],
             theme::GOLD,
             t,
@@ -1036,11 +1191,7 @@ fn list_accounts(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
                         .bg(bg),
                 ),
                 Span::styled(
-                    format!(
-                        "{:<max$}",
-                        theme::truncate_chars(&row.username, max),
-                        max = max
-                    ),
+                    theme::pad_width(&theme::truncate_chars(&row.username, max), max),
                     Style::default()
                         .fg(theme::TEXT)
                         .bg(bg)
@@ -1051,7 +1202,10 @@ fn list_accounts(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
                         }),
                 ),
                 Span::styled(
-                    format!(" {:<5}", row.kind.to_ascii_uppercase()),
+                    format!(
+                        " {}",
+                        theme::pad_width(account_kind_label(lang, &row.kind), 5)
+                    ),
                     Style::default()
                         .fg(if selection {
                             theme::GOLD
@@ -1068,11 +1222,35 @@ fn list_accounts(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
         .highlight_symbol("▌")
         .highlight_style(Style::default().bg(theme::mix(theme::SURFACE, theme::GOLD, 0.14)))
         .style(Style::default().bg(theme::SURFACE));
-    frame.render_stateful_widget(list, inner, &mut app.account_state);
+    let visible = inner.height as usize;
+    let offset = window_offset(app.account_sel, app.accounts.len(), visible);
+    let mut state = ListState::default()
+        .with_offset(offset)
+        .with_selected(Some(app.account_sel));
+    frame.render_stateful_widget(list, inner, &mut state);
+    let count = visible.min(app.accounts.len().saturating_sub(offset));
+    for slot in 0..count {
+        register_mouse(
+            Rect {
+                x: inner.x,
+                y: inner.y + slot as u16,
+                width: inner.width,
+                height: 1,
+            },
+            MouseAction::AccountsRow(offset + slot),
+        );
+    }
 }
 
 fn account_detail(frame: &mut Frame, app: &App, area: Rect, t: f64) {
-    let block = panel("ACCOUNT DETAIL", theme::GOLD, true, t, theme::SURFACE);
+    let lang = app.lang();
+    let block = panel(
+        lang.pick("ACCOUNT DETAIL", "账号详情"),
+        theme::GOLD,
+        true,
+        t,
+        theme::SURFACE,
+    );
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let Some(row) = app.selected_account() else {
@@ -1080,8 +1258,11 @@ fn account_detail(frame: &mut Frame, app: &App, area: Rect, t: f64) {
             frame,
             area,
             "◉",
-            "Select an account",
-            &["Set a default, add an offline name, or sign in."],
+            lang.pick("Select an account", "选择一个账号"),
+            &[lang.pick(
+                "Set a default, add an offline name, or sign in.",
+                "设为默认、添加离线名称或登录。",
+            )],
             theme::GOLD,
             t,
         );
@@ -1099,7 +1280,7 @@ fn account_detail(frame: &mut Frame, app: &App, area: Rect, t: f64) {
             ),
             Span::styled("  ", Style::default().bg(theme::SURFACE)),
             badge(
-                row.kind.to_ascii_uppercase(),
+                account_kind_label(lang, &row.kind),
                 if row.kind == "msa" {
                     theme::CYAN
                 } else {
@@ -1109,7 +1290,7 @@ fn account_detail(frame: &mut Frame, app: &App, area: Rect, t: f64) {
             ),
             Span::styled(" ", Style::default().bg(theme::SURFACE)),
             if row.default {
-                badge("DEFAULT", theme::GOLD, theme::SURFACE)
+                badge(lang.pick("DEFAULT", "默认"), theme::GOLD, theme::SURFACE)
             } else {
                 Span::styled("", Style::default().bg(theme::SURFACE))
             },
@@ -1117,9 +1298,9 @@ fn account_detail(frame: &mut Frame, app: &App, area: Rect, t: f64) {
         Line::from(""),
         kv("UUID", short_uuid(&row.uuid), theme::TEXT_FAINT),
         kv(
-            "Session",
+            lang.pick("Session", "会话"),
             if expiry.is_empty() {
-                "offline profile".into()
+                lang.pick("offline profile", "离线档案").into()
             } else {
                 expiry
             },
@@ -1130,7 +1311,7 @@ fn account_detail(frame: &mut Frame, app: &App, area: Rect, t: f64) {
             },
         ),
         kv(
-            "Account slot",
+            lang.pick("Account slot", "账号标识"),
             theme::one_line(&row.key, 64),
             theme::TEXT_DIM,
         ),
@@ -1140,19 +1321,28 @@ fn account_detail(frame: &mut Frame, app: &App, area: Rect, t: f64) {
         lines.push(Line::from(vec![
             Span::styled("◆ ", Style::default().fg(theme::CYAN).bg(theme::SURFACE)),
             Span::styled(
-                "Microsoft access and refresh tokens live in the OS keychain.",
+                lang.pick(
+                    "Microsoft access and refresh tokens live in the OS keychain.",
+                    "Microsoft 访问/刷新令牌保存在操作系统钥匙串中。",
+                ),
                 Style::default().fg(theme::TEXT_DIM).bg(theme::SURFACE),
             ),
         ]));
         lines.push(Line::from(vec![Span::styled(
-            "   If no keychain is available, an opt-in encrypted local store is used.",
+            lang.pick(
+                "   If no keychain is available, an opt-in encrypted local store is used.",
+                "   若钥匙串不可用，将使用经确认后启用的本地加密存储。",
+            ),
             Style::default().fg(theme::TEXT_FAINT).bg(theme::SURFACE),
         )]));
     } else {
         lines.push(Line::from(vec![
             Span::styled("◆ ", Style::default().fg(theme::GREEN).bg(theme::SURFACE)),
             Span::styled(
-                "Offline accounts cannot join servers that require authentication.",
+                lang.pick(
+                    "Offline accounts cannot join servers that require authentication.",
+                    "离线账号无法加入要求正版认证的服务器。",
+                ),
                 Style::default().fg(theme::TEXT_DIM).bg(theme::SURFACE),
             ),
         ]));
@@ -1167,7 +1357,7 @@ fn account_detail(frame: &mut Frame, app: &App, area: Rect, t: f64) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            " set as default",
+            lang.pick(" set as default", " 设为默认"),
             Style::default().fg(theme::TEXT_DIM).bg(theme::SURFACE),
         ),
     ]));
@@ -1180,7 +1370,7 @@ fn account_detail(frame: &mut Frame, app: &App, area: Rect, t: f64) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            " add offline account",
+            lang.pick(" add offline account", " 添加离线账号"),
             Style::default().fg(theme::TEXT_DIM).bg(theme::SURFACE),
         ),
     ]));
@@ -1193,7 +1383,7 @@ fn account_detail(frame: &mut Frame, app: &App, area: Rect, t: f64) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            " Microsoft login",
+            lang.pick(" Microsoft login", " Microsoft 登录"),
             Style::default().fg(theme::TEXT_DIM).bg(theme::SURFACE),
         ),
     ]));
@@ -1206,7 +1396,7 @@ fn account_detail(frame: &mut Frame, app: &App, area: Rect, t: f64) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            " log out all accounts",
+            lang.pick(" log out all accounts", " 登出所有账号"),
             Style::default().fg(theme::TEXT_DIM).bg(theme::SURFACE),
         ),
     ]));
@@ -1221,7 +1411,7 @@ fn account_detail(frame: &mut Frame, app: &App, area: Rect, t: f64) {
 // ── settings ──────────────────────────────────────────────────────
 
 fn settings(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
-    if area.width < 88 {
+    if area.width < 84 {
         settings_fields(frame, app, area, t);
         return;
     }
@@ -1238,22 +1428,57 @@ fn settings(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
 }
 
 fn settings_fields(frame: &mut Frame, app: &App, area: Rect, t: f64) {
-    let block = panel("PREFERENCES", theme::BLUE, true, t, theme::SURFACE);
+    let lang = app.lang();
+    let block = panel(
+        lang.pick("PREFERENCES", "偏好设置"),
+        theme::BLUE,
+        true,
+        t,
+        theme::SURFACE,
+    );
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height < 6 {
         return;
     }
-    let labels = App::settings_labels();
+    let labels = App::settings_labels(lang);
     let descriptions = [
-        "Java heap passed as -Xmx. 512 MB steps.",
-        "Game window width. Auto lets Minecraft choose.",
-        "Game window height. Auto lets Minecraft choose.",
-        "Parallel download workers used by the CLI core.",
-        "Auto tries official first, then BMCLAPI on failure.",
-        "Empty means auto-detect. Enter to edit.",
-        "Turn off decorative motion for lower CPU use.",
-        "Show the short animated intro on start.",
+        lang.pick(
+            "Switch the TUI language. Applies immediately.",
+            "切换 TUI 界面语言，立即生效。",
+        ),
+        lang.pick(
+            "Java heap passed as -Xmx. 512 MB steps.",
+            "以 -Xmx 传给 Java 的堆内存，512 MB 步进。",
+        ),
+        lang.pick(
+            "Game window width. Auto lets Minecraft choose.",
+            "游戏窗口宽度。自动交给 Minecraft 决定。",
+        ),
+        lang.pick(
+            "Game window height. Auto lets Minecraft choose.",
+            "游戏窗口高度。自动交给 Minecraft 决定。",
+        ),
+        lang.pick(
+            "Parallel download workers used by the CLI core.",
+            "CLI 核心使用的并行下载线程数。",
+        ),
+        lang.pick(
+            "Auto tries official first, then BMCLAPI on failure.",
+            "自动优先官方，失败后再尝试 BMCLAPI。",
+        ),
+        lang.pick(
+            "Empty means auto-detect. Enter to edit.",
+            "留空表示自动检测。回车编辑。",
+        ),
+        lang.pick(
+            "Turn off decorative motion for lower CPU use.",
+            "关闭装饰动效以降低 CPU 占用。",
+        ),
+        lang.pick(
+            "Show the short animated intro on start.",
+            "启动时显示短暂的开场动画。",
+        ),
     ];
     let field_rows = (inner.height as usize).saturating_sub(5).min(labels.len());
     let selected = app.settings_cursor.min(labels.len() - 1);
@@ -1287,10 +1512,9 @@ fn settings_fields(frame: &mut Frame, app: &App, area: Rect, t: f64) {
                     .bg(bg),
             ),
             Span::styled(
-                format!(
-                    "{:<width$}",
-                    theme::truncate_chars(labels[index], label_width),
-                    width = label_width
+                theme::pad_width(
+                    &theme::truncate_chars(labels[index], label_width),
+                    label_width,
                 ),
                 Style::default()
                     .fg(if active { theme::TEXT } else { theme::TEXT_DIM })
@@ -1321,7 +1545,7 @@ fn settings_fields(frame: &mut Frame, app: &App, area: Rect, t: f64) {
             ),
         ];
         if active {
-            let right = "enter edit  ·  ←→ change";
+            let right = lang.pick("enter edit  ·  ←→ change", "回车编辑 · ←→ 调整");
             let used = 2 + label_width + 3 + 20;
             if used + right.len() < inner.width as usize {
                 spans.push(Span::styled(
@@ -1338,6 +1562,28 @@ fn settings_fields(frame: &mut Frame, app: &App, area: Rect, t: f64) {
             Paragraph::new(Line::from(spans)).style(Style::default().bg(bg)),
             row,
         );
+        register_mouse(row, MouseAction::SettingsRow(index));
+        let value_x = (2 + label_width + 2) as u16;
+        let value_width = inner.width.saturating_sub(value_x);
+        let half = value_width / 2;
+        register_mouse(
+            Rect {
+                x: inner.x.saturating_add(value_x),
+                y,
+                width: half,
+                height: 1,
+            },
+            MouseAction::SettingsDecrease(index),
+        );
+        register_mouse(
+            Rect {
+                x: inner.x.saturating_add(value_x).saturating_add(half),
+                y,
+                width: value_width.saturating_sub(half),
+                height: 1,
+            },
+            MouseAction::SettingsIncrease(index),
+        );
     }
     let help_y = inner.y + field_rows as u16 + 1;
     if help_y + 2 < inner.y + inner.height {
@@ -1351,12 +1597,16 @@ fn settings_fields(frame: &mut Frame, app: &App, area: Rect, t: f64) {
             .settings_saved_at
             .map(|at| {
                 if at.elapsed().as_secs() < 2 {
-                    "saved now".to_string()
+                    lang.pick("saved now", "刚刚保存").to_string()
                 } else {
-                    format!("saved {} ago", theme::format_duration(at.elapsed()))
+                    if lang == crate::tui::i18n::Lang::Chinese {
+                        format!("{} 前保存", theme::format_duration(at.elapsed()))
+                    } else {
+                        format!("saved {} ago", theme::format_duration(at.elapsed()))
+                    }
                 }
             })
-            .unwrap_or_else(|| "auto-saved".to_string());
+            .unwrap_or_else(|| lang.pick("auto-saved", "自动保存").to_string());
         let lines = vec![
             Line::from(vec![
                 Span::styled("◆ ", Style::default().fg(theme::BLUE).bg(theme::SURFACE)),
@@ -1366,7 +1616,11 @@ fn settings_fields(frame: &mut Frame, app: &App, area: Rect, t: f64) {
                 ),
             ]),
             Line::from(vec![Span::styled(
-                format!("  auto-saved to launcher_tui.json · {saved} · R resets"),
+                format!(
+                    "  {} · {saved} · {}",
+                    lang.pick("auto-saved to launcher_tui.json", "已自动保存"),
+                    lang.pick("R resets", "R 恢复默认")
+                ),
                 Style::default().fg(theme::TEXT_FAINT).bg(theme::SURFACE),
             )]),
         ];
@@ -1380,31 +1634,33 @@ fn settings_fields(frame: &mut Frame, app: &App, area: Rect, t: f64) {
 }
 
 fn settings_value(app: &App, index: usize) -> String {
+    let lang = app.lang();
     match index {
-        0 => app.settings.ram_label(),
-        1 => {
+        0 => lang.label().into(),
+        1 => app.settings.ram_label(),
+        2 => {
             if app.settings.width == 0 {
-                "Auto".into()
+                lang.pick("Auto", "自动").into()
             } else {
                 format!("{} px", app.settings.width)
             }
         }
-        2 => {
+        3 => {
             if app.settings.height == 0 {
-                "Auto".into()
+                lang.pick("Auto", "自动").into()
             } else {
                 format!("{} px", app.settings.height)
             }
         }
-        3 => format!("{}", app.settings.threads),
-        4 => match app.settings.source.as_str() {
-            "official" => "Official only".into(),
+        4 => format!("{}", app.settings.threads),
+        5 => match app.settings.source.as_str() {
+            "official" => lang.pick("Official only", "仅官方").into(),
             "bmcl" => "BMCLAPI".into(),
-            _ => "Auto".into(),
+            _ => lang.pick("Auto", "自动").into(),
         },
-        5 => {
+        6 => {
             if app.settings.java.trim().is_empty() {
-                "auto-detect".into()
+                lang.pick("auto-detect", "自动检测").into()
             } else {
                 theme::truncate_chars(
                     Path::new(&app.settings.java)
@@ -1415,26 +1671,38 @@ fn settings_value(app: &App, index: usize) -> String {
                 )
             }
         }
-        6 => if app.settings.reduced_motion {
-            "On"
+        7 => if app.settings.reduced_motion {
+            lang.pick("On", "开")
         } else {
-            "Off"
+            lang.pick("Off", "关")
         }
         .into(),
-        7 => if app.settings.splash { "On" } else { "Off" }.into(),
+        8 => if app.settings.splash {
+            lang.pick("On", "开")
+        } else {
+            lang.pick("Off", "关")
+        }
+        .into(),
         _ => String::new(),
     }
 }
 
 fn settings_preview(frame: &mut Frame, app: &App, area: Rect, t: f64) {
-    let block = panel("PROFILE PREVIEW", theme::BLUE, false, t, theme::SURFACE);
+    let lang = app.lang();
+    let block = panel(
+        lang.pick("PROFILE PREVIEW", "配置预览"),
+        theme::BLUE,
+        false,
+        t,
+        theme::SURFACE,
+    );
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let version = app
         .settings
         .active_version
         .clone()
-        .unwrap_or_else(|| "<version>".into());
+        .unwrap_or_else(|| lang.pick("<version>", "<版本>").into());
     let loader = app
         .active_loader()
         .unwrap_or_else(|| "vanilla".into())
@@ -1442,7 +1710,7 @@ fn settings_preview(frame: &mut Frame, app: &App, area: Rect, t: f64) {
     let (width, height) = app.settings.window();
     let window = match (width, height) {
         (Some(width), Some(height)) => format!("{width}×{height}"),
-        _ => "game default".into(),
+        _ => lang.pick("game default", "游戏默认").into(),
     };
     let java = if app.settings.java.trim().is_empty() {
         app.java_path
@@ -1454,9 +1722,14 @@ fn settings_preview(frame: &mut Frame, app: &App, area: Rect, t: f64) {
                     .unwrap_or(path)
                     .to_string()
             })
-            .unwrap_or_else(|| "auto-detect".into())
+            .unwrap_or_else(|| lang.pick("auto-detect", "自动检测").into())
     } else {
         app.settings.java.clone()
+    };
+    let source = match app.settings.source.as_str() {
+        "official" => lang.pick("official", "官方"),
+        "bmcl" => "BMCLAPI",
+        _ => lang.pick("auto", "自动"),
     };
     let mut command = format!(
         "mc-launcher play -v {} --ram {}",
@@ -1468,18 +1741,26 @@ fn settings_preview(frame: &mut Frame, app: &App, area: Rect, t: f64) {
     }
     let lines = vec![
         Line::from(vec![Span::styled(
-            "Launch profile",
+            lang.pick("Launch profile", "启动配置"),
             Style::default()
                 .fg(theme::TEXT)
                 .bg(theme::SURFACE)
                 .add_modifier(Modifier::BOLD),
         )]),
         Line::from(""),
-        kv("Memory", app.settings.ram_label(), theme::GOLD),
-        kv("Window", window, theme::CYAN),
         kv(
-            "Download",
-            format!("{} threads · {}", app.settings.threads, app.settings.source),
+            lang.pick("Memory", "内存"),
+            app.settings.ram_label(),
+            theme::GOLD,
+        ),
+        kv(lang.pick("Window", "窗口"), window, theme::CYAN),
+        kv(
+            lang.pick("Download", "下载"),
+            format!(
+                "{} {} · {source}",
+                app.settings.threads,
+                lang.pick("threads", "线程")
+            ),
             theme::BLUE,
         ),
         kv(
@@ -1489,7 +1770,7 @@ fn settings_preview(frame: &mut Frame, app: &App, area: Rect, t: f64) {
         ),
         Line::from(""),
         Line::from(vec![Span::styled(
-            "Equivalent CLI",
+            lang.pick("Equivalent CLI", "等效命令"),
             Style::default().fg(theme::TEXT_FAINT).bg(theme::SURFACE),
         )]),
         Line::from(vec![Span::styled(
@@ -1498,11 +1779,17 @@ fn settings_preview(frame: &mut Frame, app: &App, area: Rect, t: f64) {
         )]),
         Line::from(""),
         Line::from(vec![Span::styled(
-            "The TUI only wraps the same CLI core;",
+            lang.pick(
+                "The TUI only wraps the same CLI core;",
+                "TUI 只是包装同一份 CLI 核心；",
+            ),
             Style::default().fg(theme::TEXT_FAINT).bg(theme::SURFACE),
         )]),
         Line::from(vec![Span::styled(
-            "every action stays scriptable and terminal-first.",
+            lang.pick(
+                "every action stays scriptable and terminal-first.",
+                "所有操作仍然可脚本化、终端优先。",
+            ),
             Style::default().fg(theme::TEXT_FAINT).bg(theme::SURFACE),
         )]),
     ];
@@ -1517,11 +1804,17 @@ fn settings_preview(frame: &mut Frame, app: &App, area: Rect, t: f64) {
 // ── logs ──────────────────────────────────────────────────────────
 
 fn logs(frame: &mut Frame, app: &App, area: Rect, t: f64) {
+    let lang = app.lang();
     let block = panel(
         format!(
-            "ACTIVITY · {}  ·  {}",
+            "{} · {}  ·  {}",
+            lang.pick("ACTIVITY", "活动"),
             app.logs.len(),
-            if app.log_follow { "LIVE" } else { "PAUSED" }
+            if app.log_follow {
+                lang.pick("LIVE", "实时")
+            } else {
+                lang.pick("PAUSED", "暂停")
+            }
         ),
         theme::PINK,
         true,
@@ -1538,8 +1831,11 @@ fn logs(frame: &mut Frame, app: &App, area: Rect, t: f64) {
             frame,
             area,
             "≡",
-            "The log is empty",
-            &["Launches, downloads and UI actions appear here."],
+            lang.pick("The log is empty", "日志为空"),
+            &[lang.pick(
+                "Launches, downloads and UI actions appear here.",
+                "启动、下载和界面操作会显示在这里。",
+            )],
             theme::PINK,
             t,
         );
@@ -1577,6 +1873,7 @@ fn logs(frame: &mut Frame, app: &App, area: Rect, t: f64) {
 // ── search overlay ────────────────────────────────────────────────
 
 pub fn render_search(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
+    let lang = app.lang();
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -1587,7 +1884,7 @@ pub fn render_search(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
         .split(area);
     let input_focused = app.search.focus == SearchFocus::Input;
     let input_block = panel(
-        "SEARCH MODRINTH",
+        lang.pick("SEARCH MODRINTH", "搜索 Modrinth"),
         theme::CYAN,
         input_focused,
         t,
@@ -1595,6 +1892,7 @@ pub fn render_search(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
     );
     let input_inner = input_block.inner(rows[0]);
     frame.render_widget(input_block, rows[0]);
+    register_mouse(rows[0], MouseAction::SearchInput);
     if input_inner.height > 0 {
         let mut spans = vec![Span::styled(
             " ⌕  ",
@@ -1614,18 +1912,26 @@ pub fn render_search(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
                 input_focused,
                 t,
                 theme::SURFACE,
-                "type a mod name, then press enter",
+                lang.pick("type a mod name, then press enter", "输入模组名后按回车"),
             )
             .spans,
         );
         if app.search.loading {
             spans.push(Span::styled(
-                format!("  {} searching…", theme::spinner(app.frame)),
+                format!(
+                    "  {} {}…",
+                    theme::spinner(app.frame),
+                    lang.pick("searching", "搜索中")
+                ),
                 Style::default().fg(theme::GOLD).bg(theme::SURFACE),
             ));
         } else if !app.search.results.is_empty() {
             spans.push(Span::styled(
-                format!("  {} results", app.search.results.len()),
+                format!(
+                    "  {} {}",
+                    app.search.results.len(),
+                    lang.pick("results", "个结果")
+                ),
                 Style::default().fg(theme::TEXT_FAINT).bg(theme::SURFACE),
             ));
         }
@@ -1635,7 +1941,13 @@ pub fn render_search(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
         );
     }
 
-    let results = panel("RESULTS", theme::CYAN, !input_focused, t, theme::SURFACE);
+    let results = panel(
+        lang.pick("RESULTS", "结果"),
+        theme::CYAN,
+        !input_focused,
+        t,
+        theme::SURFACE,
+    );
     let results_inner = results.inner(rows[2]);
     frame.render_widget(results, rows[2]);
     if results_inner.height == 0 {
@@ -1645,7 +1957,7 @@ pub fn render_search(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
         frame.render_widget(
             Paragraph::new(vec![
                 Line::from(vec![Span::styled(
-                    "✕  Search failed",
+                    lang.pick("✕  Search failed", "✕  搜索失败"),
                     Style::default()
                         .fg(theme::RED)
                         .bg(theme::SURFACE)
@@ -1658,7 +1970,10 @@ pub fn render_search(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
                 )]),
                 Line::from(""),
                 Line::from(vec![Span::styled(
-                    "Press enter to retry, or esc to close.",
+                    lang.pick(
+                        "Press enter to retry, or esc to close.",
+                        "按回车重试，或按 Esc 关闭。",
+                    ),
                     Style::default().fg(theme::TEXT_FAINT).bg(theme::SURFACE),
                 )]),
             ])
@@ -1702,10 +2017,13 @@ pub fn render_search(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
             frame,
             rows[2],
             "⌕",
-            "Search Modrinth",
+            lang.pick("Search Modrinth", "搜索 Modrinth"),
             &[
-                "Type a query and press enter.",
-                "Facets use the active version and loader.",
+                lang.pick("Type a query and press enter.", "输入关键词后按回车。"),
+                lang.pick(
+                    "Facets use the active version and loader.",
+                    "筛选条件使用当前版本与加载器。",
+                ),
             ],
             theme::CYAN,
             t,
@@ -1729,19 +2047,32 @@ pub fn render_search(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
                 theme::truncate_chars(&hit.title, 34),
                 if selection { "›" } else { "" }
             );
-            let meta = format!(
-                "by {} · {} downloads · {}",
-                hit.author,
-                format_num(hit.downloads),
-                if hit.categories.is_empty() {
-                    "uncategorized".into()
-                } else {
-                    hit.categories.clone()
-                }
-            );
+            let meta = if lang == Lang::Chinese {
+                format!(
+                    "作者 {} · {} 次下载 · {}",
+                    hit.author,
+                    format_num(hit.downloads),
+                    if hit.categories.is_empty() {
+                        "未分类".to_string()
+                    } else {
+                        hit.categories.clone()
+                    }
+                )
+            } else {
+                format!(
+                    "by {} · {} downloads · {}",
+                    hit.author,
+                    format_num(hit.downloads),
+                    if hit.categories.is_empty() {
+                        "uncategorized".into()
+                    } else {
+                        hit.categories.clone()
+                    }
+                )
+            };
             let description = theme::truncate_chars(
                 if hit.description.is_empty() {
-                    "No description"
+                    lang.pick("No description", "无描述")
                 } else {
                     &hit.description
                 },
@@ -1789,7 +2120,29 @@ pub fn render_search(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
         .highlight_symbol("▌")
         .highlight_style(Style::default().bg(theme::mix(theme::SURFACE, theme::CYAN, 0.13)))
         .style(Style::default().bg(theme::SURFACE));
-    frame.render_stateful_widget(list, results_inner, &mut app.search.list_state);
+    let item_height = 4usize;
+    let visible_items = (results_inner.height as usize / item_height).max(1);
+    let offset = window_offset(app.search.selected, app.search.results.len(), visible_items);
+    let mut state = ListState::default()
+        .with_offset(offset)
+        .with_selected(Some(app.search.selected));
+    frame.render_stateful_widget(list, results_inner, &mut state);
+    let count = visible_items.min(app.search.results.len().saturating_sub(offset));
+    for slot in 0..count {
+        let y = results_inner.y + (slot * item_height) as u16;
+        let height = item_height
+            .min((results_inner.y + results_inner.height).saturating_sub(y) as usize)
+            as u16;
+        register_mouse(
+            Rect {
+                x: results_inner.x,
+                y,
+                width: results_inner.width,
+                height,
+            },
+            MouseAction::SearchRow(offset + slot),
+        );
+    }
 }
 
 // ── small helpers ─────────────────────────────────────────────────
@@ -1797,7 +2150,7 @@ pub fn render_search(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
 fn kv(label: &str, value: String, color: Color) -> Line<'static> {
     Line::from(vec![
         Span::styled(
-            format!("{:<14}", label),
+            theme::pad_width(label, 14),
             Style::default().fg(theme::TEXT_FAINT).bg(theme::SURFACE),
         ),
         Span::styled(value, Style::default().fg(color).bg(theme::SURFACE)),
@@ -1823,6 +2176,13 @@ fn short_bytes(size: u64) -> String {
     }
 }
 
+fn account_kind_label(lang: Lang, kind: &str) -> &'static str {
+    match kind {
+        "msa" => lang.pick("MSA", "微软"),
+        _ => lang.pick("OFFLINE", "离线"),
+    }
+}
+
 fn short_uuid(uuid: &str) -> String {
     let chars: Vec<char> = uuid.chars().collect();
     if chars.len() > 20 {
@@ -1836,17 +2196,27 @@ fn short_uuid(uuid: &str) -> String {
     }
 }
 
-fn age_label(age: Option<Duration>) -> String {
+fn age_label(lang: Lang, age: Option<Duration>) -> String {
     let Some(age) = age else {
-        return "unknown".into();
+        return lang.pick("unknown", "未知").into();
     };
     let secs = age.as_secs();
     if secs < 120 {
-        "just now".into()
+        lang.pick("just now", "刚刚").into()
     } else if secs < 3600 {
-        format!("{}m ago", secs / 60)
+        if lang == Lang::Chinese {
+            format!("{} 分钟前", secs / 60)
+        } else {
+            format!("{}m ago", secs / 60)
+        }
     } else if secs < 86_400 {
-        format!("{}h ago", secs / 3600)
+        if lang == Lang::Chinese {
+            format!("{} 小时前", secs / 3600)
+        } else {
+            format!("{}h ago", secs / 3600)
+        }
+    } else if lang == Lang::Chinese {
+        format!("{} 天前", secs / 86_400)
     } else {
         format!("{}d ago", secs / 86_400)
     }
@@ -1862,6 +2232,16 @@ fn format_num(value: u64) -> String {
         out.push(ch);
     }
     out
+}
+
+fn window_offset(selected: usize, len: usize, visible: usize) -> usize {
+    if visible == 0 || len <= visible {
+        0
+    } else {
+        selected
+            .saturating_sub(visible - 1)
+            .min(len.saturating_sub(visible))
+    }
 }
 
 fn now_f64() -> f64 {

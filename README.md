@@ -42,9 +42,11 @@ mc-launcher logout --dir ./minecraft
 mc-launcher tui
 ```
 
-同一个 CLI 二进制里的键盘驱动全屏界面，包含动态 Dashboard、远程版本选择与下载、加载器选择与安装、Modrinth 搜索/安装、模组启停、账号管理、设置与完整活动日志。文件下载有分阶段进度、实时速度、每文件百分比和可取消的任务面板；界面支持 30 FPS 渐变/脉冲/Toast/粒子动效，以及在设置中关闭开场动画和减少动效。
+同一个 CLI 二进制里的键盘/鼠标驱动全屏界面，包含动态 Dashboard、远程版本选择与下载、加载器选择与安装、Modrinth 搜索/安装、模组启停、账号管理、设置与完整活动日志。文件下载有分阶段进度、实时速度、每文件百分比和可取消的任务面板；界面支持 30 FPS 渐变/脉冲/Toast/粒子动效，以及在设置中关闭开场动画和减少动效。
 
 - 需要交互式终端和 ANSI 支持；stdin/stdout 不是 TTY 或 `TERM=dumb` 时会明确报错，不会在 CI 或管道中挂起。
+- 支持中英文界面切换（默认 English），在 Settings 第一项即时切换并自动保存。
+- 支持鼠标点击侧栏/标签、主按钮、列表行、设置项和弹窗按钮，滚轮可移动选择；点击列表行选中，双击执行主要动作。
 - 窗口宽度小于 96 列自动切换顶部标签布局；小于 52×16 显示尺寸提示。
 - 终端始终在退出、错误、挂起和主线程 panic 时恢复；运行任务退出时会被取消并清理子进程树。
 - 配置保存在游戏目录的 `launcher_tui.json`，不含令牌。
@@ -108,7 +110,7 @@ Forge 和 NeoForge 执行官方安装器及其 processors，不再把“只解�
 ```text
 minecraft/
   launcher_accounts.json       # 非敏感账号元数据
-  launcher_tui.json            # 可选：TUI 偏好（内存、窗口、源、Java 等）
+  launcher_tui.json            # 可选：TUI 偏好（语言、内存、窗口、源、Java 等）
   launcher_secrets.enc         # 可选：钥匙串不可用时的加密令牌（需用户同意）
   launcher_secrets.key         # 可选：上述加密文件的本地密钥（0600）
   versions/<mc-version>/       # 该版本的 saves、mods、config、日志及客户端
@@ -129,7 +131,7 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo build --locked --release
 ```
 
-CI 在 Linux、Windows、macOS 执行上述命令。测试使用本地 HTTP fixture 和模拟钥匙串，不需要正版账号；Unix 上用假的 Java 可执行文件验证离线启动参数、工作目录和子进程退出码。TUI 使用 `TestBackend` 在多种终端尺寸下渲染全部界面、弹窗和任务状态；开发验证中还使用伪终端冒烟测试检查备用屏幕进入/退出与按键退出。非 TTY 下的 `tui` 会明确失败，不会阻塞 CI。这不是实际 Minecraft 图形界面或 Microsoft 服务的端到端测试。参见 [验证记录](docs/VALIDATION.md) 与 [TUI 说明](docs/TUI.md)。
+CI 在 Linux、Windows、macOS 执行上述命令。测试使用本地 HTTP fixture 和模拟钥匙串，不需要正版账号；Unix 上用假的 Java 可执行文件验证离线启动参数、工作目录和子进程退出码。TUI 使用 `TestBackend` 在多种终端尺寸下渲染全部界面、弹窗和任务状态，并验证中英文切换和鼠标热区；开发验证中还使用伪终端冒烟测试检查备用屏幕、括号粘贴、鼠标捕获开关与按键退出。非 TTY 下的 `tui` 会明确失败，不会阻塞 CI。这不是实际 Minecraft 图形界面或 Microsoft 服务的端到端测试。参见 [验证记录](docs/VALIDATION.md) 与 [TUI 说明](docs/TUI.md)。
 
 ## 许可证
 

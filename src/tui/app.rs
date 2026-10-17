@@ -5,7 +5,9 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use ratatui::style::Color;
 use ratatui::widgets::ListState;
 
@@ -16,6 +18,7 @@ use crate::launcher::MinecraftLauncher;
 use crate::mod_manager::ModManager;
 use crate::progress::{self, TransferEvent};
 use crate::tui::config::Settings;
+use crate::tui::i18n::{self, Lang};
 use crate::tui::input::TextInput;
 use crate::tui::jobs::{self, BackendEvent, EventSender, LogLevel};
 use crate::tui::theme;
@@ -42,14 +45,14 @@ impl Screen {
         Screen::Logs,
     ];
 
-    pub fn title(self) -> &'static str {
+    pub fn title(self, lang: Lang) -> &'static str {
         match self {
-            Screen::Dashboard => "Dashboard",
-            Screen::Versions => "Versions",
-            Screen::Mods => "Mods",
-            Screen::Accounts => "Accounts",
-            Screen::Settings => "Settings",
-            Screen::Logs => "Activity",
+            Screen::Dashboard => lang.pick("Dashboard", "概览"),
+            Screen::Versions => lang.pick("Versions", "版本"),
+            Screen::Mods => lang.pick("Mods", "模组"),
+            Screen::Accounts => lang.pick("Accounts", "账号"),
+            Screen::Settings => lang.pick("Settings", "设置"),
+            Screen::Logs => lang.pick("Activity", "活动"),
         }
     }
 
@@ -172,6 +175,33 @@ pub enum SuspendTask {
 pub enum AppCommand {
     None,
     Suspend(SuspendTask),
+}
+
+/// Clickable regions are registered by the renderer and consumed by the event
+/// loop after the next frame. Coordinates are absolute terminal cells.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MouseAction {
+    Noop,
+    Nav(Screen),
+    DashboardPrimary,
+    DashboardActivity,
+    StatVersions,
+    StatMods,
+    StatSettings,
+    SettingsRow(usize),
+    SettingsDecrease(usize),
+    SettingsIncrease(usize),
+    VersionsRow(usize),
+    ModsRow(usize),
+    AccountsRow(usize),
+    SearchInput,
+    SearchRow(usize),
+    PickerRow(usize),
+    LoginRow(usize),
+    ConfirmYes,
+    ConfirmNo,
+    CloseModal,
+    JobCancel,
 }
 
 pub struct PickerState {
@@ -549,9 +579,14 @@ pub struct App {
     pub tx: EventSender,
     pub pending_activate: Option<String>,
     pub pending_loader: Option<String>,
+    last_click: Option<(MouseAction, Instant)>,
 }
 
 impl App {
+    pub fn lang(&self) -> Lang {
+        Lang::from_code(&self.settings.language)
+    }
+
     pub fn new(launcher: MinecraftLauncher, tx: EventSender, bootstrap: Bootstrap) -> Self {
         let game_dir = launcher.game_dir.clone();
         let (mut settings, warning) = Settings::load(&Settings::path(&game_dir));
@@ -619,15 +654,31 @@ impl App {
             tx: tx.clone(),
             pending_activate: None,
             pending_loader: None,
+            last_click: None,
         };
-        app.add_log(LogLevel::Info, "mc-launcher TUI ready");
+        let lang = app.lang();
+        app.add_log(
+            LogLevel::Info,
+            lang.pick("mc-launcher TUI ready", "mc-launcher TUI 已就绪"),
+        );
         app.add_log(
             LogLevel::Debug,
-            format!("Game directory: {}", app.game_dir.display()),
+            if lang == Lang::Chinese {
+                format!("游戏目录：{}", app.game_dir.display())
+            } else {
+                format!("Game directory: {}", app.game_dir.display())
+            },
         );
         if let Some(warning) = warning {
             app.add_log(LogLevel::Warn, warning.clone());
-            app.toast(LogLevel::Warn, warning);
+            app.toast(
+                LogLevel::Warn,
+                if lang == Lang::Chinese {
+                    format!("配置警告：{warning}")
+                } else {
+                    warning
+                },
+            );
         }
         app.refresh_local();
         if let Some(version) = bootstrap.version {
@@ -642,21 +693,38 @@ impl App {
             } else {
                 app.add_log(
                     LogLevel::Warn,
-                    format!("Requested version {version} is not installed"),
+                    if app.lang() == Lang::Chinese {
+                        format!("请求的版本 {version} 尚未安装")
+                    } else {
+                        format!("Requested version {version} is not installed")
+                    },
                 );
                 app.toast(
                     LogLevel::Warn,
-                    format!("Minecraft {version} is not installed"),
+                    if app.lang() == Lang::Chinese {
+                        format!("Minecraft {version} 尚未安装")
+                    } else {
+                        format!("Minecraft {version} is not installed")
+                    },
                 );
             }
         }
         app.add_log(
             LogLevel::Info,
-            format!(
-                "{} version(s) installed · source {}",
-                app.versions.len(),
-                app.settings.source
-            ),
+            if app.lang() == Lang::Chinese {
+                let source = match app.settings.source.as_str() {
+                    "official" => "官方",
+                    "bmcl" => "BMCLAPI",
+                    _ => "自动",
+                };
+                format!("已安装 {} 个版本 · 下载源 {source}", app.versions.len())
+            } else {
+                format!(
+                    "{} version(s) installed · source {}",
+                    app.versions.len(),
+                    app.settings.source
+                )
+            },
         );
         jobs::start_java_probe(tx);
         app
@@ -723,7 +791,11 @@ impl App {
         if skipped_invalid > 0 {
             self.add_log(
                 LogLevel::Warn,
-                format!("Skipped {skipped_invalid} invalid version directory name(s)"),
+                if self.lang() == Lang::Chinese {
+                    format!("已跳过 {skipped_invalid} 个无效版本目录名")
+                } else {
+                    format!("Skipped {skipped_invalid} invalid version directory name(s)")
+                },
             );
         }
 
@@ -939,7 +1011,10 @@ impl App {
         match self.settings.save(&Settings::path(&self.game_dir)) {
             Ok(()) => {
                 self.settings_saved_at = Some(Instant::now());
-                self.toast(LogLevel::Ok, "Settings saved");
+                self.toast(
+                    LogLevel::Ok,
+                    self.lang().pick("Settings saved", "设置已保存"),
+                );
             }
             Err(error) => self.toast(LogLevel::Error, error),
         }
@@ -960,23 +1035,26 @@ impl App {
         let direction = direction.signum();
         match self.settings_cursor {
             0 => {
+                self.settings.language = self.lang().next().code().into();
+            }
+            1 => {
                 let next = (self.settings.ram_mb as i64 + direction as i64 * 512).clamp(512, 32_768)
                     as u32;
                 self.settings.ram_mb = next;
             }
-            1 => {
+            2 => {
                 const PRESETS: [u32; 6] = [0, 854, 1280, 1600, 1920, 2560];
                 self.settings.width = cycle_preset(&PRESETS, self.settings.width, direction);
             }
-            2 => {
+            3 => {
                 const PRESETS: [u32; 6] = [0, 480, 720, 900, 1080, 1440];
                 self.settings.height = cycle_preset(&PRESETS, self.settings.height, direction);
             }
-            3 => {
+            4 => {
                 self.settings.threads =
                     (self.settings.threads as i64 + direction as i64).clamp(1, 32) as usize;
             }
-            4 => {
+            5 => {
                 let next = match (self.settings.source.as_str(), direction) {
                     ("auto", 1) => "official",
                     ("official", 1) => "bmcl",
@@ -989,12 +1067,12 @@ impl App {
                 self.settings.source = next.into();
                 http::set_source_mode(self.settings.source_mode());
             }
-            5 => {
+            6 => {
                 self.open_java_input();
                 return;
             }
-            6 => self.settings.reduced_motion = !self.settings.reduced_motion,
-            7 => self.settings.splash = !self.settings.splash,
+            7 => self.settings.reduced_motion = !self.settings.reduced_motion,
+            8 => self.settings.splash = !self.settings.splash,
             _ => {}
         }
         self.settings.normalize();
@@ -1004,8 +1082,14 @@ impl App {
 
     pub fn settings_activate(&mut self) {
         match self.settings_cursor {
-            5 => self.open_java_input(),
-            6 => {
+            0 => {
+                self.settings_adjust(1);
+                let lang = self.lang();
+                let message = lang.pick("Language: English", "语言：中文");
+                self.toast(LogLevel::Info, message);
+            }
+            6 => self.open_java_input(),
+            7 => {
                 self.settings.reduced_motion = !self.settings.reduced_motion;
                 if self.settings.reduced_motion {
                     self.particles.clear();
@@ -1013,7 +1097,7 @@ impl App {
                 self.settings_autosave_blocked = false;
                 self.save_settings_silent();
             }
-            7 => {
+            8 => {
                 self.settings.splash = !self.settings.splash;
                 self.settings_autosave_blocked = false;
                 self.save_settings_silent();
@@ -1029,19 +1113,24 @@ impl App {
         http::set_source_mode(self.settings.source_mode());
         self.settings_autosave_blocked = false;
         self.save_settings_silent();
-        self.toast(LogLevel::Ok, "Settings restored to defaults");
+        self.toast(
+            LogLevel::Ok,
+            self.lang()
+                .pick("Settings restored to defaults", "设置已恢复默认值"),
+        );
     }
 
-    pub fn settings_labels() -> [&'static str; 8] {
+    pub fn settings_labels(lang: Lang) -> [&'static str; 9] {
         [
-            "Memory",
-            "Window width",
-            "Window height",
-            "Download threads",
-            "Download source",
-            "Java executable",
-            "Reduced motion",
-            "Intro splash",
+            lang.pick("Language", "界面语言"),
+            lang.pick("Memory", "内存"),
+            lang.pick("Window width", "窗口宽度"),
+            lang.pick("Window height", "窗口高度"),
+            lang.pick("Download threads", "下载线程"),
+            lang.pick("Download source", "下载源"),
+            lang.pick("Java executable", "Java 路径"),
+            lang.pick("Reduced motion", "减少动效"),
+            lang.pick("Intro splash", "开场动画"),
         ]
     }
 
@@ -1186,19 +1275,32 @@ impl App {
     }
 
     pub fn job_status_label(&self) -> String {
+        let lang = self.lang();
         match &self.job {
             Some(job) if job.is_running() => theme::truncate_chars(
-                &format!("WORKING · {} · {}", job.title, job.phase_label),
+                &format!(
+                    "{} · {} · {}",
+                    lang.pick("WORKING", "工作中"),
+                    job.title,
+                    i18n::localize_job_phase(lang, &job.phase_label)
+                ),
                 64,
             ),
             Some(job) => match &job.finished {
-                Some(Ok(_)) => "COMPLETE · esc dismiss".into(),
-                Some(Err(_)) => "FAILED · esc dismiss · l for details".into(),
-                None => "WORKING".into(),
+                Some(Ok(_)) => lang
+                    .pick("COMPLETE · esc dismiss", "完成 · esc 关闭")
+                    .into(),
+                Some(Err(_)) => lang
+                    .pick(
+                        "FAILED · esc dismiss · l for details",
+                        "失败 · esc 关闭 · l 查看详情",
+                    )
+                    .into(),
+                None => lang.pick("WORKING", "工作中").into(),
             },
-            None if self.search.open => "SEARCH · Modrinth".into(),
-            None if self.modal.is_some() => "DIALOG".into(),
-            None => "READY".into(),
+            None if self.search.open => lang.pick("SEARCH · Modrinth", "搜索 · Modrinth").into(),
+            None if self.modal.is_some() => lang.pick("DIALOG", "对话框").into(),
+            None => lang.pick("READY", "就绪").into(),
         }
     }
 
@@ -1329,6 +1431,257 @@ impl App {
         }
     }
 
+    pub fn handle_mouse(&mut self, event: MouseEvent, hit: Option<MouseAction>) -> AppCommand {
+        if self.splash_active() {
+            if matches!(event.kind, MouseEventKind::Down(MouseButton::Left)) {
+                self.skip_splash();
+            }
+            return AppCommand::None;
+        }
+        match event.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                let Some(action) = hit else {
+                    self.last_click = None;
+                    return AppCommand::None;
+                };
+                let now = Instant::now();
+                let double_click = self.last_click.is_some_and(|(last, at)| {
+                    last == action && now.duration_since(at) < Duration::from_millis(450)
+                });
+                self.last_click = Some((action, now));
+                self.apply_mouse_action(action, double_click)
+            }
+            MouseEventKind::ScrollUp => {
+                self.last_click = None;
+                self.scroll_mouse(true);
+                AppCommand::None
+            }
+            MouseEventKind::ScrollDown => {
+                self.last_click = None;
+                self.scroll_mouse(false);
+                AppCommand::None
+            }
+            _ => AppCommand::None,
+        }
+    }
+
+    fn apply_mouse_action(&mut self, action: MouseAction, double_click: bool) -> AppCommand {
+        match action {
+            MouseAction::Noop => {}
+            MouseAction::Nav(screen) => {
+                self.screen = screen;
+                self.search.open = false;
+            }
+            MouseAction::DashboardPrimary => return self.play_active(),
+            MouseAction::DashboardActivity => self.screen = Screen::Logs,
+            MouseAction::StatVersions => self.screen = Screen::Versions,
+            MouseAction::StatMods => self.screen = Screen::Mods,
+            MouseAction::StatSettings => self.screen = Screen::Settings,
+            MouseAction::SettingsRow(index) => {
+                self.settings_cursor = index.min(8);
+            }
+            MouseAction::SettingsDecrease(index) => {
+                self.settings_cursor = index.min(8);
+                if matches!(index, 0 | 6 | 7 | 8) {
+                    self.settings_activate();
+                } else {
+                    self.settings_adjust(-1);
+                }
+            }
+            MouseAction::SettingsIncrease(index) => {
+                self.settings_cursor = index.min(8);
+                if matches!(index, 0 | 6 | 7 | 8) {
+                    self.settings_activate();
+                } else {
+                    self.settings_adjust(1);
+                }
+            }
+            MouseAction::VersionsRow(index) => {
+                if index >= self.versions.len() {
+                    return AppCommand::None;
+                }
+                if double_click && self.version_sel == index {
+                    let version = self.versions[index].id.clone();
+                    return self.launch_version(version);
+                }
+                self.version_sel = index;
+                self.version_state.select(Some(index));
+            }
+            MouseAction::ModsRow(index) => {
+                if index >= self.mods.len() {
+                    return AppCommand::None;
+                }
+                if double_click && self.mod_sel == index {
+                    self.toggle_selected_mod();
+                } else {
+                    self.mod_sel = index;
+                    self.mod_state.select(Some(index));
+                }
+            }
+            MouseAction::AccountsRow(index) => {
+                if index >= self.accounts.len() {
+                    return AppCommand::None;
+                }
+                if double_click && self.account_sel == index {
+                    self.set_selected_default();
+                } else {
+                    self.account_sel = index;
+                    self.account_state.select(Some(index));
+                }
+            }
+            MouseAction::SearchInput => {
+                self.search.focus = SearchFocus::Input;
+            }
+            MouseAction::SearchRow(index) => {
+                if index >= self.search.results.len() {
+                    return AppCommand::None;
+                }
+                self.search.selected = index;
+                self.search.list_state.select(Some(index));
+                self.search.focus = SearchFocus::Results;
+                if double_click {
+                    self.confirm_search_install();
+                }
+            }
+            MouseAction::PickerRow(index) => {
+                let mut chosen = None;
+                if let Some(Modal::Picker(picker)) = self.modal.as_mut() {
+                    if index >= picker.filtered.len() {
+                        return AppCommand::None;
+                    }
+                    if double_click && picker.selected == index {
+                        if let Some(item) = picker.selected_item() {
+                            chosen = Some((picker.kind, item.id.clone()));
+                        }
+                    } else {
+                        picker.selected = index;
+                        picker.list_state.select(Some(index));
+                    }
+                }
+                if let Some((kind, id)) = chosen {
+                    self.modal = None;
+                    return self.apply_pick(kind, &id);
+                }
+            }
+            MouseAction::LoginRow(index) => {
+                let mut chosen = None;
+                if let Some(Modal::Login { selected }) = self.modal.as_mut() {
+                    if double_click && *selected == index {
+                        chosen = Some(if index == 0 {
+                            LoginMode::Browser
+                        } else {
+                            LoginMode::DeviceCode
+                        });
+                    } else {
+                        *selected = index.min(1);
+                    }
+                }
+                if let Some(mode) = chosen {
+                    self.modal = None;
+                    return AppCommand::Suspend(SuspendTask::Login(mode));
+                }
+            }
+            MouseAction::ConfirmYes => {
+                if let Some(Modal::Confirm { action, .. }) = self.modal.take() {
+                    return self.apply_confirm(action);
+                }
+            }
+            MouseAction::ConfirmNo | MouseAction::CloseModal => {
+                self.modal = None;
+            }
+            MouseAction::JobCancel => self.cancel_job(),
+        }
+        AppCommand::None
+    }
+
+    fn scroll_mouse(&mut self, up: bool) {
+        if let Some(modal) = self.modal.as_mut() {
+            match modal {
+                Modal::Help { scroll } => {
+                    if up {
+                        *scroll = scroll.saturating_sub(3);
+                    } else {
+                        *scroll = scroll.saturating_add(3);
+                    }
+                }
+                Modal::Picker(picker) => picker.move_selection(if up { -1 } else { 1 }),
+                Modal::Login { selected } => {
+                    if up {
+                        *selected = selected.saturating_sub(1);
+                    } else {
+                        *selected = (*selected + 1).min(1);
+                    }
+                }
+                Modal::Confirm { .. } | Modal::Input { .. } => {}
+            }
+            return;
+        }
+        if self.search.open {
+            if !self.search.results.is_empty() {
+                self.search.focus = SearchFocus::Results;
+                if up {
+                    self.search.selected = self.search.selected.saturating_sub(1);
+                } else {
+                    self.search.selected =
+                        (self.search.selected + 1).min(self.search.results.len() - 1);
+                }
+                self.search.list_state.select(Some(self.search.selected));
+            }
+            return;
+        }
+        match self.screen {
+            Screen::Dashboard => {}
+            Screen::Versions => {
+                if !self.versions.is_empty() {
+                    self.version_sel = if up {
+                        self.version_sel.saturating_sub(1)
+                    } else {
+                        (self.version_sel + 1).min(self.versions.len() - 1)
+                    };
+                    self.version_state.select(Some(self.version_sel));
+                }
+            }
+            Screen::Mods => {
+                if !self.mods.is_empty() {
+                    self.mod_sel = if up {
+                        self.mod_sel.saturating_sub(1)
+                    } else {
+                        (self.mod_sel + 1).min(self.mods.len() - 1)
+                    };
+                    self.mod_state.select(Some(self.mod_sel));
+                }
+            }
+            Screen::Accounts => {
+                if !self.accounts.is_empty() {
+                    self.account_sel = if up {
+                        self.account_sel.saturating_sub(1)
+                    } else {
+                        (self.account_sel + 1).min(self.accounts.len() - 1)
+                    };
+                    self.account_state.select(Some(self.account_sel));
+                }
+            }
+            Screen::Settings => {
+                self.settings_cursor = if up {
+                    self.settings_cursor.saturating_sub(1)
+                } else {
+                    (self.settings_cursor + 1).min(8)
+                };
+            }
+            Screen::Logs => {
+                if up {
+                    self.log_follow = false;
+                    self.log_offset = (self.log_offset + 1).min(self.logs.len().saturating_sub(1));
+                } else {
+                    self.log_offset = self.log_offset.saturating_sub(1);
+                    if self.log_offset == 0 {
+                        self.log_follow = true;
+                    }
+                }
+            }
+        }
+    }
+
     fn handle_dashboard_key(&mut self, key: KeyEvent) -> AppCommand {
         match key.code {
             KeyCode::Enter | KeyCode::Char('p') => self.play_active(),
@@ -1350,7 +1703,10 @@ impl App {
             }
             KeyCode::Char('r') => {
                 self.refresh_local();
-                self.log_and_toast(LogLevel::Info, "Workspace refreshed");
+                self.log_and_toast(
+                    LogLevel::Info,
+                    self.lang().pick("Workspace refreshed", "工作区已刷新"),
+                );
                 AppCommand::None
             }
             _ => AppCommand::None,
@@ -1389,7 +1745,10 @@ impl App {
                 if let Some(version) = self.selected_version().map(|row| row.id.clone()) {
                     self.launch_version(version)
                 } else {
-                    self.toast(LogLevel::Warn, "No version selected");
+                    self.toast(
+                        LogLevel::Warn,
+                        self.lang().pick("No version selected", "未选择版本"),
+                    );
                     AppCommand::None
                 }
             }
@@ -1416,7 +1775,10 @@ impl App {
             }
             KeyCode::Char('r') => {
                 self.refresh_local();
-                self.log_and_toast(LogLevel::Info, "Version list refreshed");
+                self.log_and_toast(
+                    LogLevel::Info,
+                    self.lang().pick("Version list refreshed", "版本列表已刷新"),
+                );
                 AppCommand::None
             }
             KeyCode::Char('s') => {
@@ -1451,11 +1813,20 @@ impl App {
                 if let Some(mod_row) = self.selected_mod() {
                     let file = mod_row.file.clone();
                     let display = mod_row.display.clone();
+                    let lang = self.lang();
                     self.modal = Some(Modal::Confirm {
-                        title: "Uninstall mod".into(),
+                        title: lang.pick("Uninstall mod", "卸载模组").into(),
                         lines: vec![
-                            format!("Remove {display} from the active version?"),
-                            "The jar file is deleted from disk.".into(),
+                            if lang == Lang::Chinese {
+                                format!("从当前版本移除 {display}？")
+                            } else {
+                                format!("Remove {display} from the active version?")
+                            },
+                            lang.pick(
+                                "The jar file is deleted from disk.",
+                                "JAR 文件将从磁盘删除。",
+                            )
+                            .into(),
                         ],
                         action: ConfirmAction::UninstallMod(file),
                         danger: true,
@@ -1473,7 +1844,10 @@ impl App {
             }
             KeyCode::Char('r') => {
                 self.refresh_mods();
-                self.log_and_toast(LogLevel::Info, "Mod list refreshed");
+                self.log_and_toast(
+                    LogLevel::Info,
+                    self.lang().pick("Mod list refreshed", "模组列表已刷新"),
+                );
                 AppCommand::None
             }
             _ => AppCommand::None,
@@ -1502,7 +1876,11 @@ impl App {
             }
             KeyCode::Char('m') => {
                 if self.job.as_ref().is_some_and(JobView::is_running) {
-                    self.toast(LogLevel::Warn, "Wait for the current task to finish");
+                    self.toast(
+                        LogLevel::Warn,
+                        self.lang()
+                            .pick("Wait for the current task to finish", "请等待当前任务完成"),
+                    );
                 } else {
                     self.modal = Some(Modal::Login { selected: 0 });
                 }
@@ -1513,11 +1891,20 @@ impl App {
                 AppCommand::None
             }
             KeyCode::Char('x') => {
+                let lang = self.lang();
                 self.modal = Some(Modal::Confirm {
-                    title: "Log out".into(),
+                    title: lang.pick("Log out", "登出").into(),
                     lines: vec![
-                        "Remove all local accounts and stored Microsoft tokens?".into(),
-                        "This does not revoke the session on Microsoft's servers.".into(),
+                        lang.pick(
+                            "Remove all local accounts and stored Microsoft tokens?",
+                            "移除所有本地账号和已保存的 Microsoft 令牌？",
+                        )
+                        .into(),
+                        lang.pick(
+                            "This does not revoke the session on Microsoft's servers.",
+                            "这不会在 Microsoft 服务器端撤销会话。",
+                        )
+                        .into(),
                     ],
                     action: ConfirmAction::Logout,
                     danger: true,
@@ -1526,7 +1913,10 @@ impl App {
             }
             KeyCode::Char('r') => {
                 self.refresh_accounts();
-                self.log_and_toast(LogLevel::Info, "Accounts refreshed");
+                self.log_and_toast(
+                    LogLevel::Info,
+                    self.lang().pick("Accounts refreshed", "账号已刷新"),
+                );
                 AppCommand::None
             }
             _ => AppCommand::None,
@@ -1540,7 +1930,7 @@ impl App {
                 AppCommand::None
             }
             KeyCode::Down => {
-                self.settings_cursor = (self.settings_cursor + 1).min(7);
+                self.settings_cursor = (self.settings_cursor + 1).min(8);
                 AppCommand::None
             }
             KeyCode::Left => {
@@ -1560,11 +1950,17 @@ impl App {
                 AppCommand::None
             }
             KeyCode::Char('R') => {
+                let lang = self.lang();
                 self.modal = Some(Modal::Confirm {
-                    title: "Reset settings".into(),
+                    title: lang.pick("Reset settings", "重置设置").into(),
                     lines: vec![
-                        "Restore every TUI preference to its default?".into(),
-                        "Your active version is kept.".into(),
+                        lang.pick(
+                            "Restore every TUI preference to its default?",
+                            "将所有 TUI 偏好恢复为默认值？",
+                        )
+                        .into(),
+                        lang.pick("Your active version is kept.", "活跃版本会保留。")
+                            .into(),
                     ],
                     action: ConfirmAction::ResetSettings,
                     danger: false,
@@ -1620,9 +2016,15 @@ impl App {
                 AppCommand::None
             }
             KeyCode::Char('c') => {
+                let lang = self.lang();
                 self.modal = Some(Modal::Confirm {
-                    title: "Clear activity".into(),
-                    lines: vec!["Clear all entries from the activity log?".into()],
+                    title: lang.pick("Clear activity", "清空活动").into(),
+                    lines: vec![lang
+                        .pick(
+                            "Clear all entries from the activity log?",
+                            "清空活动日志中的所有条目？",
+                        )
+                        .into()],
                     action: ConfirmAction::ClearLogs,
                     danger: false,
                 });
@@ -1821,9 +2223,13 @@ impl App {
                 self.apply_pick(kind, &id);
             }
             Some(ModalRequest::ReloadManifest) => {
+                let lang = self.lang();
                 self.modal = Some(Modal::Picker(PickerState::new(
-                    "Download Minecraft",
-                    "Pick a version to download · r refresh · esc close",
+                    lang.pick("Download Minecraft", "下载 Minecraft"),
+                    lang.pick(
+                        "Pick a version to download · r refresh · esc close",
+                        "选择要下载的版本 · r 刷新 · esc 关闭",
+                    ),
                     PickerKind::RemoteVersions,
                     Vec::new(),
                 )));
@@ -1881,9 +2287,15 @@ impl App {
                 match AccountManager::logout_metadata(&self.game_dir) {
                     Ok(()) => {
                         self.refresh_accounts();
-                        self.log_and_toast(LogLevel::Ok, "Local accounts cleared");
+                        self.log_and_toast(
+                            LogLevel::Ok,
+                            self.lang().pick("Local accounts cleared", "本地账号已清除"),
+                        );
                     }
-                    Err(error) => self.log_and_toast(LogLevel::Error, format!("Logout: {error}")),
+                    Err(error) => {
+                        let prefix = self.lang().pick("Logout", "登出");
+                        self.log_and_toast(LogLevel::Error, format!("{prefix}: {error}"))
+                    }
                 }
                 AppCommand::None
             }
@@ -1891,7 +2303,10 @@ impl App {
                 self.logs.clear();
                 self.log_offset = 0;
                 self.log_follow = true;
-                self.toast(LogLevel::Ok, "Activity cleared");
+                self.toast(
+                    LogLevel::Ok,
+                    self.lang().pick("Activity cleared", "活动日志已清空"),
+                );
                 AppCommand::None
             }
             ConfirmAction::DownloadVersion(version) => {
@@ -1920,7 +2335,12 @@ impl App {
                 AccountManager::set_offline_metadata(&self.game_dir, name)
                     .map_err(|e| e.to_string())?;
                 self.refresh_accounts();
-                self.log_and_toast(LogLevel::Ok, format!("Offline account '{name}' saved"));
+                let message = if self.lang() == Lang::Chinese {
+                    format!("离线账号「{name}」已保存")
+                } else {
+                    format!("Offline account '{name}' saved")
+                };
+                self.log_and_toast(LogLevel::Ok, message);
                 Ok(())
             }
             InputAction::JavaPath => {
@@ -1930,7 +2350,13 @@ impl App {
                 self.settings_autosave_blocked = false;
                 self.save_settings_silent();
                 if value.is_empty() {
-                    self.toast(LogLevel::Ok, "Java will be auto-detected");
+                    self.toast(
+                        LogLevel::Ok,
+                        self.lang()
+                            .pick("Java will be auto-detected", "Java 将自动检测"),
+                    );
+                } else if self.lang() == Lang::Chinese {
+                    self.toast(LogLevel::Ok, format!("Java 路径已设为 {value}"));
                 } else {
                     self.toast(LogLevel::Ok, format!("Java path set to {value}"));
                 }
@@ -1963,23 +2389,42 @@ impl App {
                     self.settings.active_loader = None;
                     self.settings_autosave_blocked = false;
                     self.save_settings_silent();
-                    self.log_and_toast(LogLevel::Info, "Launch loader: Auto");
+                    self.log_and_toast(
+                        LogLevel::Info,
+                        self.lang().pick("Launch loader: Auto", "启动加载器：自动"),
+                    );
                 } else if self.loader_installed(id) {
                     self.settings.active_loader = Some(id.to_string());
                     self.settings_autosave_blocked = false;
                     self.save_settings_silent();
                     self.log_and_toast(
                         LogLevel::Info,
-                        format!("Launch loader: {}", loader_label(id)),
+                        if self.lang() == Lang::Chinese {
+                            format!("启动加载器：{}", loader_label(id))
+                        } else {
+                            format!("Launch loader: {}", loader_label(id))
+                        },
                     );
                 } else {
                     let label = loader_label(id);
+                    let lang = self.lang();
                     self.modal = Some(Modal::Confirm {
-                        title: format!("Install {label}"),
+                        title: if lang == Lang::Chinese {
+                            format!("安装 {label}")
+                        } else {
+                            format!("Install {label}")
+                        },
                         lines: vec![
-                            format!("Run the {label} installer for the active version?"),
-                            "Forge-family installers run third-party code; use trusted builds."
-                                .into(),
+                            if lang == Lang::Chinese {
+                                format!("为当前版本运行 {label} 安装器？")
+                            } else {
+                                format!("Run the {label} installer for the active version?")
+                            },
+                            lang.pick(
+                                "Forge-family installers run third-party code; use trusted builds.",
+                                "Forge 系列安装器会运行第三方代码，请只使用可信构建。",
+                            )
+                            .into(),
                         ],
                         action: ConfirmAction::InstallLoader(id.to_string()),
                         danger: false,
@@ -2002,8 +2447,11 @@ impl App {
         if job.is_running() {
             job.cancel_requested = true;
             progress::request_cancel();
-            self.add_log(LogLevel::Warn, "Cancellation requested");
-            self.toast(LogLevel::Warn, "Cancelling…");
+            self.add_log(
+                LogLevel::Warn,
+                self.lang().pick("Cancellation requested", "已请求取消任务"),
+            );
+            self.toast(LogLevel::Warn, self.lang().pick("Cancelling…", "正在取消…"));
         } else {
             self.job = None;
         }
@@ -2011,11 +2459,20 @@ impl App {
 
     pub fn request_quit(&mut self) {
         if self.job.as_ref().is_some_and(|job| job.is_running()) {
+            let lang = self.lang();
             self.modal = Some(Modal::Confirm {
-                title: "Quit while busy?".into(),
+                title: lang.pick("Quit while busy?", "任务进行中，退出？").into(),
                 lines: vec![
-                    "A background task is still running.".into(),
-                    "It will be cancelled when the launcher exits.".into(),
+                    lang.pick(
+                        "A background task is still running.",
+                        "仍有后台任务正在运行。",
+                    )
+                    .into(),
+                    lang.pick(
+                        "It will be cancelled when the launcher exits.",
+                        "退出启动器时会取消该任务。",
+                    )
+                    .into(),
                 ],
                 action: ConfirmAction::Quit,
                 danger: true,
@@ -2026,9 +2483,15 @@ impl App {
     }
 
     fn open_offline_input(&mut self) {
+        let lang = self.lang();
         self.modal = Some(Modal::Input {
-            title: "Add offline account".into(),
-            hint: "1–16 ASCII letters, digits or underscores".into(),
+            title: lang.pick("Add offline account", "添加离线账号").into(),
+            hint: lang
+                .pick(
+                    "1–16 ASCII letters, digits or underscores",
+                    "1–16 位 ASCII 字母、数字或下划线",
+                )
+                .into(),
             input: TextInput::new("").with_max_chars(16),
             action: InputAction::OfflineName,
             error: None,
@@ -2036,9 +2499,15 @@ impl App {
     }
 
     fn open_java_input(&mut self) {
+        let lang = self.lang();
         self.modal = Some(Modal::Input {
-            title: "Java executable".into(),
-            hint: "Full path to java, or empty for auto-detection".into(),
+            title: lang.pick("Java executable", "Java 路径").into(),
+            hint: lang
+                .pick(
+                    "Full path to java, or empty for auto-detection",
+                    "Java 完整路径，留空则自动检测",
+                )
+                .into(),
             input: TextInput::new(self.settings.java.clone()).with_max_chars(512),
             action: InputAction::JavaPath,
             error: None,
@@ -2047,26 +2516,46 @@ impl App {
 
     fn set_selected_default(&mut self) {
         let Some(account) = self.selected_account() else {
-            self.toast(LogLevel::Warn, "No account selected");
+            self.toast(
+                LogLevel::Warn,
+                self.lang().pick("No account selected", "未选择账号"),
+            );
             return;
         };
         let key = account.key.clone();
         match AccountManager::set_default_metadata(&self.game_dir, &key) {
             Ok(()) => {
                 self.refresh_accounts();
-                self.log_and_toast(LogLevel::Ok, format!("Default account switched to {key}"));
+                let lang = self.lang();
+                let message = if lang == Lang::Chinese {
+                    format!("默认账号已切换为 {key}")
+                } else {
+                    format!("Default account switched to {key}")
+                };
+                self.log_and_toast(LogLevel::Ok, message);
             }
-            Err(error) => self.log_and_toast(LogLevel::Error, format!("Switch account: {error}")),
+            Err(error) => {
+                let prefix = self.lang().pick("Switch account", "切换账号");
+                self.log_and_toast(LogLevel::Error, format!("{prefix}: {error}"));
+            }
         }
     }
 
     pub fn set_active_version(&mut self, version: String) {
         if self.job.as_ref().is_some_and(JobView::is_running) {
-            self.toast(LogLevel::Warn, "Wait for the current task to finish");
+            self.toast(
+                LogLevel::Warn,
+                self.lang()
+                    .pick("Wait for the current task to finish", "请等待当前任务完成"),
+            );
             return;
         }
         if !self.versions.iter().any(|row| row.id == version) {
-            self.toast(LogLevel::Warn, "That version is not installed");
+            self.toast(
+                LogLevel::Warn,
+                self.lang()
+                    .pick("That version is not installed", "该版本尚未安装"),
+            );
             return;
         }
         self.settings.active_version = Some(version.clone());
@@ -2092,7 +2581,13 @@ impl App {
         self.settings_autosave_blocked = false;
         self.save_settings_silent();
         self.refresh_mods();
-        self.log_and_toast(LogLevel::Info, format!("Active version: {version}"));
+        let lang = self.lang();
+        let message = if lang == Lang::Chinese {
+            format!("活跃版本：{version}")
+        } else {
+            format!("Active version: {version}")
+        };
+        self.log_and_toast(LogLevel::Info, message);
     }
 
     fn play_active(&mut self) -> AppCommand {
@@ -2102,11 +2597,18 @@ impl App {
         }
         if self.current_account().is_none() {
             self.screen = Screen::Accounts;
-            self.toast(LogLevel::Warn, "Add an account before launching");
+            self.toast(
+                LogLevel::Warn,
+                self.lang()
+                    .pick("Add an account before launching", "请先添加账号再启动"),
+            );
             return AppCommand::None;
         }
         let Some(version) = self.settings.active_version.clone() else {
-            self.toast(LogLevel::Warn, "No active version");
+            self.toast(
+                LogLevel::Warn,
+                self.lang().pick("No active version", "没有活跃版本"),
+            );
             return AppCommand::None;
         };
         self.launch_version(version)
@@ -2114,12 +2616,20 @@ impl App {
 
     fn launch_version(&mut self, version: String) -> AppCommand {
         if self.job.as_ref().is_some_and(JobView::is_running) {
-            self.toast(LogLevel::Warn, "Wait for the current task to finish");
+            self.toast(
+                LogLevel::Warn,
+                self.lang()
+                    .pick("Wait for the current task to finish", "请等待当前任务完成"),
+            );
             return AppCommand::None;
         }
         if self.current_account().is_none() {
             self.screen = Screen::Accounts;
-            self.toast(LogLevel::Warn, "Add an account before launching");
+            self.toast(
+                LogLevel::Warn,
+                self.lang()
+                    .pick("Add an account before launching", "请先添加账号再启动"),
+            );
             return AppCommand::None;
         }
         self.settings.active_version = Some(version);
@@ -2129,7 +2639,11 @@ impl App {
 
     pub fn begin_download(&mut self, version: String) {
         if self.job.as_ref().is_some_and(JobView::is_running) {
-            self.toast(LogLevel::Warn, "Wait for the current task to finish");
+            self.toast(
+                LogLevel::Warn,
+                self.lang()
+                    .pick("Wait for the current task to finish", "请等待当前任务完成"),
+            );
             return;
         }
         let id = self.next_job_id;
@@ -2137,7 +2651,15 @@ impl App {
         self.pending_activate = Some(version.clone());
         self.pending_loader = None;
         self.show_job_panel = true;
-        self.job = Some(JobView::new(id, format!("Download Minecraft {version}")));
+        let lang = self.lang();
+        self.job = Some(JobView::new(
+            id,
+            if lang == Lang::Chinese {
+                format!("下载 Minecraft {version}")
+            } else {
+                format!("Download Minecraft {version}")
+            },
+        ));
         progress::reset_cancel();
         progress::set_job(id);
         jobs::start_download(
@@ -2152,11 +2674,21 @@ impl App {
 
     pub fn begin_loader_install(&mut self, loader: String) {
         if self.job.as_ref().is_some_and(JobView::is_running) {
-            self.toast(LogLevel::Warn, "Wait for the current task to finish");
+            self.toast(
+                LogLevel::Warn,
+                self.lang()
+                    .pick("Wait for the current task to finish", "请等待当前任务完成"),
+            );
             return;
         }
         let Some(version) = self.settings.active_version.clone() else {
-            self.toast(LogLevel::Warn, "Select an installed version first");
+            self.toast(
+                LogLevel::Warn,
+                self.lang().pick(
+                    "Select an installed version first",
+                    "请先选择一个已安装版本",
+                ),
+            );
             return;
         };
         let id = self.next_job_id;
@@ -2169,7 +2701,15 @@ impl App {
             "neoforge" => "NeoForge",
             other => other,
         };
-        self.job = Some(JobView::new(id, format!("Install {label} for {version}")));
+        let lang = self.lang();
+        self.job = Some(JobView::new(
+            id,
+            if lang == Lang::Chinese {
+                format!("为 {version} 安装 {label}")
+            } else {
+                format!("Install {label} for {version}")
+            },
+        ));
         progress::reset_cancel();
         if loader == "fabric" {
             jobs::start_fabric(self.tx.clone(), id, self.game_dir.clone(), version, None);
@@ -2187,17 +2727,30 @@ impl App {
 
     fn begin_mod_install(&mut self, slug: String, title: String) {
         if self.job.as_ref().is_some_and(JobView::is_running) {
-            self.toast(LogLevel::Warn, "Wait for the current task to finish");
+            self.toast(
+                LogLevel::Warn,
+                self.lang()
+                    .pick("Wait for the current task to finish", "请等待当前任务完成"),
+            );
             return;
         }
         let Some(version) = self.settings.active_version.clone() else {
-            self.toast(LogLevel::Warn, "Select an installed version first");
+            self.toast(
+                LogLevel::Warn,
+                self.lang().pick(
+                    "Select an installed version first",
+                    "请先选择一个已安装版本",
+                ),
+            );
             return;
         };
         if self.active_loader().is_none() {
             self.toast(
                 LogLevel::Warn,
-                "Install Fabric, Forge or NeoForge before adding mods",
+                self.lang().pick(
+                    "Install Fabric, Forge or NeoForge before adding mods",
+                    "请先安装 Fabric、Forge 或 NeoForge 再添加模组",
+                ),
             );
             self.open_loader_picker();
             return;
@@ -2207,7 +2760,15 @@ impl App {
         self.pending_activate = None;
         self.pending_loader = None;
         self.show_job_panel = true;
-        self.job = Some(JobView::new(id, format!("Install {title}")));
+        let lang = self.lang();
+        self.job = Some(JobView::new(
+            id,
+            if lang == Lang::Chinese {
+                format!("安装 {title}")
+            } else {
+                format!("Install {title}")
+            },
+        ));
         progress::reset_cancel();
         progress::set_job(id);
         jobs::start_mod_install(
@@ -2225,9 +2786,13 @@ impl App {
     }
 
     pub fn open_remote_picker(&mut self) {
+        let lang = self.lang();
         let mut picker = PickerState::new(
-            "Download Minecraft",
-            "Type to filter · enter select · r refresh · esc close",
+            lang.pick("Download Minecraft", "下载 Minecraft"),
+            lang.pick(
+                "Type to filter · enter select · r refresh · esc close",
+                "输入以筛选 · 回车选择 · r 刷新 · esc 关闭",
+            ),
             PickerKind::RemoteVersions,
             Vec::new(),
         );
@@ -2251,10 +2816,18 @@ impl App {
         };
         let row = self.versions.iter().find(|row| row.id == version);
         let loaders = row.map(|row| row.loaders.clone()).unwrap_or_default();
+        let lang = self.lang();
         let mut items = vec![PickerItem {
             id: "auto".into(),
-            label: "Auto · first detected".into(),
-            meta: "Use the first installed loader, or vanilla if none".into(),
+            label: lang
+                .pick("Auto · first detected", "自动 · 首个已安装")
+                .into(),
+            meta: lang
+                .pick(
+                    "Use the first installed loader, or vanilla if none",
+                    "使用第一个已安装加载器；没有则使用原版",
+                )
+                .into(),
             tag: if self.settings.active_loader.is_none() {
                 "active".into()
             } else {
@@ -2267,10 +2840,27 @@ impl App {
                 (
                     "fabric",
                     "Fabric",
-                    "Lightweight, fast updates, great mod compatibility",
+                    lang.pick(
+                        "Lightweight, fast updates, great mod compatibility",
+                        "轻量、更新快、模组兼容性好",
+                    ),
                 ),
-                ("forge", "Forge", "Classic modding platform for large packs"),
-                ("neoforge", "NeoForge", "Modern fork of Forge for 1.20.2+"),
+                (
+                    "forge",
+                    "Forge",
+                    lang.pick(
+                        "Classic modding platform for large packs",
+                        "经典大型整合包模组平台",
+                    ),
+                ),
+                (
+                    "neoforge",
+                    "NeoForge",
+                    lang.pick(
+                        "Modern fork of Forge for 1.20.2+",
+                        "面向 1.20.2+ 的现代 Forge 分支",
+                    ),
+                ),
             ]
             .into_iter()
             .map(|(id, label, meta)| {
@@ -2286,15 +2876,18 @@ impl App {
                     } else if installed {
                         "installed".into()
                     } else {
-                        "install new".into()
+                        "new".into()
                     },
                     installed,
                 }
             }),
         );
         self.modal = Some(Modal::Picker(PickerState::new(
-            "Launch loader",
-            "enter select installed · uninstalled entries install · esc close",
+            lang.pick("Launch loader", "启动加载器"),
+            lang.pick(
+                "enter select installed · uninstalled entries install · esc close",
+                "回车选择已安装项 · 未安装项会启动安装 · esc 关闭",
+            ),
             PickerKind::Loaders,
             items,
         )));
@@ -2302,7 +2895,11 @@ impl App {
 
     fn open_installed_version_picker(&mut self) {
         if self.versions.is_empty() {
-            self.toast(LogLevel::Warn, "No versions installed");
+            self.toast(
+                LogLevel::Warn,
+                self.lang()
+                    .pick("No versions installed", "尚未安装任何版本"),
+            );
             return;
         }
         let active = self.settings.active_version.clone();
@@ -2312,16 +2909,29 @@ impl App {
             .map(|row| PickerItem {
                 id: row.id.clone(),
                 label: row.id.clone(),
-                meta: format!(
-                    "{} · {} mods{}",
-                    row.kind,
-                    row.mods_enabled,
-                    if row.loaders.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" · {}", row.loaders.join("/"))
-                    }
-                ),
+                meta: if self.lang() == Lang::Chinese {
+                    format!(
+                        "{} · {} 个模组{}",
+                        version_kind_label(self.lang(), &row.kind),
+                        row.mods_enabled,
+                        if row.loaders.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" · {}", row.loaders.join("/"))
+                        }
+                    )
+                } else {
+                    format!(
+                        "{} · {} mods{}",
+                        row.kind,
+                        row.mods_enabled,
+                        if row.loaders.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" · {}", row.loaders.join("/"))
+                        }
+                    )
+                },
                 tag: if Some(&row.id) == active.as_ref() {
                     "active".into()
                 } else {
@@ -2330,9 +2940,13 @@ impl App {
                 installed: true,
             })
             .collect();
+        let lang = self.lang();
         self.modal = Some(Modal::Picker(PickerState::new(
-            "Active Minecraft version",
-            "Used by the mods and launch screens · enter select · esc close",
+            lang.pick("Active Minecraft version", "活跃 Minecraft 版本"),
+            lang.pick(
+                "Used by the mods and launch screens · enter select · esc close",
+                "用于模组和启动界面 · 回车选择 · esc 关闭",
+            ),
             PickerKind::InstalledVersions,
             items,
         )));
@@ -2340,7 +2954,13 @@ impl App {
 
     pub fn open_search(&mut self) {
         if self.settings.active_version.is_none() {
-            self.toast(LogLevel::Warn, "Select an installed version first");
+            self.toast(
+                LogLevel::Warn,
+                self.lang().pick(
+                    "Select an installed version first",
+                    "请先选择一个已安装版本",
+                ),
+            );
             return;
         }
         self.search.open = true;
@@ -2351,7 +2971,11 @@ impl App {
     fn submit_search(&mut self) {
         let query = self.search.input.value().trim().to_string();
         if query.is_empty() {
-            self.toast(LogLevel::Warn, "Type a mod name to search");
+            self.toast(
+                LogLevel::Warn,
+                self.lang()
+                    .pick("Type a mod name to search", "请输入要搜索的模组名"),
+            );
             return;
         }
         self.search.request = self.next_request_id;
@@ -2371,7 +2995,11 @@ impl App {
 
     fn confirm_search_install(&mut self) {
         let Some(hit) = self.search.results.get(self.search.selected).cloned() else {
-            self.toast(LogLevel::Warn, "No search result selected");
+            self.toast(
+                LogLevel::Warn,
+                self.lang()
+                    .pick("No search result selected", "未选择搜索结果"),
+            );
             return;
         };
         let version = self
@@ -2380,14 +3008,41 @@ impl App {
             .clone()
             .unwrap_or_else(|| "?".into());
         self.search.open = false;
+        let lang = self.lang();
+        let loader_line = self
+            .active_loader()
+            .map(|loader| {
+                if lang == Lang::Chinese {
+                    format!("加载器：{loader}")
+                } else {
+                    format!("Loader: {loader}")
+                }
+            })
+            .unwrap_or_else(|| {
+                lang.pick(
+                    "No mod loader detected; vanilla may ignore mods.",
+                    "未检测到模组加载器；原版可能忽略模组。",
+                )
+                .into()
+            });
         self.modal = Some(Modal::Confirm {
-            title: format!("Install {}", hit.title),
+            title: if lang == Lang::Chinese {
+                format!("安装 {}", hit.title)
+            } else {
+                format!("Install {}", hit.title)
+            },
             lines: vec![
-                format!("Install {} for Minecraft {version}?", hit.title),
-                self.active_loader()
-                    .map(|loader| format!("Loader: {loader}"))
-                    .unwrap_or_else(|| "No mod loader detected; vanilla may ignore mods.".into()),
-                "Required dependencies are not installed automatically in the TUI.".into(),
+                if lang == Lang::Chinese {
+                    format!("为 Minecraft {version} 安装 {}？", hit.title)
+                } else {
+                    format!("Install {} for Minecraft {version}?", hit.title)
+                },
+                loader_line,
+                lang.pick(
+                    "Required dependencies are not installed automatically in the TUI.",
+                    "TUI 不会自动安装必需依赖。",
+                )
+                .into(),
             ],
             action: ConfirmAction::InstallMod {
                 slug: hit.slug,
@@ -2412,8 +3067,14 @@ impl App {
         };
         if changed {
             self.refresh_mods();
-            self.log_and_toast(
-                LogLevel::Ok,
+            let lang = self.lang();
+            let message = if lang == Lang::Chinese {
+                format!(
+                    "{} 已{}",
+                    mod_row.display,
+                    if mod_row.enabled { "禁用" } else { "启用" }
+                )
+            } else {
                 format!(
                     "{} {}",
                     mod_row.display,
@@ -2422,12 +3083,16 @@ impl App {
                     } else {
                         "enabled"
                     }
-                ),
-            );
+                )
+            };
+            self.log_and_toast(LogLevel::Ok, message);
         } else {
             self.toast(
                 LogLevel::Warn,
-                "Could not toggle that mod (another file may conflict)",
+                self.lang().pick(
+                    "Could not toggle that mod (another file may conflict)",
+                    "无法切换该模组（可能与其他文件冲突）",
+                ),
             );
         }
     }
@@ -2439,8 +3104,10 @@ impl App {
             BackendEvent::JobStarted { id, title } => {
                 if let Some(job) = self.job.as_mut() {
                     if job.id == id {
-                        job.title = title.clone();
-                        job.add_log(LogLevel::Info, title);
+                        // The frontend already created a localized title.
+                        let display = job.title.clone();
+                        job.add_log(LogLevel::Info, display);
+                        let _ = title;
                     }
                 }
             }
@@ -2455,7 +3122,13 @@ impl App {
                     if let Some(job) = self.job.as_mut() {
                         job.on_phase(index, total, label.clone());
                     }
-                    self.add_log(LogLevel::Info, format!("[{index}/{total}] {label}"));
+                    self.add_log(
+                        LogLevel::Info,
+                        format!(
+                            "[{index}/{total}] {}",
+                            i18n::localize_job_phase(self.lang(), &label)
+                        ),
+                    );
                 }
             }
             BackendEvent::Log { id, level, text } => {
@@ -2576,6 +3249,7 @@ impl App {
             matches!(&result, Err(error) if error.to_ascii_lowercase().contains("cancel"));
         match result {
             Ok(message) => {
+                let message = i18n::localize_job_result(self.lang(), &message);
                 if let Some(job) = self.job.as_mut() {
                     job.finished = Some(Ok(message.clone()));
                     job.finished_at = Some(Instant::now());
@@ -2604,7 +3278,10 @@ impl App {
                     self.job = None;
                     self.pending_activate = None;
                     self.pending_loader = None;
-                    self.log_and_toast(LogLevel::Warn, "Task cancelled");
+                    self.log_and_toast(
+                        LogLevel::Warn,
+                        self.lang().pick("Task cancelled", "任务已取消"),
+                    );
                     return;
                 }
                 let error = theme::one_line(&error, 400);
@@ -2743,11 +3420,20 @@ impl App {
             .unwrap_or_default()
             .as_secs_f64();
         let remaining = expires - now;
+        let lang = self.lang();
         if remaining <= 0.0 {
-            return "session expired".into();
+            return lang.pick("session expired", "会话已过期").into();
         }
         let hours = remaining / 3600.0;
-        if hours >= 48.0 {
+        if lang == Lang::Chinese {
+            if hours >= 48.0 {
+                format!("会话剩余 ~{:.0} 天", hours / 24.0)
+            } else if hours >= 1.0 {
+                format!("会话剩余 ~{hours:.0} 小时")
+            } else {
+                format!("会话剩余 ~{:.0} 分钟", remaining / 60.0)
+            }
+        } else if hours >= 48.0 {
             format!("session ~{:.0}d", hours / 24.0)
         } else if hours >= 1.0 {
             format!("session ~{hours:.0}h")
@@ -2764,6 +3450,14 @@ enum ModalRequest {
     Pick(PickerKind, String),
     ReloadManifest,
     Login(LoginMode),
+}
+
+fn version_kind_label(lang: Lang, kind: &str) -> String {
+    match kind {
+        "release" => lang.pick("release", "正式版").to_string(),
+        "snapshot" => lang.pick("snapshot", "快照").to_string(),
+        other => other.to_string(),
+    }
 }
 
 fn loader_label(id: &str) -> &'static str {
