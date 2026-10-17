@@ -3,6 +3,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use crate::progress;
@@ -11,9 +12,28 @@ use indicatif::ProgressBar;
 
 const USER_AGENT: &str = concat!("mc-launcher/", env!("CARGO_PKG_VERSION"));
 
+/// One process-wide agent keeps TLS sessions and HTTP/1.1 connections alive.
+/// This matters most for assets: thousands of tiny files to the same host used
+/// to pay a fresh TCP+TLS handshake per file. ureq's default per-host idle
+/// limit is one, so raise it to cover the worker pool.
+static HTTP_AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+
+fn http_agent() -> &'static ureq::Agent {
+    HTTP_AGENT.get_or_init(|| {
+        ureq::AgentBuilder::new()
+            .max_idle_connections(256)
+            .max_idle_connections_per_host(64)
+            .timeout_connect(Duration::from_secs(10))
+            .timeout_read(Duration::from_secs(60))
+            .timeout_write(Duration::from_secs(30))
+            .build()
+    })
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SourceMode {
-    /// Official first, mirror fallback for public GET requests only.
+    /// Official first for metadata/libraries; assets mirror-first. Both fall
+    /// back to the other source, and authenticated traffic never uses a mirror.
     Auto = 0,
     Official = 1,
     BmclApi = 2,
@@ -126,12 +146,13 @@ pub fn http_request_no_mirror(
     if max_retries == 0 {
         return Err("Request attempts must be greater than zero".into());
     }
-    let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(timeout_secs))
-        .build();
+    let agent = http_agent();
     let mut last = Err("Request failed".into());
     for attempt in 0..max_retries {
-        let mut request = agent.request(method, url).set("User-Agent", USER_AGENT);
+        let mut request = agent
+            .request(method, url)
+            .timeout(Duration::from_secs(timeout_secs))
+            .set("User-Agent", USER_AGENT);
         if let Some(headers) = extra_headers {
             for (key, value) in headers {
                 request = request.set(key, value);
@@ -186,6 +207,9 @@ pub fn http_post_form(url: &str, data: &[u8]) -> HttpResult {
 }
 
 pub fn cached_file_valid(path: &Path, sha1: Option<&str>) -> bool {
+    if !path.is_file() {
+        return false;
+    }
     if let Some(hash) = sha1 {
         return util::sha1_file(path).is_ok_and(|actual| actual.eq_ignore_ascii_case(hash));
     }
@@ -208,6 +232,47 @@ pub fn download_file(
     max_retries: u32,
     show_progress: bool,
 ) -> Result<(), String> {
+    download_file_inner(
+        url,
+        dest,
+        label,
+        sha1_expected,
+        max_retries,
+        show_progress,
+        false,
+    )
+}
+
+/// Assets are numerous and small. In Auto mode prefer the mirror first, then
+/// fall back to the official host within the same attempt instead of burning
+/// three slow official attempts before the mirror is considered.
+pub fn download_asset(
+    url: &str,
+    dest: &Path,
+    label: &str,
+    sha1_expected: Option<&str>,
+    max_retries: u32,
+) -> Result<(), String> {
+    download_file_inner(url, dest, label, sha1_expected, max_retries, false, true)
+}
+
+fn download_sources(url: &str, mode: SourceMode, prefer_mirror: bool) -> Vec<String> {
+    let mut urls = source_urls(url, mode);
+    if prefer_mirror && urls.len() > 1 {
+        urls.reverse();
+    }
+    urls
+}
+
+fn download_file_inner(
+    url: &str,
+    dest: &Path,
+    label: &str,
+    sha1_expected: Option<&str>,
+    max_retries: u32,
+    show_progress: bool,
+    prefer_mirror: bool,
+) -> Result<(), String> {
     if max_retries == 0 {
         return Err("Download attempts must be greater than zero".into());
     }
@@ -224,22 +289,26 @@ pub fn download_file(
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     fs::create_dir_all(parent).map_err(|e| format!("Cannot create {}: {e}", parent.display()))?;
+    let sources = download_sources(url, get_source_mode(), prefer_mirror);
     let mut last_error = String::new();
-    for source in source_urls(url, get_source_mode()) {
-        for attempt in 0..max_retries {
+    // Attempt-major order: every source gets a chance before backing off. The
+    // old source-major order waited through three official failures (1+2+4s)
+    // before trying the mirror.
+    for attempt in 0..max_retries {
+        for source in &sources {
             if progress::is_cancelled() {
                 return Err("Download cancelled".into());
             }
-            match download_once(&source, dest, label, sha1_expected, show_progress) {
+            match download_once(source, dest, label, sha1_expected, show_progress) {
                 Ok(()) => return Ok(()),
                 Err(error) => last_error = error,
             }
             if progress::is_cancelled() {
                 return Err("Download cancelled".into());
             }
-            if attempt + 1 < max_retries && !cancellable_backoff(1 << attempt.min(4)) {
-                return Err("Download cancelled".into());
-            }
+        }
+        if attempt + 1 < max_retries && !cancellable_backoff(1 << attempt.min(4)) {
+            return Err("Download cancelled".into());
         }
     }
     Err(format!(
@@ -267,11 +336,9 @@ fn download_once(
     sha1: Option<&str>,
     progress: bool,
 ) -> Result<(), String> {
-    let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(120))
-        .build();
-    let response = agent
+    let response = http_agent()
         .get(url)
+        .timeout(Duration::from_secs(120))
         .set("User-Agent", USER_AGENT)
         .set("Accept-Encoding", "identity")
         .call()
@@ -309,7 +376,9 @@ fn download_once(
         if copied == 0 {
             return Err("Empty response body".into());
         }
-        temp.as_file().sync_all().map_err(|e| e.to_string())?;
+        // Do not fsync every asset. Thousands of tiny files are renamed into
+        // place atomically; paying a disk barrier per file dominates runtime
+        // (especially on Windows). Large game files have their own hash check.
         if let Some(expected) = sha1 {
             let actual = util::sha1_file(temp.path()).map_err(|e| e.to_string())?;
             if !actual.eq_ignore_ascii_case(expected) {
@@ -412,6 +481,21 @@ mod tests {
         ] {
             assert_eq!(mirror_url(url), url);
         }
+    }
+
+    #[test]
+    fn asset_source_order_prefers_the_mirror_only_in_auto_mode() {
+        let url = "https://resources.download.minecraft.net/aa/bb";
+        let auto = download_sources(url, SourceMode::Auto, true);
+        assert_eq!(auto.len(), 2);
+        assert!(auto[0].starts_with("https://bmclapi2.bangbang93.com/assets/"));
+        assert_eq!(auto[1], url);
+        let normal = download_sources(url, SourceMode::Auto, false);
+        assert_eq!(normal, vec![url.to_string(), auto[0].clone()]);
+        assert_eq!(
+            download_sources(url, SourceMode::Official, true),
+            vec![url.to_string()]
+        );
     }
 
     #[test]

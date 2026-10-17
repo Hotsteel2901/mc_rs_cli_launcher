@@ -13,7 +13,7 @@ mc-launcher --dir ./minecraft tui
 ## 界面
 
 ```text
- ◆ mclauncher  v2.2.0                 ◆ cli-first                ● Steve  ·  1.21.4 · Fabric  · auto
+ ◆ mclauncher  v2.3.0                 ◆ cli-first                ● Steve  ·  1.21.4 · Fabric  · auto
 ────────────────────────────────────────────────────────────────────────────────────────────────────
 ╭────────────────────╮ ╭ INSTANCE ─────────────────────────────────────────────────────────────────╮
 │      ▄██████▄      │ │M I N E C R A F T                            ╭────────────────────────────╮│
@@ -22,7 +22,7 @@ mc-launcher --dir ./minecraft tui
 │     ████  ████     │ │◆ 1.21.4  ·  Fabric  ·  1 mod                ╰────────────────────────────╯│
 │     ▀▀██████▀▀     │ │◉ Steve  ·  OFFLINE                                                        │
 │     mc launcher    │ │                                             RAM  4 GB                     │
-│       v2.2.0       │ │                                             LOAD Fabric                   │
+│       v2.3.0       │ │                                             LOAD Fabric                   │
 │                    │ │                                             PATH ~/minecraft/versions/... │
 │▌ ◈ Dashboard    1  │ ╰───────────────────────────────────────────────────────────────────────────╯
 │                    │
@@ -152,7 +152,7 @@ mc-launcher --dir ./minecraft tui
   "ram_mb": 4096,
   "width": 1280,
   "height": 720,
-  "threads": 4,
+  "threads": 16,
   "java": "",
   "language": "en",
   "active_loader": "fabric",
@@ -165,13 +165,27 @@ mc-launcher --dir ./minecraft tui
 
 - `ram_mb`：512–32768，512 MB 步进。
 - `width` / `height`：0 表示交给 Minecraft 决定；其余会限制在安全范围。
-- `threads`：1–32。
+- `threads`：1–64，默认 16；下载器复用 HTTP/TLS 连接，资源文件并发数至少为 16。
 - `language`：`en`（默认）或 `zh`；在 Settings 第一项切换后立即生效并保存。命令行与日志中的底层工具输出仍保持英文。
 - `active_loader`：`fabric` / `forge` / `neoforge`，或用 `null` 表示自动选择第一个已安装加载器；未安装的加载器会先要求安装。
-- `source`：`auto` / `official` / `bmcl`。
+- `source`：`auto` / `official` / `bmcl`。`auto` 对资源文件优先 BMCLAPI（失败即回退官方），库与元数据仍官方优先；`official` 完全禁用镜像。
 - `java`：空表示自动检测。
 - 首次打开 TUI 时，命令行的 `--ram`、`--threads`、`--java`、`--width`、`--height`、`--official`、`--bmcl` 会覆盖配置文件；`-v` 会选择已安装的版本作为活跃实例。之后以文件为准。
 - 文件损坏时界面会提示并采用默认值；建议手动修复或删除后重新配置。
+
+## 下载性能
+
+资源（assets）是大量小文件，延迟和握手成本远高于字节数。CLI/TUI 共用以下优化：
+
+- 进程级 HTTP agent 复用 TCP/TLS 连接，每个主机最多保留 64 条空闲连接，避免每个资源重新握手。
+- 资源文件在 `auto` 源模式下优先 BMCLAPI，失败后立即回退官方；重试按“尝试轮次”而不是“先耗尽官方三次再试镜像”，不再为每个资源等待 1+2+4 秒。
+- 默认 16 个下载线程（1–64 可调）；资源池至少保持 16 并发，旧配置里的 4 线程也不会再成为瓶颈。
+- 资源先写同目录临时文件，校验 SHA-1 后原子改名；不再对每个小文件执行 `fsync`，避免磁盘屏障把并发下载串行化。
+- 缺失文件快速跳过哈希探测；已存在文件仍会校验，损坏缓存仍会重新下载。
+
+思路参考了 PCL2/HMCL 的高并发、多源调度和连接复用，但没有复制它们的代码。原子发布、SHA-1 校验和进度/取消语义保持不变。
+
+延伸阅读：PCL2 下载引擎分析 <https://cloud.tencent.cn/developer/article/2681906>；HMCL 多源调度与断点续传分析 <https://blog.gitcode.com/e84f692185c35e19fa0419450bbca3ab.html>；HMCL `DownloadProviders` <https://github.com/HMCL-dev/HMCL/blob/main/HMCL/src/main/java/org/jackhuang/hmcl/setting/DownloadProviders.java>。
 
 ## 安全与边界
 

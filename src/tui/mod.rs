@@ -232,7 +232,13 @@ pub fn run(launcher: MinecraftLauncher, bootstrap: Bootstrap) -> Result<(), Stri
     match run_result {
         Ok(()) => {
             println!();
-            println!("  mc-launcher TUI closed · CLI is still available with --help");
+            println!(
+                "  {}",
+                app.lang().pick(
+                    "mc-launcher TUI closed · CLI is still available with --help",
+                    "mc-launcher TUI 已关闭 · 仍可使用 CLI（--help）"
+                )
+            );
             Ok(())
         }
         Err(error) => Err(error),

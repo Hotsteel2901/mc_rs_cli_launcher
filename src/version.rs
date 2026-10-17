@@ -285,7 +285,7 @@ impl VersionManager {
             }
         }
         let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(max_workers.clamp(1, 32))
+            .num_threads(max_workers.clamp(1, 64))
             .build()
             .map_err(|e| AppError::Generic(e.to_string()))?;
         pool.install(|| {
@@ -383,8 +383,12 @@ impl VersionManager {
             let dest = self.assets_dir.join("objects").join(&hash[..2]).join(hash);
             downloads.insert(hash, dest);
         }
+        // Assets are latency-bound and tiny. Even an old config or a low
+        // --threads value should not serialize thousands of independent GETs
+        // behind four workers; keep a modest floor while respecting 64.
+        let asset_workers = max_workers.clamp(1, 64).max(16);
         let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(max_workers.clamp(1, 32))
+            .num_threads(asset_workers)
             .build()
             .map_err(|e| AppError::Generic(e.to_string()))?;
         pool.install(|| {
@@ -394,7 +398,7 @@ impl VersionManager {
                     &hash[..2],
                     hash
                 );
-                http::download_file(&url, dest, "Asset", Some(hash), 3, false)
+                http::download_asset(&url, dest, "Asset", Some(hash), 3)
             })
         })
         .map_err(AppError::Http)?;

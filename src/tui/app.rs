@@ -938,7 +938,8 @@ impl App {
                 }
             }
             Err(error) => {
-                self.add_log(LogLevel::Warn, format!("Account metadata: {error}"));
+                let prefix = self.lang().pick("Account metadata", "账号元数据");
+                self.add_log(LogLevel::Warn, format!("{prefix}: {error}"));
             }
         }
     }
@@ -1052,7 +1053,7 @@ impl App {
             }
             4 => {
                 self.settings.threads =
-                    (self.settings.threads as i64 + direction as i64).clamp(1, 32) as usize;
+                    (self.settings.threads as i64 + direction as i64).clamp(1, 64) as usize;
             }
             5 => {
                 let next = match (self.settings.source.as_str(), direction) {
@@ -2275,10 +2276,19 @@ impl App {
                 if let Some(version) = self.settings.active_version.clone() {
                     let removed = ModManager::new(&self.game_dir).uninstall_mod(&file, &version);
                     if removed.is_empty() {
-                        self.log_and_toast(LogLevel::Error, "Could not remove that mod");
+                        self.log_and_toast(
+                            LogLevel::Error,
+                            self.lang()
+                                .pick("Could not remove that mod", "无法移除该模组"),
+                        );
                     } else {
                         self.refresh_mods();
-                        self.log_and_toast(LogLevel::Ok, format!("Removed {}", removed.join(", ")));
+                        let message = if self.lang() == Lang::Chinese {
+                            format!("已移除 {}", removed.join(", "))
+                        } else {
+                            format!("Removed {}", removed.join(", "))
+                        };
+                        self.log_and_toast(LogLevel::Ok, message);
                     }
                 }
                 AppCommand::None
@@ -2369,16 +2379,27 @@ impl App {
         match kind {
             PickerKind::RemoteVersions => {
                 let installed = self.versions.iter().any(|row| row.id == id);
+                let lang = self.lang();
                 self.modal = Some(Modal::Confirm {
                     title: format!("Minecraft {id}"),
                     lines: vec![
                         if installed {
-                            "This version is already installed; missing files will be verified."
-                                .into()
+                            lang.pick(
+                                "This version is already installed; missing files will be verified.",
+                                "该版本已安装，将校验缺失文件。",
+                            )
                         } else {
-                            "Download the client, libraries and assets now?".into()
-                        },
-                        "Progress is shown below the screen while it runs.".into(),
+                            lang.pick(
+                                "Download the client, libraries and assets now?",
+                                "现在下载客户端、库和资源文件？",
+                            )
+                        }
+                        .into(),
+                        lang.pick(
+                            "Progress is shown below the screen while it runs.",
+                            "运行进度会显示在界面底部。",
+                        )
+                        .into(),
                     ],
                     action: ConfirmAction::DownloadVersion(id.to_string()),
                     danger: false,
@@ -2810,7 +2831,10 @@ impl App {
         let Some(version) = self.settings.active_version.clone() else {
             self.toast(
                 LogLevel::Warn,
-                "Download a Minecraft version before choosing a loader",
+                self.lang().pick(
+                    "Download a Minecraft version before choosing a loader",
+                    "请先下载 Minecraft 版本再选择加载器",
+                ),
             );
             return;
         };
@@ -3132,6 +3156,7 @@ impl App {
                 }
             }
             BackendEvent::Log { id, level, text } => {
+                let text = i18n::localize_job_log(self.lang(), &text);
                 if self.job.as_ref().is_some_and(|job| job.id == id) {
                     if let Some(job) = self.job.as_mut() {
                         job.add_log(level, text.clone());
@@ -3169,17 +3194,26 @@ impl App {
                         }
                         self.add_log(
                             LogLevel::Info,
-                            format!(
-                                "Modrinth: {} result(s) for \"{}\"",
-                                self.search.results.len(),
-                                query
-                            ),
+                            if self.lang() == Lang::Chinese {
+                                format!(
+                                    "Modrinth：{} 个结果，关键词 \"{}\"",
+                                    self.search.results.len(),
+                                    query
+                                )
+                            } else {
+                                format!(
+                                    "Modrinth: {} result(s) for \"{}\"",
+                                    self.search.results.len(),
+                                    query
+                                )
+                            },
                         );
                     }
                     Err(error) => {
                         let error = theme::one_line(&error, 400);
                         self.search.error = Some(error.clone());
-                        self.add_log(LogLevel::Error, format!("Search failed: {error}"));
+                        let prefix = self.lang().pick("Search failed", "搜索失败");
+                        self.add_log(LogLevel::Error, format!("{prefix}: {error}"));
                         self.toast(LogLevel::Error, error);
                     }
                 }
@@ -3199,12 +3233,14 @@ impl App {
                                 picker.error = None;
                             }
                         }
+                        let count = self.remote_versions.as_ref().map(Vec::len).unwrap_or(0);
                         self.add_log(
                             LogLevel::Info,
-                            format!(
-                                "Version manifest loaded ({} versions)",
-                                self.remote_versions.as_ref().map(Vec::len).unwrap_or(0)
-                            ),
+                            if self.lang() == Lang::Chinese {
+                                format!("版本清单已加载（{count} 个版本）")
+                            } else {
+                                format!("Version manifest loaded ({count} versions)")
+                            },
                         );
                     }
                     Err(error) => {
@@ -3215,7 +3251,10 @@ impl App {
                                 picker.error = Some(error.clone());
                             }
                         }
-                        self.add_log(LogLevel::Error, format!("Manifest failed: {error}"));
+                        let prefix = self
+                            .lang()
+                            .pick("Version manifest failed", "版本清单加载失败");
+                        self.add_log(LogLevel::Error, format!("{prefix}: {error}"));
                         self.toast(LogLevel::Error, error);
                     }
                 }
@@ -3225,16 +3264,21 @@ impl App {
                 self.java_path = path;
                 self.java_major = major;
                 if let Some(path) = self.java_path.as_ref() {
+                    let major = major.map(|m| m.to_string()).unwrap_or_else(|| "?".into());
                     self.add_log(
                         LogLevel::Debug,
-                        format!(
-                            "Java {} at {}",
-                            major.map(|m| m.to_string()).unwrap_or_else(|| "?".into()),
-                            path
-                        ),
+                        if self.lang() == Lang::Chinese {
+                            format!("Java {major}：{path}")
+                        } else {
+                            format!("Java {major} at {path}")
+                        },
                     );
                 } else {
-                    self.add_log(LogLevel::Warn, "No Java installation detected");
+                    self.add_log(
+                        LogLevel::Warn,
+                        self.lang()
+                            .pick("No Java installation detected", "未检测到 Java 安装"),
+                    );
                 }
             }
         }
@@ -3307,34 +3351,52 @@ impl App {
     }
 
     fn perform_launch(&mut self) -> Result<String, String> {
-        let version = self
-            .settings
-            .active_version
-            .clone()
-            .ok_or("No active version selected")?;
+        let lang = self.lang();
+        let version = self.settings.active_version.clone().ok_or_else(|| {
+            lang.pick("No active version selected", "未选择活跃版本")
+                .to_string()
+        })?;
         // An explicit loader choice is validated by refresh_local; auto mode
         // lets the launcher core pick the first valid detected profile.
         let loader = self.settings.active_loader.clone();
         let (width, height) = self.settings.window();
         let ram = self.settings.ram_mb;
 
-        println!("\n  mc-launcher  ·  starting Minecraft {version}");
-        println!("  Terminal control returns here when the game exits.\n");
+        if lang == Lang::Chinese {
+            println!("\n  mc-launcher  ·  正在启动 Minecraft {version}");
+            println!("  游戏退出后终端会回到这里。\n");
+        } else {
+            println!("\n  mc-launcher  ·  starting Minecraft {version}");
+            println!("  Terminal control returns here when the game exits.\n");
+        }
         if !self.settings.java.trim().is_empty() {
             self.launcher
                 .set_java(self.settings.java.trim())
-                .map_err(|e| format!("Invalid Java path: {e}"))?;
+                .map_err(|e| {
+                    if lang == Lang::Chinese {
+                        format!("Java 路径无效：{e}")
+                    } else {
+                        format!("Invalid Java path: {e}")
+                    }
+                })?;
         }
         // Account metadata may have been edited natively by the TUI. Reload
         // from disk so logout/login/default changes are not lost or bypassed.
-        let accounts = AccountManager::new(&self.game_dir)
-            .map_err(|e| format!("Cannot load accounts: {e}"))?;
+        let accounts = AccountManager::new(&self.game_dir).map_err(|e| {
+            if lang == Lang::Chinese {
+                format!("无法加载账号：{e}")
+            } else {
+                format!("Cannot load accounts: {e}")
+            }
+        })?;
         self.launcher.accounts = accounts;
-        let account = self
-            .launcher
-            .accounts
-            .get_default()
-            .ok_or("No account with usable credentials. Log in again.")?;
+        let account = self.launcher.accounts.get_default().ok_or_else(|| {
+            lang.pick(
+                "No account with usable credentials. Log in again.",
+                "没有可用账号，请重新登录。",
+            )
+            .to_string()
+        })?;
         let _ = std::io::stdout().flush();
         let result = self.launcher.launch(
             Some(&version),
@@ -3346,43 +3408,69 @@ impl App {
         );
         match result {
             Ok(0) => {
-                let message = format!("Minecraft {version} exited");
+                let message = if lang == Lang::Chinese {
+                    format!("Minecraft {version} 已退出")
+                } else {
+                    format!("Minecraft {version} exited")
+                };
                 println!("\n  {message}");
-                wait_for_enter();
+                wait_for_enter(lang);
                 Ok(message)
             }
             Ok(code) => {
-                let message = format!("Minecraft {version} exited with code {code}");
+                let message = if lang == Lang::Chinese {
+                    format!("Minecraft {version} 已退出，退出码 {code}")
+                } else {
+                    format!("Minecraft {version} exited with code {code}")
+                };
                 println!("\n  {message}");
-                wait_for_enter();
+                wait_for_enter(lang);
                 Err(message)
             }
             Err(error) => {
-                let message = format!("Launch failed: {error}");
+                let message = if lang == Lang::Chinese {
+                    format!("启动失败：{error}")
+                } else {
+                    format!("Launch failed: {error}")
+                };
                 println!("\n  {message}");
-                wait_for_enter();
+                wait_for_enter(lang);
                 Err(message)
             }
         }
     }
 
     fn perform_login(&mut self, mode: LoginMode) -> Result<String, String> {
-        println!("\n  mc-launcher  ·  Microsoft login");
-        println!("  Follow the instructions below; the TUI returns afterwards.\n");
-        let mut auth = MicrosoftAuth::new();
-        match mode {
-            LoginMode::Browser => {
-                auth.login()
-                    .map_err(|e| format!("Microsoft login failed: {e}"))?;
-            }
-            LoginMode::DeviceCode => {
-                auth.device_code_login()
-                    .map_err(|e| format!("Microsoft login failed: {e}"))?;
-            }
+        let lang = self.lang();
+        if lang == Lang::Chinese {
+            println!("\n  mc-launcher  ·  Microsoft 登录");
+            println!("  按下方提示操作，完成后会回到 TUI。\n");
+        } else {
+            println!("\n  mc-launcher  ·  Microsoft login");
+            println!("  Follow the instructions below; the TUI returns afterwards.\n");
         }
+        let mut auth = MicrosoftAuth::new();
+        let login_error = |e: String| {
+            if lang == Lang::Chinese {
+                format!("Microsoft 登录失败：{e}")
+            } else {
+                format!("Microsoft login failed: {e}")
+            }
+        };
+        match mode {
+            LoginMode::Browser => auth.login().map_err(|e| login_error(e.to_string()))?,
+            LoginMode::DeviceCode => auth
+                .device_code_login()
+                .map_err(|e| login_error(e.to_string()))?,
+        };
         let uid = crate::util::format_uuid(&auth.uuid);
-        let mut accounts = AccountManager::new(&self.game_dir)
-            .map_err(|e| format!("Cannot load accounts: {e}"))?;
+        let mut accounts = AccountManager::new(&self.game_dir).map_err(|e| {
+            if lang == Lang::Chinese {
+                format!("无法加载账号：{e}")
+            } else {
+                format!("Cannot load accounts: {e}")
+            }
+        })?;
         accounts
             .set_msa(
                 &auth.username,
@@ -3391,11 +3479,23 @@ impl App {
                 &auth.refresh_token,
                 auth.expires_at,
             )
-            .map_err(|e| format!("Saving credentials failed: {e}"))?;
+            .map_err(|e| {
+                if lang == Lang::Chinese {
+                    format!("保存凭据失败：{e}")
+                } else {
+                    format!("Saving credentials failed: {e}")
+                }
+            })?;
         self.launcher.accounts = accounts;
-        println!("\n  [OK] Logged in as {}", auth.username);
-        wait_for_enter();
-        Ok(format!("Signed in as {}", auth.username))
+        if lang == Lang::Chinese {
+            println!("\n  [OK] 已登录为 {}", auth.username);
+            wait_for_enter(lang);
+            Ok(format!("已登录为 {}", auth.username))
+        } else {
+            println!("\n  [OK] Logged in as {}", auth.username);
+            wait_for_enter(lang);
+            Ok(format!("Signed in as {}", auth.username))
+        }
     }
 
     pub fn after_suspended(&mut self, task: SuspendTask, result: Result<String, String>) {
@@ -3503,8 +3603,12 @@ fn open_modrinth(slug: &str) {
         });
 }
 
-fn wait_for_enter() {
-    print!("\n  Press Enter to return to the launcher... ");
+fn wait_for_enter(lang: Lang) {
+    if lang == Lang::Chinese {
+        print!("\n  按回车返回启动器... ");
+    } else {
+        print!("\n  Press Enter to return to the launcher... ");
+    }
     let _ = std::io::stdout().flush();
     let mut line = String::new();
     let _ = std::io::stdin().read_line(&mut line);

@@ -69,9 +69,9 @@ fn parse_component(value: &str) -> Result<String, String> {
 fn parse_threads(value: &str) -> Result<usize, String> {
     let n = value
         .parse::<usize>()
-        .map_err(|_| "Threads must be an integer from 1 to 32")?;
-    if !(1..=32).contains(&n) {
-        return Err("Threads must be from 1 to 32".into());
+        .map_err(|_| "Threads must be an integer from 1 to 64")?;
+    if !(1..=64).contains(&n) {
+        return Err("Threads must be from 1 to 64".into());
     }
     Ok(n)
 }
@@ -119,7 +119,7 @@ fn build_cli() -> Command {
         .arg(
             arg!(-t --threads <N> "Parallel download threads")
                 .value_parser(parse_threads)
-                .default_value("4"),
+                .default_value("16"),
         )
         .arg(arg!(-j --java <PATH> "Path to Java executable"))
         .arg(arg!(-v --version <VERSION> "Minecraft version").value_parser(parse_component))
@@ -1155,7 +1155,7 @@ mod cli_tests {
             vec!["--loader", "forge", "--neoforge"],
             vec!["--official", "--bmcl"],
             vec!["--threads", "0"],
-            vec!["--threads", "33"],
+            vec!["--threads", "65"],
             vec!["--width", "0"],
             vec!["--limit", "101"],
             vec!["-v", "../escape"],

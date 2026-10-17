@@ -480,7 +480,9 @@ fn render_sidebar(frame: &mut Frame, app: &App, area: Rect, t: f64) {
             .active_version
             .clone()
             .unwrap_or_else(|| "—".into());
-        let loader = app.active_loader().unwrap_or_else(|| "Vanilla".into());
+        let loader = app
+            .active_loader()
+            .unwrap_or_else(|| app.lang().pick("Vanilla", "原版").into());
         let lines = vec![
             Line::from(vec![
                 Span::styled(" ◈ ", Style::default().fg(theme::GOLD).bg(theme::SURFACE)),
@@ -936,7 +938,7 @@ fn render_job_panel(frame: &mut Frame, app: &App, area: Rect, t: f64) {
         stats.push(Span::styled(
             format!(
                 "· {}",
-                theme::truncate_chars(&file_label(&latest.label), 28)
+                theme::truncate_chars(&file_label(lang, &latest.label), 28)
             ),
             Style::default().fg(theme::TEXT_FAINT).bg(theme::SURFACE),
         ));
@@ -1017,11 +1019,13 @@ fn render_job_panel(frame: &mut Frame, app: &App, area: Rect, t: f64) {
     }
 }
 
-fn file_label(label: &str) -> String {
-    if label.is_empty() {
-        "download".into()
-    } else {
-        label.to_string()
+fn file_label(lang: i18n::Lang, label: &str) -> String {
+    match label {
+        "" => lang.pick("download", "下载").into(),
+        "Asset" => lang.pick("Asset", "资源").into(),
+        "Asset index" => lang.pick("Asset index", "资源索引").into(),
+        "Library" => lang.pick("Library", "库").into(),
+        other => other.to_string(),
     }
 }
 
@@ -1677,6 +1681,48 @@ mod tests {
         assert_eq!(app.settings.language, "zh");
         let _ = app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::empty()));
         assert_eq!(app.settings.language, "en");
+    }
+
+    #[test]
+    fn chinese_mode_localizes_all_main_screens_and_modals() {
+        let (mut app, _dir) = app_with_data();
+        app.settings.language = "zh".into();
+        app.toasts.clear();
+        let compact =
+            |text: &str| -> String { text.chars().filter(|ch| !ch.is_whitespace()).collect() };
+        for (screen, expected) in [
+            (Screen::Versions, "版本详情"),
+            (Screen::Mods, "模组详情"),
+            (Screen::Accounts, "账号详情"),
+            (Screen::Logs, "活动"),
+            (Screen::Settings, "偏好设置"),
+        ] {
+            app.screen = screen;
+            app.modal = None;
+            let text = compact(&render_at(&mut app, 110, 34));
+            assert!(text.contains(expected), "missing {expected}: {text}");
+        }
+
+        app.screen = Screen::Mods;
+        app.search.open = true;
+        app.search.results = crate::tui::app::parse_search_hits(&serde_json::json!({
+            "hits": [{"slug":"sodium","title":"Sodium","description":"Fast renderer","author":"jelly","downloads":42,"categories":["fabric"]}]
+        }));
+        let text = compact(&render_at(&mut app, 110, 34));
+        assert!(text.contains("结果"), "{text}");
+        assert!(text.contains("作者"), "{text}");
+        app.search.open = false;
+
+        app.modal = Some(Modal::Help { scroll: 0 });
+        let text = compact(&render_at(&mut app, 110, 34));
+        assert!(text.contains("帮助"), "{text}");
+        assert!(text.contains("全局"), "{text}");
+
+        app.modal = Some(Modal::Login { selected: 0 });
+        let text = compact(&render_at(&mut app, 110, 34));
+        assert!(text.contains("Microsoft登录"), "{text}");
+        assert!(text.contains("浏览器"), "{text}");
+        app.modal = None;
     }
 
     #[test]

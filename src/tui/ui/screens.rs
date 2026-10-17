@@ -1460,12 +1460,12 @@ fn settings_fields(frame: &mut Frame, app: &App, area: Rect, t: f64) {
             "游戏窗口高度。自动交给 Minecraft 决定。",
         ),
         lang.pick(
-            "Parallel download workers used by the CLI core.",
-            "CLI 核心使用的并行下载线程数。",
+            "Parallel download workers. Assets keep at least 16.",
+            "并行下载线程数；资源下载至少保持 16 并发。",
         ),
         lang.pick(
-            "Auto tries official first, then BMCLAPI on failure.",
-            "自动优先官方，失败后再尝试 BMCLAPI。",
+            "Auto prefers BMCLAPI for assets; other files try official first.",
+            "自动模式下资源优先 BMCLAPI，其他文件优先官方。",
         ),
         lang.pick(
             "Empty means auto-detect. Enter to edit.",
@@ -2047,10 +2047,15 @@ pub fn render_search(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
                 theme::truncate_chars(&hit.title, 34),
                 if selection { "›" } else { "" }
             );
+            let author = if hit.author == "unknown" {
+                lang.pick("unknown", "未知")
+            } else {
+                &hit.author
+            };
             let meta = if lang == Lang::Chinese {
                 format!(
                     "作者 {} · {} 次下载 · {}",
-                    hit.author,
+                    author,
                     format_num(hit.downloads),
                     if hit.categories.is_empty() {
                         "未分类".to_string()
@@ -2061,7 +2066,7 @@ pub fn render_search(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
             } else {
                 format!(
                     "by {} · {} downloads · {}",
-                    hit.author,
+                    author,
                     format_num(hit.downloads),
                     if hit.categories.is_empty() {
                         "uncategorized".into()

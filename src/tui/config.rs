@@ -8,7 +8,7 @@ use crate::http::SourceMode;
 
 pub const CONFIG_FILE: &str = "launcher_tui.json";
 pub const DEFAULT_RAM_MB: u32 = 4096;
-pub const DEFAULT_THREADS: usize = 4;
+pub const DEFAULT_THREADS: usize = 16;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
@@ -88,7 +88,7 @@ impl Settings {
 
     pub fn normalize(&mut self) {
         self.ram_mb = self.ram_mb.clamp(512, 32_768);
-        self.threads = self.threads.clamp(1, 32);
+        self.threads = self.threads.clamp(1, 64);
         self.width = match self.width {
             0 => 0,
             value => value.clamp(320, 7680),
@@ -181,7 +181,7 @@ mod tests {
         };
         settings.normalize();
         assert_eq!(settings.ram_mb, 512);
-        assert_eq!(settings.threads, 32);
+        assert_eq!(settings.threads, 64);
         assert_eq!(settings.width, 320);
         assert_eq!(settings.height, 4320);
         assert_eq!(settings.source, "auto");

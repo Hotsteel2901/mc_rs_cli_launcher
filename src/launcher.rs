@@ -30,7 +30,7 @@ impl MinecraftLauncher {
             accounts: crate::account::AccountManager::new(&game_dir)?,
             versions: VersionManager::new(&game_dir),
             java_path: None,
-            threads: threads.clamp(1, 32),
+            threads: threads.clamp(1, 64),
         })
     }
 
