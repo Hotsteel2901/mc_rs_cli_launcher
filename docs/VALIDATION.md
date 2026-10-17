@@ -55,6 +55,22 @@ Windows 少一项是因为假 Java shell 脚本启动测试仅在 Unix 上运行
 4. 分别在独立目录安装 Fabric / Forge / NeoForge，启动到主菜单；添加兼容模组后检查依赖与加载器选择。
 5. 断网后启动文件齐全的指定版本；检查缺文件/过期认证会明确报错，不假装启动成功。
 
+5. 断网后启动文件齐全的指定版本；检查缺文件/过期认证会明确报错，不假装启动成功。
+6. 在真实终端中运行 `mc-launcher tui`，验证调整窗口、切换界面、取消下载/安装、退出后终端恢复；在 Windows Terminal / macOS Terminal 上分别检查真彩色和按键行为。
+
+## TUI 新增验证（2026-10-17，本地 Linux）
+
+本轮新增的 `mc-launcher tui` 在本地 Linux 环境完成：
+
+- `cargo fmt --all -- --check`
+- `cargo test --locked --all-targets`：单元测试与 CLI 集成测试全部通过；TUI 渲染测试覆盖 120×40、100×32、80×24、60×20、52×16 及过小终端，覆盖全部界面、搜索、帮助、确认、输入、版本/加载器选择器、登录选择、Splash、Toast、粒子、运行/成功/失败任务状态。
+- `cargo clippy --locked --all-targets -- -D warnings`
+- `cargo build --locked --release`
+- 伪终端（PTY）冒烟：100×32 下启动、跳过 Splash、切换界面、打开/关闭帮助、`q` 退出；确认进入/离开备用屏幕、括号粘贴启用/禁用、退出码 0。
+- 非 TTY：`mc-launcher tui` 输出交互式终端错误并立即退出，未创建游戏目录或配置。
+
+尚未完成：Windows/macOS 真实终端的视觉效果与子进程树清理分支、真实 Forge/NeoForge 安装器在 TUI 中的长时间运行与取消、真实 Microsoft 登录在 TUI 挂起/恢复后的钥匙串回退交互。这些仍属于发布前人工验收范围。
+
 ## 仍有的产品边界
 
 同一 Minecraft 版本下多个加载器共享游戏目录；模组依赖处理不是完整冲突求解器；没有跨进程安装锁；旧式不含 `version.json` 的 Forge-family 安装器不支持。文档已明确这些限制，不宣称“所有版本、账号、模组组合都已验证”。

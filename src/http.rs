@@ -5,6 +5,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
+use crate::progress;
 use crate::util;
 use indicatif::ProgressBar;
 
@@ -226,12 +227,18 @@ pub fn download_file(
     let mut last_error = String::new();
     for source in source_urls(url, get_source_mode()) {
         for attempt in 0..max_retries {
+            if progress::is_cancelled() {
+                return Err("Download cancelled".into());
+            }
             match download_once(&source, dest, label, sha1_expected, show_progress) {
                 Ok(()) => return Ok(()),
                 Err(error) => last_error = error,
             }
-            if attempt + 1 < max_retries {
-                std::thread::sleep(Duration::from_secs(1 << attempt.min(4)));
+            if progress::is_cancelled() {
+                return Err("Download cancelled".into());
+            }
+            if attempt + 1 < max_retries && !cancellable_backoff(1 << attempt.min(4)) {
+                return Err("Download cancelled".into());
             }
         }
     }
@@ -239,6 +246,18 @@ pub fn download_file(
         "Download failed for {}: {last_error}",
         dest.display()
     ))
+}
+
+/// Interruptible retry backoff so quitting the TUI does not leave a worker
+/// sleeping for several seconds.
+fn cancellable_backoff(seconds: u64) -> bool {
+    for _ in 0..seconds * 10 {
+        if progress::is_cancelled() {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    true
 }
 
 fn download_once(
@@ -268,15 +287,25 @@ fn download_once(
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     let mut temp = tempfile::NamedTempFile::new_in(parent).map_err(|e| e.to_string())?;
-    let bar = if progress {
+    let transfer_id = dest.to_string_lossy().to_string();
+    let captured = progress::capture_active();
+    let bar = if progress && !captured {
         ProgressBar::new(length.unwrap_or(0))
     } else {
         ProgressBar::hidden()
     };
     bar.set_message(label.to_owned());
+    progress::transfer(&transfer_id, label, 0, length, false);
     let result = (|| -> Result<(), String> {
-        let copied = copy_checked(response.into_reader(), &mut temp, length, &bar)
-            .map_err(|e| e.to_string())?;
+        let copied = copy_checked(
+            response.into_reader(),
+            &mut temp,
+            length,
+            &bar,
+            &transfer_id,
+            label,
+        )
+        .map_err(|e| e.to_string())?;
         if copied == 0 {
             return Err("Empty response body".into());
         }
@@ -299,6 +328,7 @@ fn download_once(
                 .map_err(|e| format!("Invalid JSON: {e}"))?;
         }
         temp.persist(dest).map_err(|e| e.error.to_string())?;
+        progress::transfer(&transfer_id, label, copied, Some(copied), true);
         Ok(())
     })();
     bar.finish_and_clear();
@@ -310,10 +340,19 @@ fn copy_checked(
     mut writer: impl Write,
     expected: Option<u64>,
     bar: &ProgressBar,
+    transfer_id: &str,
+    label: &str,
 ) -> std::io::Result<u64> {
     let mut bytes = 0;
+    let mut next_report = 0;
     let mut buf = [0; 65536];
     loop {
+        if progress::is_cancelled() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "Cancelled",
+            ));
+        }
         let count = reader.read(&mut buf)?;
         if count == 0 {
             break;
@@ -321,6 +360,10 @@ fn copy_checked(
         writer.write_all(&buf[..count])?;
         bytes += count as u64;
         bar.inc(count as u64);
+        if bytes >= next_report {
+            progress::transfer(transfer_id, label, bytes, expected, false);
+            next_report = bytes.saturating_add(1_048_576);
+        }
     }
     if expected.is_some_and(|n| n != bytes) {
         return Err(std::io::Error::new(
@@ -437,8 +480,24 @@ mod tests {
                 Ok(())
             }
         }
-        assert!(copy_checked(&b"hello"[..], Broken, None, &ProgressBar::hidden()).is_err());
-        assert!(copy_checked(&b"short"[..], Vec::new(), Some(20), &ProgressBar::hidden()).is_err());
+        assert!(copy_checked(
+            &b"hello"[..],
+            Broken,
+            None,
+            &ProgressBar::hidden(),
+            "id",
+            "test"
+        )
+        .is_err());
+        assert!(copy_checked(
+            &b"short"[..],
+            Vec::new(),
+            Some(20),
+            &ProgressBar::hidden(),
+            "id",
+            "test"
+        )
+        .is_err());
         assert!(download_file("invalid", Path::new("unused"), "", None, 0, false).is_err());
     }
 }

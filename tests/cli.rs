@@ -61,6 +61,19 @@ fn corrupt_accounts_are_reported_without_overwriting() {
     assert_eq!(std::fs::read_to_string(file).unwrap(), "broken json");
 }
 
+#[test]
+fn tui_refuses_a_pipe_instead_of_hanging() {
+    let dir = tempfile::tempdir().unwrap();
+    let result = run(dir.path(), &["tui"]);
+    assert!(!result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        stderr.contains("interactive terminal"),
+        "unexpected stderr: {stderr}"
+    );
+    assert!(!dir.path().join("launcher_tui.json").exists());
+}
+
 #[cfg(unix)]
 #[test]
 fn cached_game_launch_uses_absolute_paths_custom_resolution_and_child_exit_code() {

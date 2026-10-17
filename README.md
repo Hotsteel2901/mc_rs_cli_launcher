@@ -1,6 +1,6 @@
 # mc-launcher
 
-Rust 编写的 Minecraft 命令行启动器。支持 Microsoft / 离线账号、按 Minecraft 版本隔离游戏目录、Fabric / Forge / NeoForge，以及 Modrinth 模组管理。
+Rust 编写的 Minecraft 命令行启动器。支持 Microsoft / 离线账号、按 Minecraft 版本隔离游戏目录、Fabric / Forge / NeoForge，以及 Modrinth 模组管理。内置可选的全屏终端前端 `mc-launcher tui`，仍然只依赖 CLI 核心，不引入 GUI。
 
 > 离线账号不提供正版认证，不能进入要求正版认证的服务器。Microsoft 登录需要拥有 Minecraft Java Edition 的账号。
 
@@ -24,6 +24,9 @@ mc-launcher offline Steve --dir ./minecraft
 mc-launcher download -v 1.21.4 --dir ./minecraft
 mc-launcher play -v 1.21.4 --ram 4G --dir ./minecraft
 
+# 可选的全屏终端界面（同一二进制）
+mc-launcher tui --dir ./minecraft
+
 # Microsoft 账号
 mc-launcher login --dir ./minecraft
 mc-launcher login --device-code --dir ./minecraft
@@ -32,6 +35,23 @@ mc-launcher logout --dir ./minecraft
 ```
 
 默认目录是可执行文件所在目录下的 `minecraft/`。`-v` / `--version` 指 **Minecraft 版本**；启动器版本使用 `--launcher-version`。`latest` 和 `latest-snapshot` 分别解析最新正式版和快照版。省略命令等同 `play`。
+
+## TUI 前端（可选）
+
+```sh
+mc-launcher tui
+```
+
+同一个 CLI 二进制里的键盘驱动全屏界面，包含动态 Dashboard、远程版本选择与下载、加载器选择与安装、Modrinth 搜索/安装、模组启停、账号管理、设置与完整活动日志。文件下载有分阶段进度、实时速度、每文件百分比和可取消的任务面板；界面支持 30 FPS 渐变/脉冲/Toast/粒子动效，以及在设置中关闭开场动画和减少动效。
+
+- 需要交互式终端和 ANSI 支持；stdin/stdout 不是 TTY 或 `TERM=dumb` 时会明确报错，不会在 CI 或管道中挂起。
+- 窗口宽度小于 96 列自动切换顶部标签布局；小于 52×16 显示尺寸提示。
+- 终端始终在退出、错误、挂起和主线程 panic 时恢复；运行任务退出时会被取消并清理子进程树。
+- 配置保存在游戏目录的 `launcher_tui.json`，不含令牌。
+- Microsoft 登录和游戏启动会临时离开备用屏幕，让钥匙串回退确认、设备码和游戏控制台正常显示；界面列表只读取账号元数据，只有登录或启动时 CLI 核心才访问钥匙串，令牌从不出现在界面中。
+- 完整按键表、截图、配置字段、架构与验证方式见 **[docs/TUI.md](docs/TUI.md)**。
+
+TUI 是可选的便利层：所有自动化、脚本与服务器场景都可以继续只使用下面的 CLI 命令。
 
 ### 账号安全
 
@@ -88,6 +108,7 @@ Forge 和 NeoForge 执行官方安装器及其 processors，不再把“只解�
 ```text
 minecraft/
   launcher_accounts.json       # 非敏感账号元数据
+  launcher_tui.json            # 可选：TUI 偏好（内存、窗口、源、Java 等）
   launcher_secrets.enc         # 可选：钥匙串不可用时的加密令牌（需用户同意）
   launcher_secrets.key         # 可选：上述加密文件的本地密钥（0600）
   versions/<mc-version>/       # 该版本的 saves、mods、config、日志及客户端
@@ -108,7 +129,7 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo build --locked --release
 ```
 
-CI 在 Linux、Windows、macOS 执行上述命令。测试使用本地 HTTP fixture 和模拟钥匙串，不需要正版账号；Unix 上用假的 Java 可执行文件验证离线启动参数、工作目录和子进程退出码。这不是实际 Minecraft 图形界面或 Microsoft 服务的端到端测试。参见 [验证记录](docs/VALIDATION.md)。
+CI 在 Linux、Windows、macOS 执行上述命令。测试使用本地 HTTP fixture 和模拟钥匙串，不需要正版账号；Unix 上用假的 Java 可执行文件验证离线启动参数、工作目录和子进程退出码。TUI 使用 `TestBackend` 在多种终端尺寸下渲染全部界面、弹窗和任务状态；开发验证中还使用伪终端冒烟测试检查备用屏幕进入/退出与按键退出。非 TTY 下的 `tui` 会明确失败，不会阻塞 CI。这不是实际 Minecraft 图形界面或 Microsoft 服务的端到端测试。参见 [验证记录](docs/VALIDATION.md) 与 [TUI 说明](docs/TUI.md)。
 
 ## 许可证
 

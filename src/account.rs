@@ -378,6 +378,118 @@ impl AccountManager {
         Self::with_store(&game_dir, Box::new(FallbackStore::new(&game_dir)))
     }
 
+    fn resolve_dir(game_dir: &Path) -> AppResult<PathBuf> {
+        Ok(game_dir
+            .canonicalize()
+            .or_else(|_| util::absolute_path(game_dir))?)
+    }
+
+    fn accounts_path(game_dir: &Path) -> AppResult<PathBuf> {
+        Ok(Self::resolve_dir(game_dir)?.join(ACCOUNTS_FILE))
+    }
+
+    fn secret_key_for(game_dir: &Path) -> AppResult<String> {
+        let dir = Self::resolve_dir(game_dir)?;
+        Ok(format!(
+            "msa:{:x}",
+            Sha1::digest(dir.to_string_lossy().as_bytes())
+        ))
+    }
+
+    fn read_public_data(game_dir: &Path) -> AppResult<serde_json::Value> {
+        let path = Self::accounts_path(game_dir)?;
+        let data = match fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| {
+                AppError::Generic(format!(
+                    "Invalid accounts file {} (left untouched): {e}",
+                    path.display()
+                ))
+            })?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                serde_json::json!({"accounts":{},"default":null})
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if !data["accounts"].is_object()
+            || !(data["default"].is_null() || data["default"].is_string())
+        {
+            return Err("Invalid accounts schema; refusing to overwrite it".into());
+        }
+        Ok(data)
+    }
+
+    fn save_public_data(game_dir: &Path, data: &serde_json::Value) -> AppResult<()> {
+        let path = Self::accounts_path(game_dir)?;
+        util::atomic_write(&path, &serde_json::to_vec_pretty(data)?)?;
+        Ok(())
+    }
+
+    fn validate_offline_name(username: &str) -> AppResult<()> {
+        if !(1..=16).contains(&username.len())
+            || !username
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'_')
+        {
+            return Err(
+                "Offline username must contain 1–16 ASCII letters, digits or underscores".into(),
+            );
+        }
+        Ok(())
+    }
+
+    /// Public account metadata only (never tokens), for frontends that must not
+    /// touch the OS keychain just to render an account list.
+    pub fn public_metadata(game_dir: &Path) -> AppResult<serde_json::Value> {
+        let mut data = Self::read_public_data(game_dir)?;
+        // Defensive: a legacy file may still carry credential fields before
+        // migration. Frontends only need names, UUIDs and expiry times.
+        if let Some(accounts) = data["accounts"].as_object_mut() {
+            for account in accounts.values_mut() {
+                if let Some(object) = account.as_object_mut() {
+                    object.remove("access_token");
+                    object.remove("refresh_token");
+                }
+            }
+        }
+        Ok(data)
+    }
+
+    /// Add/replace the offline account without opening a credential store.
+    pub fn set_offline_metadata(game_dir: &Path, username: &str) -> AppResult<()> {
+        Self::validate_offline_name(username)?;
+        let mut data = Self::read_public_data(game_dir)?;
+        data["accounts"]["offline"] = serde_json::json!({"type":"offline","username":username,"uuid":util::offline_uuid(username)});
+        data["default"] = "offline".into();
+        Self::save_public_data(game_dir, &data)
+    }
+
+    /// Switch the default account; credentials and expiry are untouched.
+    pub fn set_default_metadata(game_dir: &Path, key: &str) -> AppResult<()> {
+        let mut data = Self::read_public_data(game_dir)?;
+        if !data["accounts"].get(key).is_some_and(|v| v.is_object()) {
+            return Err(format!("No saved account named '{key}'").into());
+        }
+        data["default"] = serde_json::Value::String(key.to_string());
+        Self::save_public_data(game_dir, &data)
+    }
+
+    /// Remove local metadata and best-effort delete stored Microsoft secrets.
+    /// Deletion never prompts, so this is safe to call from a full-screen UI.
+    pub fn logout_metadata(game_dir: &Path) -> AppResult<()> {
+        let dir = Self::resolve_dir(game_dir)?;
+        let mut data = Self::read_public_data(&dir)?;
+        if data["accounts"].get("msa").is_some() {
+            let store = FallbackStore::new(&dir);
+            let key = Self::secret_key_for(&dir)?;
+            store.delete(&key).map_err(AppError::Generic)?;
+            store
+                .delete("msa_refresh_token")
+                .map_err(AppError::Generic)?;
+        }
+        data = serde_json::json!({"accounts":{},"default":null});
+        Self::save_public_data(&dir, &data)
+    }
+
     fn with_store(game_dir: &Path, secrets: Box<dyn SecretStore>) -> AppResult<Self> {
         let game_dir = game_dir
             .canonicalize()
@@ -707,6 +819,56 @@ mod tests {
         let raw = fs::read_to_string(dir.path().join(SECRETS_FILE)).unwrap();
         assert!(!raw.contains("secret-access") && !raw.contains("secret-refresh"));
         assert!(dir.path().join(SECRETS_KEY_FILE).exists());
+    }
+
+    #[test]
+    fn public_metadata_is_secret_free_and_editable_without_keychain() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(ACCOUNTS_FILE);
+        let initial = AccountManager::public_metadata(dir.path()).unwrap();
+        assert!(initial["accounts"].as_object().unwrap().is_empty());
+        assert!(!path.exists());
+
+        AccountManager::set_offline_metadata(dir.path(), "Steve_01").unwrap();
+        let data = AccountManager::public_metadata(dir.path()).unwrap();
+        assert_eq!(data["default"], "offline");
+        assert_eq!(data["accounts"]["offline"]["username"], "Steve_01");
+        assert_eq!(
+            data["accounts"]["offline"]["uuid"],
+            util::offline_uuid("Steve_01")
+        );
+
+        // Even a legacy file that still contains token fields must not expose
+        // them through the metadata API used by the TUI.
+        let mut raw: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        raw["accounts"]["offline"]["access_token"] = "secret-access".into();
+        raw["accounts"]["offline"]["refresh_token"] = "secret-refresh".into();
+        fs::write(&path, serde_json::to_vec_pretty(&raw).unwrap()).unwrap();
+        let public = AccountManager::public_metadata(dir.path()).unwrap();
+        assert!(public["accounts"]["offline"].get("access_token").is_none());
+        assert!(public["accounts"]["offline"].get("refresh_token").is_none());
+
+        let before = fs::read(&path).unwrap();
+        assert!(AccountManager::set_default_metadata(dir.path(), "missing").is_err());
+        assert_eq!(before, fs::read(&path).unwrap());
+        AccountManager::set_default_metadata(dir.path(), "offline").unwrap();
+        assert!(AccountManager::set_offline_metadata(dir.path(), "../bad").is_err());
+        AccountManager::logout_metadata(dir.path()).unwrap();
+        let cleared = AccountManager::public_metadata(dir.path()).unwrap();
+        assert!(cleared["accounts"].as_object().unwrap().is_empty());
+        assert!(cleared["default"].is_null());
+    }
+
+    #[test]
+    fn malformed_metadata_is_never_overwritten_by_ui_helpers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(ACCOUNTS_FILE);
+        fs::write(&path, b"broken json").unwrap();
+        assert!(AccountManager::public_metadata(dir.path()).is_err());
+        assert!(AccountManager::set_offline_metadata(dir.path(), "Steve").is_err());
+        assert!(AccountManager::set_default_metadata(dir.path(), "offline").is_err());
+        assert!(AccountManager::logout_metadata(dir.path()).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"broken json");
     }
 
     #[test]

@@ -16,12 +16,15 @@ pub mod log;
 mod mod_manager;
 mod modrinth;
 mod neoforge;
+mod progress;
+mod tui;
 mod util;
 mod version;
 
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use clap::parser::ValueSource;
 use clap::{arg, value_parser, ArgAction, Command};
 use rayon::prelude::*;
 
@@ -79,7 +82,7 @@ fn build_cli() -> Command {
         .version(env!("CARGO_PKG_VERSION"))
         .about(
             "Simple Minecraft CLI Launcher -- Microsoft + offline + \
-             Fabric/Forge/NeoForge + Modrinth mods",
+             Fabric/Forge/NeoForge + Modrinth mods + optional TUI",
         )
         .after_help(
             "Examples:\n  \
@@ -108,7 +111,8 @@ fn build_cli() -> Command {
              mc-launcher disable-mod sodium -v 1.21.4\n  \
              mc-launcher enable-mod sodium -v 1.21.4\n  \
              mc-launcher uninstall-mod sodium -v 1.21.4\n  \
-             mc-launcher logout                      # Clear saved session",
+             mc-launcher logout                      # Clear saved session\n  \
+             mc-launcher tui                         # Full-screen terminal UI",
         )
         // Global options
         .arg(arg!(-d --dir <DIR> "Game directory"))
@@ -175,6 +179,8 @@ fn build_cli() -> Command {
                     "disable-mod",
                     "enable-mod",
                     "uninstall-mod",
+                    "tui",
+                    "ui",
                 ]),
         )
         // Positional: query
@@ -253,6 +259,15 @@ fn main() {
     if action == "launch" {
         action = "play".to_string();
     }
+    if action == "ui" {
+        action = "tui".to_string();
+    }
+    if action == "tui" && !tui::terminal_available() {
+        crate::die!(
+            "The TUI needs an interactive terminal with ANSI support.",
+            "  Run it from a normal terminal (not TERM=dumb), or use 'mc-launcher play' / '--help'."
+        );
+    }
 
     // Resolve loader from flags
     let loader = resolve_loader(loader_arg, fabric_flag, forge_flag, neoforge_flag);
@@ -314,6 +329,30 @@ fn main() {
             width,
             height,
         ),
+        "tui" => {
+            let explicit_ram = matches.value_source("ram") == Some(ValueSource::CommandLine);
+            let explicit_threads =
+                matches.value_source("threads") == Some(ValueSource::CommandLine);
+            let explicit_java = matches.value_source("java") == Some(ValueSource::CommandLine);
+            let explicit_width = matches.value_source("width") == Some(ValueSource::CommandLine);
+            let explicit_height = matches.value_source("height") == Some(ValueSource::CommandLine);
+            let bootstrap = tui::app::Bootstrap {
+                ram: explicit_ram.then_some(ram_mb),
+                threads: explicit_threads.then_some(threads),
+                java: explicit_java.then(|| java_path.clone().unwrap_or_default()),
+                width: if explicit_width { width } else { None },
+                height: if explicit_height { height } else { None },
+                version: if matches.value_source("version") == Some(ValueSource::CommandLine) {
+                    mc_version
+                } else {
+                    None
+                },
+                source: manual_mode,
+                no_splash: false,
+            };
+            tui::run(launcher, bootstrap)
+                .unwrap_or_else(|e| crate::die!(format!("TUI error: {e}")));
+        }
         _ => {
             eprintln!("Unknown action: {}", action);
             std::process::exit(1);

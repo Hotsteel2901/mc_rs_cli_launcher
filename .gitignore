@@ -5,5 +5,6 @@
 *.part
 .env
 launcher_accounts.json
+launcher_tui.json
 launcher_secrets.enc
 launcher_secrets.key

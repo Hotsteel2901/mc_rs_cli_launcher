@@ -41,6 +41,16 @@ impl VersionManager {
     }
 
     pub fn fetch_manifest(&self) -> AppResult<serde_json::Value> {
+        self.fetch_manifest_inner(true)
+    }
+
+    /// Same lookup as [`Self::fetch_manifest`] but silent on stale-cache
+    /// fallback, for full-screen frontends that own the terminal.
+    pub fn fetch_manifest_result(&self) -> AppResult<serde_json::Value> {
+        self.fetch_manifest_inner(false)
+    }
+
+    fn fetch_manifest_inner(&self, warn: bool) -> AppResult<serde_json::Value> {
         let path = self.game_dir.join("version_manifest_v2.json");
         let cached = read_json(&path).ok().filter(valid_manifest);
         let fresh = fs::metadata(&path)
@@ -71,7 +81,9 @@ impl VersionManager {
         match (fetched, cached) {
             (Ok(value), _) => Ok(value),
             (Err(error), Some(cache)) => {
-                crate::warn_msg!("Cannot refresh manifest ({error}); using cached metadata.");
+                if warn {
+                    crate::warn_msg!("Cannot refresh manifest ({error}); using cached metadata.");
+                }
                 Ok(cache)
             }
             (Err(error), None) => Err(error),

@@ -1,8 +1,8 @@
 [package]
 name = "mc-launcher"
-version = "2.0.1"
+version = "2.1.0"
 edition = "2021"
-description = "Simple Minecraft CLI Launcher — Microsoft + offline + Fabric/Forge/NeoForge + Modrinth mods"
+description = "Simple Minecraft CLI Launcher — Microsoft + offline + Fabric/Forge/NeoForge + Modrinth mods + optional terminal UI"
 authors = ["Hotsteel2901"]
 license = "GPL-3.0-only"
 
@@ -31,6 +31,8 @@ tempfile = "3"
 getrandom = "0.2"
 hmac = "0.12"
 sha2 = "0.10"
+ratatui = "0.29"
+crossterm = "0.28"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"

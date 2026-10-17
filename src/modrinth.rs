@@ -10,7 +10,9 @@ const LAUNCHER_NAME: &str = "simple-mc-cli";
 #[allow(dead_code)]
 const LAUNCHER_VER: &str = env!("CARGO_PKG_VERSION");
 
-fn api_get(path: &str, params: &[(&str, &str)]) -> serde_json::Value {
+/// Fetch and decode a Modrinth API response, returning failures instead of
+/// terminating the process. Used by the TUI and by the CLI wrappers below.
+pub fn api_get_result(path: &str, params: &[(&str, &str)]) -> Result<serde_json::Value, String> {
     let mut serializer = url::form_urlencoded::Serializer::new(String::new());
     for (k, v) in params {
         serializer.append_pair(k, v);
@@ -23,24 +25,22 @@ fn api_get(path: &str, params: &[(&str, &str)]) -> serde_json::Value {
         format!("{}{}?{}", MODRINTH_API, path, qs)
     };
 
-    let (status, body) = http::http_get(&url).unwrap_or_else(|e| {
-        crate::die!(format!("Modrinth API error: {}", e));
-    });
-
+    let (status, body) = http::http_get(&url).map_err(|e| format!("Modrinth API error: {e}"))?;
     if status != 200 {
         let hint = String::from_utf8_lossy(&body)
             .chars()
             .take(300)
             .collect::<String>();
-        crate::die!(
-            format!("Modrinth API returned {} for {}", status, path),
-            &hint
-        );
+        return Err(format!(
+            "Modrinth API returned {status} for {path}: {}",
+            hint.trim()
+        ));
     }
+    serde_json::from_slice(&body).map_err(|e| format!("Failed to parse Modrinth API response: {e}"))
+}
 
-    serde_json::from_slice(&body).unwrap_or_else(|_| {
-        crate::die!("Failed to parse Modrinth API response");
-    })
+fn api_get(path: &str, params: &[(&str, &str)]) -> serde_json::Value {
+    api_get_result(path, params).unwrap_or_else(|e| crate::die!(e))
 }
 
 /// List all game versions from Modrinth.
@@ -68,6 +68,16 @@ pub fn search_projects(
     offset: u32,
     facets: Option<&serde_json::Value>,
 ) -> serde_json::Value {
+    search_projects_result(query, index, limit, offset, facets).unwrap_or_else(|e| crate::die!(e))
+}
+
+pub fn search_projects_result(
+    query: &str,
+    index: &str,
+    limit: u32,
+    offset: u32,
+    facets: Option<&serde_json::Value>,
+) -> Result<serde_json::Value, String> {
     let mut params = vec![
         ("query".to_string(), query.to_string()),
         ("index".to_string(), index.to_string()),
@@ -83,12 +93,16 @@ pub fn search_projects(
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
-    api_get("/search", &str_params)
+    api_get_result("/search", &str_params)
 }
 
 /// Get a single project by slug or ID.
 pub fn get_project(slug_or_id: &str) -> serde_json::Value {
-    api_get(&format!("/project/{}", slug_or_id), &[])
+    get_project_result(slug_or_id).unwrap_or_else(|e| crate::die!(e))
+}
+
+pub fn get_project_result(slug_or_id: &str) -> Result<serde_json::Value, String> {
+    api_get_result(&format!("/project/{}", slug_or_id), &[])
 }
 
 /// Get versions for a project.
@@ -97,6 +111,15 @@ pub fn get_project_versions(
     loaders: Option<&[String]>,
     game_versions: Option<&[String]>,
 ) -> serde_json::Value {
+    get_project_versions_result(slug_or_id, loaders, game_versions)
+        .unwrap_or_else(|e| crate::die!(e))
+}
+
+pub fn get_project_versions_result(
+    slug_or_id: &str,
+    loaders: Option<&[String]>,
+    game_versions: Option<&[String]>,
+) -> Result<serde_json::Value, String> {
     let mut params: Vec<(String, String)> = Vec::new();
 
     if let Some(l) = loaders {
@@ -112,7 +135,7 @@ pub fn get_project_versions(
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
-    api_get(&format!("/project/{}/version", slug_or_id), &str_params)
+    api_get_result(&format!("/project/{}/version", slug_or_id), &str_params)
 }
 
 /// Get a single version by ID.
