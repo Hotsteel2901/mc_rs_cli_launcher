@@ -1,7 +1,7 @@
 //! Black-box tests: no Microsoft account, keychain or Internet required.
 use std::process::{Command, Output};
 fn run(dir: &std::path::Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_mc-launcher"))
+    Command::new(env!("CARGO_BIN_EXE_hot-rs-launcher"))
         .args(args)
         .arg("--dir")
         .arg(dir)
@@ -53,6 +53,25 @@ fn help_and_listing_work_without_network_or_java() {
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
 }
 #[test]
+fn about_lists_author_and_both_repositories() {
+    let dir = tempfile::tempdir().unwrap();
+    let result = run(dir.path(), &["--about"]);
+    assert!(result.status.success());
+    let text = String::from_utf8_lossy(&result.stdout);
+    assert!(text.contains("Hot-RS-Launcher"), "{text}");
+    assert!(text.contains("Hotsteel2901"), "{text}");
+    assert!(
+        text.contains("github.com/Hotsteel2901/mc_rs_cli_launcher"),
+        "{text}"
+    );
+    assert!(
+        text.contains("codeberg.org/hotsteel/mc_rs_cli_launcher"),
+        "{text}"
+    );
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+
+#[test]
 fn corrupt_accounts_are_reported_without_overwriting() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("launcher_accounts.json");
@@ -103,7 +122,7 @@ fn cached_game_launch_uses_absolute_paths_custom_resolution_and_child_exit_code(
     let java = root.path().join("fake java");
     std::fs::write(&java, "#!/bin/sh\nif [ \"$1\" = '-version' ]; then echo 'openjdk version \"17.0.1\"' >&2; exit 0; fi\nprintf '%s\\n' \"$@\" > launch-args.txt\npwd > launch-cwd.txt\nexit 7\n").unwrap();
     std::fs::set_permissions(&java, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let result = Command::new(env!("CARGO_BIN_EXE_mc-launcher"))
+    let result = Command::new(env!("CARGO_BIN_EXE_hot-rs-launcher"))
         .args([
             "play",
             "-v",

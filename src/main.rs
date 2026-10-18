@@ -55,8 +55,12 @@ fn parse_ram(value: &str) -> Result<u32, String> {
     } else {
         num
     };
-    if !mb.is_finite() || mb < 128.0 || mb > u32::MAX as f64 {
-        return Err("RAM must be between 128 MB and 4294967295 MB".into());
+    if !mb.is_finite() || mb < util::MIN_RAM_MB as f64 || mb > util::MAX_RAM_MB as f64 {
+        return Err(format!(
+            "RAM must be between {} MB and {} MB",
+            util::MIN_RAM_MB,
+            util::MAX_RAM_MB
+        ));
     }
     Ok(mb as u32)
 }
@@ -76,48 +80,91 @@ fn parse_threads(value: &str) -> Result<usize, String> {
     Ok(n)
 }
 
+/// Repository locations shown by `--about` and by the TUI About screen. Both
+/// hosts keep the same repository name.
+const GITHUB_REPO: &str = "https://github.com/Hotsteel2901/mc_rs_cli_launcher";
+const CODEBERG_REPO: &str = "https://codeberg.org/hotsteel/mc_rs_cli_launcher";
+
+fn print_about() {
+    let bold = |text: &str| crate::log::clr("\x1b[1m", text);
+    let accent = |text: &str| crate::log::clr("\x1b[92m", text);
+    let dim = |text: &str| crate::log::clr("\x1b[90m", text);
+    let row = |label: &str, value: String| println!("  {:<9}{}", bold(label), value);
+    println!();
+    println!(
+        "  {} {}",
+        bold("Hot-RS-Launcher"),
+        dim(env!("CARGO_PKG_VERSION"))
+    );
+    println!(
+        "  {}",
+        dim("A Rust Minecraft launcher: Microsoft/offline accounts, Fabric/Forge/NeoForge,")
+    );
+    println!(
+        "  {}",
+        dim("Modrinth mods and an optional full-screen terminal UI.")
+    );
+    println!();
+    row("Author", "Hotsteel2901".into());
+    row(
+        "GitHub",
+        format!("{}  (@Hotsteel2901)", accent(GITHUB_REPO)),
+    );
+    row(
+        "Codeberg",
+        format!("{}  (@hotsteel)", accent(CODEBERG_REPO)),
+    );
+    row("License", "GPL-3.0-only".into());
+    println!();
+    println!(
+        "  {}",
+        dim("Both repositories use the same name: mc_rs_cli_launcher")
+    );
+    println!();
+}
+
 fn build_cli() -> Command {
-    Command::new("mc-launcher")
+    Command::new("hot-rs-launcher")
         .disable_version_flag(true)
         .version(env!("CARGO_PKG_VERSION"))
         .about(
-            "Simple Minecraft CLI Launcher -- Microsoft + offline + \
+            "Hot-RS-Launcher -- a Rust Minecraft launcher: Microsoft + offline + \
              Fabric/Forge/NeoForge + Modrinth mods + optional TUI",
         )
         .after_help(
             "Examples:\n  \
-             mc-launcher login                       # Microsoft login (browser)\n  \
-             mc-launcher login --device-code         # Device code login\n  \
-             mc-launcher offline Steve               # Offline mode\n  \
-             mc-launcher play                        # Launch with saved account\n  \
-             mc-launcher play -v 1.21.4              # Launch specific version\n  \
-             mc-launcher play -v 1.21.4 --ram 4G     # Allocate 4 GB RAM\n  \
-             mc-launcher play --fabric               # Launch with Fabric\n  \
-             mc-launcher play --forge                # Launch with Forge\n  \
-             mc-launcher play --neoforge             # Launch with NeoForge\n  \
-             mc-launcher accounts                    # Show saved accounts\n  \
-             mc-launcher download                    # Download latest version\n  \
-             mc-launcher download -v 1.20.1 --no-assets\n  \
-             mc-launcher list-versions               # List all MC versions\n  \
-             mc-launcher list-loaders                # List all mod loaders\n  \
-             mc-launcher search sodium               # Search mods on Modrinth\n  \
-             mc-launcher search-more sodium          # Detailed mod info\n  \
-             mc-launcher install-fabric -v 1.21.4    # Install Fabric\n  \
-             mc-launcher install-forge -v 1.20.1     # Install Forge\n  \
-             mc-launcher install-neoforge -v 1.21.4  # Install NeoForge\n  \
-             mc-launcher install-mod sodium -v 1.21.4\n  \
-             mc-launcher list-installed              # List installed versions\n  \
-             mc-launcher list-mods -v 1.21.4         # List mods\n  \
-             mc-launcher disable-mod sodium -v 1.21.4\n  \
-             mc-launcher enable-mod sodium -v 1.21.4\n  \
-             mc-launcher uninstall-mod sodium -v 1.21.4\n  \
-             mc-launcher logout                      # Clear saved session\n  \
-             mc-launcher tui                         # Full-screen terminal UI",
+             hot-rs-launcher login                       # Microsoft login (browser)\n  \
+             hot-rs-launcher login --device-code         # Device code login\n  \
+             hot-rs-launcher offline Steve               # Offline mode\n  \
+             hot-rs-launcher play                        # Launch with saved account\n  \
+             hot-rs-launcher play -v 1.21.4              # Launch specific version\n  \
+             hot-rs-launcher play -v 1.21.4 --ram 4G     # Allocate 4 GB RAM\n  \
+             hot-rs-launcher play --fabric               # Launch with Fabric\n  \
+             hot-rs-launcher play --forge                # Launch with Forge\n  \
+             hot-rs-launcher play --neoforge             # Launch with NeoForge\n  \
+             hot-rs-launcher accounts                    # Show saved accounts\n  \
+             hot-rs-launcher download                    # Download latest version\n  \
+             hot-rs-launcher download -v 1.20.1 --no-assets\n  \
+             hot-rs-launcher list-versions               # List all MC versions\n  \
+             hot-rs-launcher list-loaders                # List all mod loaders\n  \
+             hot-rs-launcher search sodium               # Search mods on Modrinth\n  \
+             hot-rs-launcher search-more sodium          # Detailed mod info\n  \
+             hot-rs-launcher install-fabric -v 1.21.4    # Install Fabric\n  \
+             hot-rs-launcher install-forge -v 1.20.1     # Install Forge\n  \
+             hot-rs-launcher install-neoforge -v 1.21.4  # Install NeoForge\n  \
+             hot-rs-launcher install-mod sodium -v 1.21.4\n  \
+             hot-rs-launcher list-installed              # List installed versions\n  \
+             hot-rs-launcher list-mods -v 1.21.4         # List mods\n  \
+             hot-rs-launcher disable-mod sodium -v 1.21.4\n  \
+             hot-rs-launcher enable-mod sodium -v 1.21.4\n  \
+             hot-rs-launcher uninstall-mod sodium -v 1.21.4\n  \
+             hot-rs-launcher logout                      # Clear saved session\n  \
+             hot-rs-launcher tui                         # Full-screen terminal UI",
         )
         // Global options
         .arg(arg!(-d --dir <DIR> "Game directory"))
         .arg(
-            arg!(-t --threads <N> "Parallel download threads")
+            arg!(-t --threads <N> "Parallel download threads (assets scale to 2x, cap 64)")
                 .value_parser(parse_threads)
                 .default_value("16"),
         )
@@ -130,7 +177,7 @@ fn build_cli() -> Command {
         .arg(arg!(--"loader-version" <VERSION> "Specific loader version ID"))
         .arg(arg!(--"mod-version" <ID> "Specific mod version ID"))
         .arg(
-            arg!(-r --ram <RAM> "RAM allocation (e.g. 4G, 2048M)")
+            arg!(-r --ram <RAM> "RAM allocation, 128M-64G (e.g. 4G, 2048M)")
                 .value_parser(parse_ram)
                 .default_value("4096"),
         )
@@ -186,6 +233,10 @@ fn build_cli() -> Command {
         // Positional: query
         .arg(arg!([QUERY] "Username (offline) or mod search query / mod slug"))
         .arg(arg!(--"launcher-version" "Print launcher version").action(ArgAction::Version))
+        .arg(
+            arg!(--about "Show project, author and repository information")
+                .action(ArgAction::SetTrue),
+        )
         .arg(arg!(--verbose "Enable diagnostic logging").action(ArgAction::SetTrue))
         .group(
             clap::ArgGroup::new("loader-choice")
@@ -202,6 +253,10 @@ fn build_cli() -> Command {
 fn main() {
     let matches = build_cli().get_matches();
     crate::log::set_verbose(matches.get_flag("verbose"));
+    if matches.get_flag("about") {
+        print_about();
+        return;
+    }
 
     // Extract options
     let game_dir = PathBuf::from(
@@ -265,7 +320,7 @@ fn main() {
     if action == "tui" && !tui::terminal_available() {
         crate::die!(
             "The TUI needs an interactive terminal with ANSI support.",
-            "  Run it from a normal terminal (not TERM=dumb), or use 'mc-launcher play' / '--help'."
+            "  Run it from a normal terminal (not TERM=dumb), or use 'hot-rs-launcher play' / '--help'."
         );
     }
 
@@ -396,8 +451,8 @@ fn cmd_accounts(launcher: &MinecraftLauncher) {
     let accs = launcher.accounts.accounts();
     if accs.as_object().is_none_or(|o| o.is_empty()) {
         crate::warn_msg!("No accounts saved.");
-        crate::info!("Login:  mc-launcher login");
-        crate::info!("Offline: mc-launcher offline <username>");
+        crate::info!("Login:  hot-rs-launcher login");
+        crate::info!("Offline: hot-rs-launcher offline <username>");
         return;
     }
 
@@ -484,7 +539,7 @@ fn cmd_list_installed(game_dir: &std::path::Path, launcher: &MinecraftLauncher) 
     let versions = ModManager::list_installed_versions(game_dir);
     if versions.is_empty() {
         crate::warn_msg!("No versions installed.");
-        crate::info!("Download one: mc-launcher download -v <version>");
+        crate::info!("Download one: hot-rs-launcher download -v <version>");
         return;
     }
 
@@ -544,7 +599,7 @@ fn cmd_list_installed(game_dir: &std::path::Path, launcher: &MinecraftLauncher) 
             acc["type"].as_str().unwrap_or("?")
         );
     } else {
-        println!("  No account saved. Run: mc-launcher login");
+        println!("  No account saved. Run: hot-rs-launcher login");
     }
 }
 
@@ -569,7 +624,10 @@ fn cmd_list_mods(game_dir: &std::path::Path, mc_version: Option<String>) {
     let mods = mm.list_mods(&mc_version);
     if mods.is_empty() {
         crate::warn_msg!("No mods installed for {}.", mc_version);
-        crate::info!("Install: mc-launcher install-mod <slug> -v {}", mc_version);
+        crate::info!(
+            "Install: hot-rs-launcher install-mod <slug> -v {}",
+            mc_version
+        );
         return;
     }
 
@@ -595,7 +653,7 @@ fn cmd_search(
     loader: Option<&str>,
 ) {
     let query = query.unwrap_or_else(|| {
-        crate::die!("Please provide a search query.\n  Example: mc-launcher search sodium");
+        crate::die!("Please provide a search query.\n  Example: hot-rs-launcher search sodium");
     });
 
     crate::log::header(&format!("Searching for: {} (source: modrinth)", query));
@@ -672,14 +730,14 @@ fn cmd_search(
     }
 
     crate::info!("Found {} result(s).", hits.len());
-    crate::info!("Install with: mc-launcher install-mod <slug> -v <version>");
-    crate::info!("Details with: mc-launcher search-more <slug>");
+    crate::info!("Install with: hot-rs-launcher install-mod <slug> -v <version>");
+    crate::info!("Details with: hot-rs-launcher search-more <slug>");
 }
 
 fn cmd_search_more(_game_dir: &std::path::Path, query: Option<String>) {
     let slug = query.unwrap_or_else(|| {
         crate::die!(
-            "Please provide the exact mod slug.\n  Example: mc-launcher search-more sodium"
+            "Please provide the exact mod slug.\n  Example: hot-rs-launcher search-more sodium"
         );
     });
 
@@ -841,7 +899,7 @@ fn cmd_search_more(_game_dir: &std::path::Path, query: Option<String>) {
         );
     }
     println!(
-        "\n  Install: mc-launcher install-mod {} -v <version> --loader <loader>",
+        "\n  Install: hot-rs-launcher install-mod {} -v <version> --loader <loader>",
         project["slug"].as_str().unwrap_or(&slug)
     );
 }
@@ -869,7 +927,7 @@ fn cmd_install_fabric(
         game_dir.join("libraries").display()
     );
     println!(
-        "\n  Launch with: mc-launcher play -v {} --fabric",
+        "\n  Launch with: hot-rs-launcher play -v {} --fabric",
         mc_version
     );
 }
@@ -897,7 +955,7 @@ fn cmd_install_forge(
         profile["mainClass"].as_str().unwrap_or("?")
     );
     println!(
-        "\n  Launch with: mc-launcher play -v {} --forge",
+        "\n  Launch with: hot-rs-launcher play -v {} --forge",
         mc_version
     );
 }
@@ -925,7 +983,7 @@ fn cmd_install_neoforge(
         profile["mainClass"].as_str().unwrap_or("?")
     );
     println!(
-        "\n  Launch with: mc-launcher play -v {} --neoforge",
+        "\n  Launch with: hot-rs-launcher play -v {} --neoforge",
         mc_version
     );
 }
@@ -939,7 +997,7 @@ fn cmd_install_mod(
 ) {
     let slug = query.unwrap_or_else(|| {
         crate::die!(
-            "Please provide a mod slug.\n  Example: mc-launcher install-mod sodium -v 1.21.4"
+            "Please provide a mod slug.\n  Example: hot-rs-launcher install-mod sodium -v 1.21.4"
         );
     });
     let mc_version = resolve_mc_version(mc_version, game_dir);
@@ -966,15 +1024,21 @@ fn cmd_install_mod(
             .join(format!("{}-profile-{}.json", l, mc_version))
             .exists()
         {
-            println!("  Launch with: mc-launcher play -v {} --{}", mc_version, l);
+            println!(
+                "  Launch with: hot-rs-launcher play -v {} --{}",
+                mc_version, l
+            );
             return;
         }
     }
     println!(
-        "  Install a loader first, e.g.: mc-launcher install-fabric -v {}",
+        "  Install a loader first, e.g.: hot-rs-launcher install-fabric -v {}",
         mc_version
     );
-    println!("  Then launch: mc-launcher play -v {} --fabric", mc_version);
+    println!(
+        "  Then launch: hot-rs-launcher play -v {} --fabric",
+        mc_version
+    );
 }
 
 fn cmd_disable_mod(game_dir: &std::path::Path, query: Option<String>, mc_version: Option<String>) {
@@ -1057,8 +1121,8 @@ fn cmd_login(launcher: &mut MinecraftLauncher, device_code: bool) {
 
     crate::success!("Logged in as: {}", auth.username);
     crate::info!("Credentials saved. Next steps:");
-    crate::info!("  mc-launcher download -v <version>   # download a Minecraft version");
-    crate::info!("  mc-launcher play -v <version>       # launch the game");
+    crate::info!("  hot-rs-launcher download -v <version>   # download a Minecraft version");
+    crate::info!("  hot-rs-launcher play -v <version>       # launch the game");
 }
 
 fn cmd_offline(launcher: &mut MinecraftLauncher, username: &str) {
@@ -1069,8 +1133,8 @@ fn cmd_offline(launcher: &mut MinecraftLauncher, username: &str) {
         .unwrap_or_else(|e| crate::die!(e));
     crate::success!("Offline account saved: {}", username);
     crate::info!("Next steps:");
-    crate::info!("  mc-launcher download -v <version>   # download a Minecraft version");
-    crate::info!("  mc-launcher play -v <version>       # launch the game");
+    crate::info!("  hot-rs-launcher download -v <version>   # download a Minecraft version");
+    crate::info!("  hot-rs-launcher play -v <version>       # launch the game");
 }
 
 fn cmd_download(launcher: &mut MinecraftLauncher, mc_version: Option<&str>, no_assets: bool) {
@@ -1093,7 +1157,7 @@ fn cmd_play(
     let account = launcher.accounts.get_default().unwrap_or_else(|| {
         crate::die!(
             "No saved account. Run 'login' or 'offline <name>' first.",
-            "  mc-launcher login        # Microsoft login\n  mc-launcher offline Steve # Offline mode"
+            "  hot-rs-launcher login        # Microsoft login\n  hot-rs-launcher offline Steve # Offline mode"
         );
     });
 
@@ -1114,7 +1178,7 @@ fn resolve_mc_version(mc_version: Option<String>, game_dir: &std::path::Path) ->
     let installed = ModManager::list_installed_versions(game_dir);
     if installed.is_empty() {
         crate::die!(
-            "No versions installed. Specify --version.\n  Download first: mc-launcher download -v <version>"
+            "No versions installed. Specify --version.\n  Download first: hot-rs-launcher download -v <version>"
         );
     }
     let v = installed.last().unwrap().clone();
@@ -1163,7 +1227,7 @@ mod cli_tests {
             vec!["--ram", "0"],
         ] {
             assert!(build_cli()
-                .try_get_matches_from(std::iter::once("mc-launcher").chain(args))
+                .try_get_matches_from(std::iter::once("hot-rs-launcher").chain(args))
                 .is_err());
         }
     }
@@ -1179,12 +1243,12 @@ mod cli_tests {
     #[test]
     fn launcher_and_minecraft_version_flags_are_distinct() {
         let parsed = build_cli()
-            .try_get_matches_from(["mc-launcher", "download", "-v", "1.21.4"])
+            .try_get_matches_from(["hot-rs-launcher", "download", "-v", "1.21.4"])
             .unwrap();
         assert_eq!(parsed.get_one::<String>("version").unwrap(), "1.21.4");
         assert_eq!(
             build_cli()
-                .try_get_matches_from(["mc-launcher", "--launcher-version"])
+                .try_get_matches_from(["hot-rs-launcher", "--launcher-version"])
                 .unwrap_err()
                 .kind(),
             clap::error::ErrorKind::DisplayVersion

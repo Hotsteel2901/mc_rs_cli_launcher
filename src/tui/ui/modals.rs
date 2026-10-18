@@ -44,7 +44,7 @@ fn help(frame: &mut Frame, app: &App, area: Rect, scroll: usize, t: f64) {
     frame.render_widget(Clear, rect);
     let lang = app.lang();
     let block = panel(
-        lang.pick("HELP · mc-launcher", "帮助 · mc-launcher"),
+        lang.pick("HELP · Hot-RS-Launcher", "帮助 · Hot-RS-Launcher"),
         theme::GREEN,
         true,
         t,
@@ -128,8 +128,8 @@ fn help_lines(app: &App) -> Vec<Line<'static>> {
     vec![
         Line::from(theme::gradient_text_bg(
             tr(
-                "mc-launcher  ·  terminal frontend",
-                "mc-launcher  ·  终端前端",
+                "Hot-RS-Launcher  ·  terminal frontend",
+                "Hot-RS-Launcher  ·  终端前端",
             ),
             theme::GREEN,
             theme::CYAN,

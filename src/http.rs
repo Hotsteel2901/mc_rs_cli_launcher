@@ -10,7 +10,7 @@ use crate::progress;
 use crate::util;
 use indicatif::ProgressBar;
 
-const USER_AGENT: &str = concat!("mc-launcher/", env!("CARGO_PKG_VERSION"));
+const USER_AGENT: &str = concat!("hot-rs-launcher/", env!("CARGO_PKG_VERSION"));
 
 /// One process-wide agent keeps TLS sessions and HTTP/1.1 connections alive.
 /// This matters most for assets: thousands of tiny files to the same host used
@@ -21,8 +21,8 @@ static HTTP_AGENT: OnceLock<ureq::Agent> = OnceLock::new();
 fn http_agent() -> &'static ureq::Agent {
     HTTP_AGENT.get_or_init(|| {
         ureq::AgentBuilder::new()
-            .max_idle_connections(256)
-            .max_idle_connections_per_host(64)
+            .max_idle_connections(512)
+            .max_idle_connections_per_host(128)
             .timeout_connect(Duration::from_secs(10))
             .timeout_read(Duration::from_secs(60))
             .timeout_write(Duration::from_secs(30))
@@ -49,6 +49,11 @@ fn get_source_mode() -> SourceMode {
         2 => SourceMode::BmclApi,
         _ => SourceMode::Auto,
     }
+}
+
+/// The process-wide source choice (CLI flag or TUI setting).
+pub fn source_mode() -> SourceMode {
+    get_source_mode()
 }
 
 /// No ICMP/geolocation probe: local commands must work without a network.
@@ -243,17 +248,26 @@ pub fn download_file(
     )
 }
 
-/// Assets are numerous and small. In Auto mode prefer the mirror first, then
-/// fall back to the official host within the same attempt instead of burning
-/// three slow official attempts before the mirror is considered.
+/// Assets are numerous and small. `prefer_mirror` is chosen once per asset
+/// batch (see [`prefer_mirror_for_assets`]); failures still fall back to the
+/// other origin within the same attempt.
 pub fn download_asset(
     url: &str,
     dest: &Path,
     label: &str,
     sha1_expected: Option<&str>,
     max_retries: u32,
+    prefer_mirror: bool,
 ) -> Result<(), String> {
-    download_file_inner(url, dest, label, sha1_expected, max_retries, false, true)
+    download_file_inner(
+        url,
+        dest,
+        label,
+        sha1_expected,
+        max_retries,
+        false,
+        prefer_mirror,
+    )
 }
 
 fn download_sources(url: &str, mode: SourceMode, prefer_mirror: bool) -> Vec<String> {
@@ -262,6 +276,78 @@ fn download_sources(url: &str, mode: SourceMode, prefer_mirror: bool) -> Vec<Str
         urls.reverse();
     }
     urls
+}
+
+/// Assets are many tiny latency-bound requests, so a wider pool than the
+/// `--threads` value pays off: it trades idle sockets for roughly linear speedup
+/// until the origin's bandwidth or per-IP limits are reached. BMCLAPI drops
+/// connections when hammered with dozens of parallel TLS handshakes, so the
+/// mirror keeps a lower ceiling than Mojang's CDN.
+pub fn asset_worker_count(threads: usize, prefer_mirror: bool) -> usize {
+    let scaled = threads.clamp(1, 64).saturating_mul(2).clamp(16, 64);
+    if prefer_mirror {
+        scaled.min(24)
+    } else {
+        scaled
+    }
+}
+
+/// Fetch every URL completely and return the wall-clock time. `None` means the
+/// source failed the sample, so it must not be picked.
+fn probe_source(urls: &[String]) -> Option<Duration> {
+    if urls.is_empty() {
+        return None;
+    }
+    let started = std::time::Instant::now();
+    for url in urls {
+        if progress::is_cancelled() {
+            return None;
+        }
+        let response = http_agent()
+            .get(url)
+            .timeout(Duration::from_secs(4))
+            .set("User-Agent", USER_AGENT)
+            .call()
+            .ok()?;
+        if response.status() != 200 {
+            return None;
+        }
+        std::io::copy(&mut response.into_reader(), &mut std::io::sink()).ok()?;
+    }
+    Some(started.elapsed())
+}
+
+/// Compare the two asset origins with a small sample and report whether the
+/// BMCLAPI mirror is faster. Running both probes concurrently keeps the worst
+/// case (one origin unreachable) to a single probe timeout.
+pub fn prefer_mirror_for_assets(hashes: &[String]) -> bool {
+    let official: Vec<String> = hashes
+        .iter()
+        .filter_map(|hash| {
+            let prefix = hash.get(..2)?;
+            Some(format!(
+                "https://resources.download.minecraft.net/{prefix}/{hash}"
+            ))
+        })
+        .collect();
+    let mirror: Vec<String> = official.iter().map(|url| mirror_url(url)).collect();
+    if official.is_empty() || mirror.first() == official.first() {
+        return false;
+    }
+    let (official_time, mirror_time) = std::thread::scope(|scope| {
+        let official_probe = scope.spawn(|| probe_source(&official));
+        let mirror_probe = scope.spawn(|| probe_source(&mirror));
+        (
+            official_probe.join().unwrap_or(None),
+            mirror_probe.join().unwrap_or(None),
+        )
+    });
+    match (official_time, mirror_time) {
+        (Some(official), Some(mirror)) => mirror < official,
+        (Some(_), None) => false,
+        (None, Some(_)) => true,
+        (None, None) => false,
+    }
 }
 
 fn download_file_inner(

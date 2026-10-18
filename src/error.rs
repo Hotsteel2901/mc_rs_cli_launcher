@@ -1,4 +1,4 @@
-//! Centralized error types for the mc-launcher.
+//! Centralized error types for the hot-rs-launcher.
 
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {

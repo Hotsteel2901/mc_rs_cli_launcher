@@ -1027,6 +1027,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "hot-rs-launcher"
+version = "2.4.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "crossterm",
+ "dirs",
+ "getrandom 0.2.17",
+ "glob",
+ "hex",
+ "hmac",
+ "indicatif",
+ "keyring",
+ "md-5",
+ "quick-xml",
+ "ratatui",
+ "rayon",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "ureq",
+ "url",
+ "webbrowser",
+ "which",
+ "winreg",
+ "zip",
+]
+
+[[package]]
 name = "icu_collections"
 version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1396,39 +1429,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "62bb907fe88d54d8d9ce32a3cceab4218ed2f6b7d35617cafe9adf84e43919cb"
 dependencies = [
  "libc",
-]
-
-[[package]]
-name = "mc-launcher"
-version = "2.3.0"
-dependencies = [
- "anyhow",
- "clap",
- "crossterm",
- "dirs",
- "getrandom 0.2.17",
- "glob",
- "hex",
- "hmac",
- "indicatif",
- "keyring",
- "md-5",
- "quick-xml",
- "ratatui",
- "rayon",
- "regex",
- "serde",
- "serde_json",
- "sha1",
- "sha2",
- "tempfile",
- "thiserror",
- "ureq",
- "url",
- "webbrowser",
- "which",
- "winreg",
- "zip",
 ]
 
 [[package]]

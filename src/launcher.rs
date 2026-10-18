@@ -11,7 +11,7 @@ use crate::mod_manager::ModManager;
 use crate::util;
 use crate::version::VersionManager;
 
-const LAUNCHER_NAME: &str = "simple-mc-cli";
+const LAUNCHER_NAME: &str = "hot-rs-launcher";
 const LAUNCHER_VER: &str = env!("CARGO_PKG_VERSION");
 
 pub struct MinecraftLauncher {
@@ -87,12 +87,13 @@ impl MinecraftLauncher {
             return Ok(j);
         }
 
-        // Try cached Mojang runtime
+        // Try cached Mojang runtime. The game directory is user data, so escape
+        // glob metacharacters (`[`, `*`, `?`) instead of treating them as patterns.
         let exe_name = if cfg!(windows) { "java.exe" } else { "java" };
         let cached = glob::glob(&format!(
             "{}/java/{}/**/bin/{}",
-            self.game_dir.display(),
-            component,
+            glob::Pattern::escape(&self.game_dir.to_string_lossy()),
+            glob::Pattern::escape(component),
             exe_name
         ))
         .ok()
@@ -149,12 +150,12 @@ impl MinecraftLauncher {
                 || !profile["libraries"].is_array()
                 || (name != "fabric" && profile["profile_format"].as_u64() != Some(1))
             {
-                return Err(AppError::Loader(format!("Invalid or legacy {name} profile. Reinstall with: mc-launcher install-{name} -v {mc_version}")));
+                return Err(AppError::Loader(format!("Invalid or legacy {name} profile. Reinstall with: hot-rs-launcher install-{name} -v {mc_version}")));
             }
             return Ok((Some(name.into()), Some(profile)));
         }
         if let Some(name) = loader {
-            return Err(AppError::Loader(format!("No {name} profile for {mc_version}. Run: mc-launcher install-{name} -v {mc_version}")));
+            return Err(AppError::Loader(format!("No {name} profile for {mc_version}. Run: hot-rs-launcher install-{name} -v {mc_version}")));
         }
         Ok((None, None))
     }
@@ -761,12 +762,12 @@ impl MinecraftLauncher {
                 acc["username"].as_str().unwrap_or("?"),
                 acc["type"].as_str().unwrap_or("?")
             );
-            println!("    Launch:  mc-launcher play -v {}", version_id);
+            println!("    Launch:  hot-rs-launcher play -v {}", version_id);
         } else {
             println!("    No account saved yet. Login first:");
-            println!("      mc-launcher login");
+            println!("      hot-rs-launcher login");
             println!("    Then launch:");
-            println!("      mc-launcher play -v {}", version_id);
+            println!("      hot-rs-launcher play -v {}", version_id);
         }
 
         for loader in &["fabric", "forge", "neoforge"] {

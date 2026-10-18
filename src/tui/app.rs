@@ -33,16 +33,18 @@ pub enum Screen {
     Accounts,
     Settings,
     Logs,
+    About,
 }
 
 impl Screen {
-    pub const ALL: [Screen; 6] = [
+    pub const ALL: [Screen; 7] = [
         Screen::Dashboard,
         Screen::Versions,
         Screen::Mods,
         Screen::Accounts,
         Screen::Settings,
         Screen::Logs,
+        Screen::About,
     ];
 
     pub fn title(self, lang: Lang) -> &'static str {
@@ -53,6 +55,7 @@ impl Screen {
             Screen::Accounts => lang.pick("Accounts", "账号"),
             Screen::Settings => lang.pick("Settings", "设置"),
             Screen::Logs => lang.pick("Activity", "活动"),
+            Screen::About => lang.pick("About", "关于"),
         }
     }
 
@@ -64,6 +67,7 @@ impl Screen {
             Screen::Accounts => "◉",
             Screen::Settings => "✧",
             Screen::Logs => "≡",
+            Screen::About => "✦",
         }
     }
 
@@ -544,6 +548,11 @@ pub struct App {
     pub frame: u64,
     pub session_start: Instant,
     pub last_tick: Instant,
+    /// Last key/mouse/paste/backend event; drives the idle animation freeze.
+    pub last_activity: Instant,
+    /// Ambient animation clock is pinned here while the UI is idle to avoid
+    /// streaming a full-screen diff over slow terminals for no reason.
+    pub anim_frozen_at: Option<f64>,
     pub quit: bool,
     pub modal: Option<Modal>,
     pub search: SearchState,
@@ -621,6 +630,8 @@ impl App {
             frame: 0,
             session_start: now,
             last_tick: now,
+            last_activity: now,
+            anim_frozen_at: None,
             quit: false,
             modal: None,
             search: SearchState::default(),
@@ -659,7 +670,7 @@ impl App {
         let lang = app.lang();
         app.add_log(
             LogLevel::Info,
-            lang.pick("mc-launcher TUI ready", "mc-launcher TUI 已就绪"),
+            lang.pick("Hot-RS-Launcher TUI ready", "Hot-RS-Launcher TUI 已就绪"),
         );
         app.add_log(
             LogLevel::Debug,
@@ -1039,8 +1050,10 @@ impl App {
                 self.settings.language = self.lang().next().code().into();
             }
             1 => {
-                let next = (self.settings.ram_mb as i64 + direction as i64 * 512).clamp(512, 32_768)
-                    as u32;
+                let next = (self.settings.ram_mb as i64 + direction as i64 * 512).clamp(
+                    crate::util::MIN_RAM_MB as i64,
+                    crate::util::MAX_RAM_MB as i64,
+                ) as u32;
                 self.settings.ram_mb = next;
             }
             2 => {
@@ -1222,6 +1235,13 @@ impl App {
 
     pub fn tick(&mut self) {
         let now = Instant::now();
+        if self.wants_fast_frames() {
+            self.anim_frozen_at = None;
+        } else if self.anim_frozen_at.is_none()
+            && self.last_activity.elapsed() > Duration::from_secs(2)
+        {
+            self.anim_frozen_at = Some(self.session_start.elapsed().as_secs_f64());
+        }
         let dt = now
             .duration_since(self.last_tick)
             .as_secs_f64()
@@ -1265,6 +1285,32 @@ impl App {
 
     pub fn splash_active(&self) -> bool {
         self.splash_until.is_some()
+    }
+
+    /// Record user or backend activity; ambient animation resumes immediately.
+    pub fn note_activity(&mut self) {
+        self.last_activity = Instant::now();
+        self.anim_frozen_at = None;
+    }
+
+    /// Clock used by gradients, glows and particles. It stops while the UI is
+    /// idle so unchanged screens stop producing terminal output.
+    pub fn anim_time(&self) -> f64 {
+        self.anim_frozen_at
+            .unwrap_or_else(|| self.session_start.elapsed().as_secs_f64())
+    }
+
+    /// True while something on screen (splash, toasts, a running job) is
+    /// animating. Idle screens otherwise drop to a slower redraw cadence so a
+    /// continuously animated gradient does not stream a full-screen diff at
+    /// 30 FPS over SSH for no reason.
+    pub fn wants_fast_frames(&self) -> bool {
+        self.splash_until.is_some()
+            || self.job.is_some()
+            || self
+                .toasts
+                .iter()
+                .any(|toast| toast.born.elapsed() < toast.ttl + Duration::from_millis(260))
     }
 
     pub fn skip_splash(&mut self) {
@@ -1322,6 +1368,7 @@ impl App {
     // ── input handling ────────────────────────────────────────────
 
     pub fn handle_paste(&mut self, text: &str) {
+        self.note_activity();
         if let Some(modal) = self.modal.as_mut() {
             match modal {
                 Modal::Input { input, .. } => input.insert_str(text),
@@ -1339,6 +1386,7 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> AppCommand {
+        self.note_activity();
         if key.kind == KeyEventKind::Release {
             return AppCommand::None;
         }
@@ -1413,6 +1461,10 @@ impl App {
                 self.screen = Screen::Logs;
                 AppCommand::None
             }
+            KeyCode::Char('7') => {
+                self.screen = Screen::About;
+                AppCommand::None
+            }
             KeyCode::Esc => {
                 if self.screen != Screen::Dashboard {
                     self.screen = Screen::Dashboard;
@@ -1428,11 +1480,13 @@ impl App {
                 Screen::Accounts => self.handle_accounts_key(key),
                 Screen::Settings => self.handle_settings_key(key),
                 Screen::Logs => self.handle_logs_key(key),
+                Screen::About => self.handle_about_key(key),
             },
         }
     }
 
     pub fn handle_mouse(&mut self, event: MouseEvent, hit: Option<MouseAction>) -> AppCommand {
+        self.note_activity();
         if self.splash_active() {
             if matches!(event.kind, MouseEventKind::Down(MouseButton::Left)) {
                 self.skip_splash();
@@ -1680,6 +1734,7 @@ impl App {
                     }
                 }
             }
+            Screen::About => {}
         }
     }
 
@@ -1970,6 +2025,15 @@ impl App {
             }
             _ => AppCommand::None,
         }
+    }
+
+    fn handle_about_key(&mut self, key: KeyEvent) -> AppCommand {
+        match key.code {
+            KeyCode::Char('g') => open_url(crate::GITHUB_REPO),
+            KeyCode::Char('b') => open_url(crate::CODEBERG_REPO),
+            _ => {}
+        }
+        AppCommand::None
     }
 
     fn handle_logs_key(&mut self, key: KeyEvent) -> AppCommand {
@@ -2354,22 +2418,27 @@ impl App {
                 Ok(())
             }
             InputAction::JavaPath => {
-                let value = value.trim().to_string();
-                self.settings.java = value.clone();
+                let lang = self.lang();
+                let (resolved, major) = resolve_java_setting(value.trim(), lang)?;
+                self.settings.java = resolved.clone();
                 self.settings.normalize();
                 self.settings_autosave_blocked = false;
                 self.save_settings_silent();
-                if value.is_empty() {
-                    self.toast(
-                        LogLevel::Ok,
-                        self.lang()
-                            .pick("Java will be auto-detected", "Java 将自动检测"),
-                    );
-                } else if self.lang() == Lang::Chinese {
-                    self.toast(LogLevel::Ok, format!("Java 路径已设为 {value}"));
+                let message = if resolved.is_empty() {
+                    lang.pick("Java will be auto-detected", "Java 将自动检测")
+                        .to_string()
+                } else if let Some(major) = major {
+                    if lang == Lang::Chinese {
+                        format!("已选择 Java {major}：{resolved}")
+                    } else {
+                        format!("Java {major} selected: {resolved}")
+                    }
+                } else if lang == Lang::Chinese {
+                    format!("Java 路径已设为 {resolved}")
                 } else {
-                    self.toast(LogLevel::Ok, format!("Java path set to {value}"));
-                }
+                    format!("Java path set to {resolved}")
+                };
+                self.toast(LogLevel::Ok, message);
                 Ok(())
             }
         }
@@ -2525,8 +2594,8 @@ impl App {
             title: lang.pick("Java executable", "Java 路径").into(),
             hint: lang
                 .pick(
-                    "Full path to java, or empty for auto-detection",
-                    "Java 完整路径，留空则自动检测",
+                    "Path to java or a JDK/JRE folder; empty auto-detects",
+                    "Java 可执行文件或 JDK/JRE 目录；留空则自动检测",
                 )
                 .into(),
             input: TextInput::new(self.settings.java.clone()).with_max_chars(512),
@@ -3124,6 +3193,7 @@ impl App {
     // ── backend events ────────────────────────────────────────────
 
     pub fn handle_backend(&mut self, event: BackendEvent) {
+        self.note_activity();
         match event {
             BackendEvent::JobStarted { id, title } => {
                 if let Some(job) = self.job.as_mut() {
@@ -3363,10 +3433,10 @@ impl App {
         let ram = self.settings.ram_mb;
 
         if lang == Lang::Chinese {
-            println!("\n  mc-launcher  ·  正在启动 Minecraft {version}");
+            println!("\n  Hot-RS-Launcher  ·  正在启动 Minecraft {version}");
             println!("  游戏退出后终端会回到这里。\n");
         } else {
-            println!("\n  mc-launcher  ·  starting Minecraft {version}");
+            println!("\n  Hot-RS-Launcher  ·  starting Minecraft {version}");
             println!("  Terminal control returns here when the game exits.\n");
         }
         if !self.settings.java.trim().is_empty() {
@@ -3443,10 +3513,10 @@ impl App {
     fn perform_login(&mut self, mode: LoginMode) -> Result<String, String> {
         let lang = self.lang();
         if lang == Lang::Chinese {
-            println!("\n  mc-launcher  ·  Microsoft 登录");
+            println!("\n  Hot-RS-Launcher  ·  Microsoft 登录");
             println!("  按下方提示操作，完成后会回到 TUI。\n");
         } else {
-            println!("\n  mc-launcher  ·  Microsoft login");
+            println!("\n  Hot-RS-Launcher  ·  Microsoft login");
             println!("  Follow the instructions below; the TUI returns afterwards.\n");
         }
         let mut auth = MicrosoftAuth::new();
@@ -3585,6 +3655,45 @@ fn text_modifier(modifiers: KeyModifiers) -> bool {
     !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
 }
 
+/// Accept either a `java` executable or a JDK/JRE home directory. The result is
+/// probed with `java -version` so a typo is rejected while the settings dialog
+/// is open instead of when the game fails to start.
+fn resolve_java_setting(value: &str, lang: Lang) -> Result<(String, Option<u32>), String> {
+    if value.is_empty() {
+        return Ok((String::new(), None));
+    }
+    let path = std::path::PathBuf::from(value);
+    let executable = if path.is_dir() {
+        let exe = if cfg!(windows) { "java.exe" } else { "java" };
+        let candidate = path.join("bin").join(exe);
+        if !candidate.is_file() {
+            return Err(lang
+                .pick(
+                    "That directory has no bin/java. Pick the executable or a JDK/JRE folder.",
+                    "该目录下没有 bin/java。请选择 java 可执行文件或 JDK/JRE 目录。",
+                )
+                .to_string());
+        }
+        candidate
+    } else if path.is_file() {
+        path
+    } else {
+        return Err(lang
+            .pick("No such file or directory", "文件或目录不存在")
+            .to_string());
+    };
+    let text = executable.to_string_lossy().to_string();
+    match crate::java::java_major(&text) {
+        Some(major) => Ok((text, Some(major))),
+        None => Err(lang
+            .pick(
+                "That file did not answer 'java -version'; pick a working Java executable.",
+                "该文件无法运行 java -version；请选择可用的 Java 可执行文件。",
+            )
+            .to_string()),
+    }
+}
+
 fn cycle_preset(presets: &[u32], current: u32, direction: i32) -> u32 {
     let index = presets
         .iter()
@@ -3592,6 +3701,16 @@ fn cycle_preset(presets: &[u32], current: u32, direction: i32) -> u32 {
         .unwrap_or(0);
     let next = (index as i32 + direction).rem_euclid(presets.len() as i32) as usize;
     presets[next]
+}
+
+/// Open a link in the user's browser without blocking the UI thread.
+fn open_url(url: &str) {
+    let url = url.to_string();
+    let _ = std::thread::Builder::new()
+        .name("mc-tui-browser".into())
+        .spawn(move || {
+            let _ = webbrowser::open(&url);
+        });
 }
 
 fn open_modrinth(slug: &str) {
@@ -3933,5 +4052,43 @@ mod tests {
         assert_eq!(cycle_preset(&[0, 10, 20], 20, 1), 0);
         assert_eq!(cycle_preset(&[0, 10, 20], 0, -1), 20);
         assert_eq!(cycle_preset(&[0, 10], 99, 1), 10);
+    }
+
+    #[test]
+    fn java_setting_accepts_executables_and_jdk_folders() {
+        assert_eq!(resolve_java_setting("", Lang::English).unwrap().0, "");
+        assert!(resolve_java_setting("/definitely/missing/java", Lang::English).is_err());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = tempfile::tempdir().unwrap();
+            let home = dir.path().join("jdk-21");
+            std::fs::create_dir_all(home.join("bin")).unwrap();
+            let java = home.join("bin").join("java");
+            std::fs::write(
+                &java,
+                "#!/bin/sh\nif [ \"$1\" = '-version' ]; then echo 'openjdk version \"21.0.1\"' >&2; fi\nexit 0\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&java, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+            let (resolved, major) =
+                resolve_java_setting(home.to_str().unwrap(), Lang::English).unwrap();
+            assert_eq!(resolved, java.to_string_lossy());
+            assert_eq!(major, Some(21));
+
+            let (resolved, _) =
+                resolve_java_setting(java.to_str().unwrap(), Lang::Chinese).unwrap();
+            assert_eq!(resolved, java.to_string_lossy());
+
+            let not_java = home.join("bin").join("readme");
+            std::fs::write(&not_java, b"not executable").unwrap();
+            assert!(resolve_java_setting(not_java.to_str().unwrap(), Lang::English).is_err());
+
+            let empty_home = dir.path().join("empty-jdk");
+            std::fs::create_dir_all(&empty_home).unwrap();
+            assert!(resolve_java_setting(empty_home.to_str().unwrap(), Lang::Chinese).is_err());
+        }
     }
 }

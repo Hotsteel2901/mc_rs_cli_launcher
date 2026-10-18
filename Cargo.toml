@@ -1,8 +1,8 @@
 [package]
-name = "mc-launcher"
-version = "2.3.0"
+name = "hot-rs-launcher"
+version = "2.4.0"
 edition = "2021"
-description = "Simple Minecraft CLI Launcher — Microsoft + offline + Fabric/Forge/NeoForge + Modrinth mods + optional terminal UI"
+description = "Hot-RS-Launcher — a Rust Minecraft CLI launcher with Microsoft/offline accounts, Fabric/Forge/NeoForge, Modrinth mods and an optional terminal UI"
 authors = ["Hotsteel2901"]
 license = "GPL-3.0-only"
 

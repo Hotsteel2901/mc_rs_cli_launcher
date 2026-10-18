@@ -87,7 +87,9 @@ impl Settings {
     }
 
     pub fn normalize(&mut self) {
-        self.ram_mb = self.ram_mb.clamp(512, 32_768);
+        self.ram_mb = self
+            .ram_mb
+            .clamp(crate::util::MIN_RAM_MB, crate::util::MAX_RAM_MB);
         self.threads = self.threads.clamp(1, 64);
         self.width = match self.width {
             0 => 0,
@@ -180,7 +182,7 @@ mod tests {
             ..Settings::default()
         };
         settings.normalize();
-        assert_eq!(settings.ram_mb, 512);
+        assert_eq!(settings.ram_mb, crate::util::MIN_RAM_MB);
         assert_eq!(settings.threads, 64);
         assert_eq!(settings.width, 320);
         assert_eq!(settings.height, 4320);

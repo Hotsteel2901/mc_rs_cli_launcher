@@ -1,5 +1,5 @@
-//! Individual screens: dashboard, versions, mods, accounts, settings, logs
-//! and the Modrinth search overlay.
+//! Individual screens: dashboard, versions, mods, accounts, settings, logs,
+//! about and the Modrinth search overlay.
 
 use std::path::Path;
 use std::time::Duration;
@@ -25,6 +25,7 @@ pub fn render_screen(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
         Screen::Accounts => accounts(frame, app, area, t),
         Screen::Settings => settings(frame, app, area, t),
         Screen::Logs => logs(frame, app, area, t),
+        Screen::About => about(frame, app, area, t),
     }
 }
 
@@ -1408,6 +1409,131 @@ fn account_detail(frame: &mut Frame, app: &App, area: Rect, t: f64) {
     );
 }
 
+// ── about ─────────────────────────────────────────────────────────
+
+fn about_field(label: &str, value: &str, color: Color) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!("  {:<10}", label),
+            Style::default().fg(theme::TEXT_FAINT).bg(theme::SURFACE),
+        ),
+        Span::styled(
+            value.to_string(),
+            Style::default().fg(color).bg(theme::SURFACE),
+        ),
+    ])
+}
+
+fn about(frame: &mut Frame, app: &App, area: Rect, t: f64) {
+    let lang = app.lang();
+    let block = panel(
+        format!("{} · Hot-RS-Launcher", lang.pick("ABOUT", "关于")),
+        theme::LIME,
+        true,
+        t,
+        theme::SURFACE,
+    );
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.height == 0 || inner.width < 16 {
+        return;
+    }
+
+    let dim = |text: &str| {
+        Span::styled(
+            text.to_string(),
+            Style::default().fg(theme::TEXT_DIM).bg(theme::SURFACE),
+        )
+    };
+    let note = |text: &str| {
+        Span::styled(
+            text.to_string(),
+            Style::default().fg(theme::TEXT_FAINT).bg(theme::SURFACE),
+        )
+    };
+
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                "  ◆ ",
+                Style::default()
+                    .fg(theme::LIME)
+                    .bg(theme::SURFACE)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "Hot-RS-Launcher",
+                Style::default()
+                    .fg(theme::TEXT)
+                    .bg(theme::SURFACE)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("   v{}", env!("CARGO_PKG_VERSION")),
+                Style::default().fg(theme::TEXT_FAINT).bg(theme::SURFACE),
+            ),
+        ]),
+        Line::from(vec![
+            Span::raw("    "),
+            dim(lang.pick(
+                "A Rust Minecraft launcher with Microsoft and offline accounts,",
+                "Rust 编写的 Minecraft 启动器：微软 / 离线账号、",
+            )),
+        ]),
+        Line::from(vec![
+            Span::raw("    "),
+            dim(lang.pick(
+                "Fabric/Forge/NeoForge, Modrinth mods and an optional terminal frontend.",
+                "Fabric/Forge/NeoForge、Modrinth 模组与可选终端界面。",
+            )),
+        ]),
+        Line::from(""),
+        about_field("AUTHOR", "Hotsteel2901", theme::TEXT),
+        about_field(
+            "GITHUB",
+            "github.com/Hotsteel2901/mc_rs_cli_launcher",
+            theme::CYAN,
+        ),
+        about_field(
+            "CODEBERG",
+            "codeberg.org/hotsteel/mc_rs_cli_launcher",
+            theme::PURPLE,
+        ),
+        about_field("LICENSE", "GPL-3.0-only", theme::GOLD),
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("  "),
+            note(lang.pick(
+                "Both repositories use the same name: mc_rs_cli_launcher.",
+                "两个托管平台上的仓库同名：mc_rs_cli_launcher。",
+            )),
+        ]),
+        Line::from(vec![
+            Span::raw("  "),
+            note(lang.pick(
+                "Issues and pull requests are welcome on either host.",
+                "欢迎在任一平台提交 issue 或 PR。",
+            )),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("  "),
+            note(lang.pick(
+                "Built with Rust · ratatui · ureq · clap. Not affiliated with Mojang or Microsoft.",
+                "使用 Rust · ratatui · ureq · clap 构建。与 Mojang / Microsoft 无隶属关系。",
+            )),
+        ]),
+    ];
+    lines.retain(|line| line.width() <= inner.width as usize || line.spans.len() == 1);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().bg(theme::SURFACE))
+            .wrap(Wrap { trim: false }),
+        inner,
+    );
+}
+
 // ── settings ──────────────────────────────────────────────────────
 
 fn settings(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
@@ -1732,7 +1858,7 @@ fn settings_preview(frame: &mut Frame, app: &App, area: Rect, t: f64) {
         _ => lang.pick("auto", "自动"),
     };
     let mut command = format!(
-        "mc-launcher play -v {} --ram {}",
+        "hot-rs-launcher play -v {} --ram {}",
         version,
         app.settings.ram_label().replace(' ', "")
     );

@@ -467,10 +467,44 @@ pub fn download_mojang_java(
 }
 
 fn find_java_in_dir(root: &Path, exe_name: &str) -> Option<String> {
-    let pattern = format!("{}/**/bin/{}", root.display(), exe_name);
+    // Game directories may contain glob metacharacters such as `[` or `*`.
+    let pattern = format!(
+        "{}/**/bin/{}",
+        glob::Pattern::escape(&root.to_string_lossy()),
+        exe_name
+    );
     let matches = glob::glob(&pattern).ok()?;
     if let Some(entry) = matches.flatten().next() {
         return Some(entry.to_string_lossy().to_string());
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_lookup_survives_glob_metacharacters_in_the_game_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        // `[` and `*` are legal in directory names but special to glob.
+        let runtime = dir.path().join("mc[1]*x").join("java").join("gamma");
+        let bin = runtime.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let java = bin.join("java");
+        std::fs::write(&java, b"fixture").unwrap();
+        assert_eq!(
+            find_java_in_dir(
+                dir.path()
+                    .join("mc[1]*x")
+                    .join("java")
+                    .join("gamma")
+                    .as_path(),
+                "java"
+            )
+            .map(|p| Path::new(&p).to_path_buf()),
+            Some(java)
+        );
+        assert!(find_java_in_dir(&dir.path().join("missing[1]"), "java").is_none());
+    }
 }

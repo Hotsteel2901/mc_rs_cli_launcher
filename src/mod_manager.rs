@@ -540,7 +540,7 @@ impl ModManager {
                 println!("      slug:    {}", slug);
                 println!("      version: {}  (MC: {})", ver, mc);
                 print!(
-                    "      install: mc-launcher install-mod {} -v {}",
+                    "      install: hot-rs-launcher install-mod {} -v {}",
                     slug, mc_version
                 );
                 if let Some(l) = loader {
@@ -562,7 +562,7 @@ impl ModManager {
                 println!("      slug:    {}", slug);
                 println!("      version: {}  (MC: {})", ver, mc);
                 print!(
-                    "      install: mc-launcher install-mod {} -v {}",
+                    "      install: hot-rs-launcher install-mod {} -v {}",
                     slug, mc_version
                 );
                 if let Some(l) = loader {

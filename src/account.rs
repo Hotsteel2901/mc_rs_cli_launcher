@@ -19,6 +19,11 @@ const SECRETS_FILE: &str = "launcher_secrets.enc";
 const SECRETS_KEY_FILE: &str = "launcher_secrets.key";
 /// `1`/`0` overrides the interactive fallback prompt (see README).
 const ALLOW_FILE_STORE_ENV: &str = "MC_LAUNCHER_ALLOW_FILE_STORE";
+/// Current OS keychain service name (visible in keychain managers).
+const KEYRING_SERVICE: &str = "hot-rs-launcher";
+/// Service name used by releases before the Hot-RS-Launcher rename. Read once
+/// so upgrading does not silently sign the user out; entries are moved on read.
+const LEGACY_KEYRING_SERVICE: &str = "mc-launcher";
 
 /// Local key file layout: `[0..ENC_LEN]` encryption key, `[ENC_LEN..]` MAC key.
 const KEY_LEN: usize = 64;
@@ -34,27 +39,52 @@ trait SecretStore {
     fn delete(&self, key: &str) -> Result<(), String>;
 }
 
+fn keychain_entry(service: &str, key: &str) -> Result<keyring::Entry, String> {
+    keyring::Entry::new(service, key).map_err(|e| e.to_string())
+}
+
 struct Keychain;
 impl SecretStore for Keychain {
     fn get(&self, key: &str) -> Result<Option<String>, String> {
-        let entry = keyring::Entry::new("mc-launcher", key).map_err(|e| e.to_string())?;
-        match entry.get_password() {
+        match keychain_entry(KEYRING_SERVICE, key)?.get_password() {
             Ok(value) => Ok(Some(value)),
-            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(keyring::Error::NoEntry) => {
+                match keychain_entry(LEGACY_KEYRING_SERVICE, key)?.get_password() {
+                    Ok(value) => {
+                        // Move the credential to the renamed service exactly once.
+                        if let Ok(entry) = keychain_entry(KEYRING_SERVICE, key) {
+                            let _ = entry.set_password(&value);
+                        }
+                        let _ = keychain_entry(LEGACY_KEYRING_SERVICE, key)
+                            .and_then(|entry| entry.delete_password().map_err(|e| e.to_string()));
+                        Ok(Some(value))
+                    }
+                    Err(keyring::Error::NoEntry) => Ok(None),
+                    Err(error) => Err(error.to_string()),
+                }
+            }
             Err(error) => Err(error.to_string()),
         }
     }
     fn set(&self, key: &str, value: &str) -> Result<(), String> {
-        keyring::Entry::new("mc-launcher", key)
-            .map_err(|e| e.to_string())?
+        keychain_entry(KEYRING_SERVICE, key)?
             .set_password(value)
             .map_err(|e| e.to_string())
     }
     fn delete(&self, key: &str) -> Result<(), String> {
-        let entry = keyring::Entry::new("mc-launcher", key).map_err(|e| e.to_string())?;
-        match entry.delete_password() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(error) => Err(error.to_string()),
+        // Remove both names so upgrades do not leave stale credentials behind.
+        let mut first_error = None;
+        for service in [KEYRING_SERVICE, LEGACY_KEYRING_SERVICE] {
+            match keychain_entry(service, key)?.delete_password() {
+                Ok(()) | Err(keyring::Error::NoEntry) => {}
+                Err(error) => {
+                    first_error.get_or_insert(error.to_string());
+                }
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
         }
     }
 }
@@ -186,8 +216,15 @@ impl SecretStore for FallbackStore {
         self.run(true, |store| store.set(key, value))
     }
     fn delete(&self, key: &str) -> Result<(), String> {
-        // Deleting must never block on an interactive prompt.
-        self.run(false, |store| store.delete(key))
+        // Deleting must never block on an interactive prompt, and it must never
+        // create the local key file: that file records the user's consent to
+        // store tokens on disk, so logging out must not grant it as a side
+        // effect. A missing OS keychain therefore fails here; callers downgrade
+        // that to a warning and still clear the local metadata.
+        match self.resolved_mode() {
+            Mode::File => self.file.delete(key),
+            Mode::Os => self.os.delete(key),
+        }
     }
 }
 
@@ -295,6 +332,11 @@ impl EncryptedFileStore {
     }
 
     fn write_map(&self, map: &BTreeMap<String, String>) -> Result<(), String> {
+        // Removing the last secret from an untouched directory should leave no
+        // trace, and must not generate a key file that implies consent.
+        if map.is_empty() && !self.data_path.exists() {
+            return Ok(());
+        }
         let key = self.load_key()?;
         let plaintext = serde_json::to_vec(map).map_err(|e| e.to_string())?;
         let mut nonce = [0u8; NONCE_LEN];
@@ -322,6 +364,15 @@ impl SecretStore for EncryptedFileStore {
     fn delete(&self, key: &str) -> Result<(), String> {
         let mut map = self.read_map()?;
         map.remove(key);
+        if map.is_empty() {
+            // Do not leave an encrypted "empty map" behind after the last secret
+            // is removed; a missing file already means "nothing stored".
+            if self.data_path.exists() {
+                fs::remove_file(&self.data_path)
+                    .map_err(|e| format!("Cannot remove {}: {e}", self.data_path.display()))?;
+            }
+            return Ok(());
+        }
         self.write_map(&map)
     }
 }
@@ -475,16 +526,16 @@ impl AccountManager {
 
     /// Remove local metadata and best-effort delete stored Microsoft secrets.
     /// Deletion never prompts, so this is safe to call from a full-screen UI.
+    /// Local metadata is cleared even when the OS keychain cannot be reached;
+    /// the leftover secret is reported instead of blocking the logout.
     pub fn logout_metadata(game_dir: &Path) -> AppResult<()> {
         let dir = Self::resolve_dir(game_dir)?;
         let mut data = Self::read_public_data(&dir)?;
         if data["accounts"].get("msa").is_some() {
             let store = FallbackStore::new(&dir);
             let key = Self::secret_key_for(&dir)?;
-            store.delete(&key).map_err(AppError::Generic)?;
-            store
-                .delete("msa_refresh_token")
-                .map_err(AppError::Generic)?;
+            let failures = cleanup_secrets(&store, &[key.as_str(), "msa_refresh_token"]);
+            warn_cleanup_failures(&failures);
         }
         data = serde_json::json!({"accounts":{},"default":null});
         Self::save_public_data(&dir, &data)
@@ -630,18 +681,43 @@ impl AccountManager {
         self.data["default"].as_str().map(String::from)
     }
 
+    /// Forget the local account. Metadata is always cleared; a secret that the
+    /// OS keychain refuses to delete is reported as a warning instead of
+    /// leaving the user unable to log out (common on headless Linux hosts).
     pub fn clear(&mut self) -> AppResult<()> {
         if self.data["accounts"].get("msa").is_some() {
-            self.secrets
-                .delete(&self.secret_key)
-                .map_err(AppError::Generic)?;
-            self.secrets
-                .delete("msa_refresh_token")
-                .map_err(AppError::Generic)?;
+            let failures = cleanup_secrets(
+                self.secrets.as_ref(),
+                &[self.secret_key.as_str(), "msa_refresh_token"],
+            );
+            warn_cleanup_failures(&failures);
         }
         self.data = serde_json::json!({"accounts":{},"default":null});
         self.save()
     }
+}
+
+/// Delete each key, collecting failures so the caller can still clear local
+/// metadata. Never prompts and never creates the local key file.
+fn cleanup_secrets(store: &dyn SecretStore, keys: &[&str]) -> Vec<String> {
+    let mut failures = Vec::new();
+    for key in keys {
+        if let Err(error) = store.delete(key) {
+            failures.push(format!("{key}: {error}"));
+        }
+    }
+    failures
+}
+
+fn warn_cleanup_failures(failures: &[String]) {
+    if failures.is_empty() {
+        return;
+    }
+    crate::warn_msg!(
+        "Local account data was cleared, but stored Microsoft credentials could not be removed: {}",
+        failures.join("; ")
+    );
+    crate::info!("Remove the '{KEYRING_SERVICE}' entry from your OS keychain manually if needed.");
 }
 
 #[cfg(test)]
@@ -885,6 +961,38 @@ mod tests {
             .is_err());
         assert!(!manager.path.exists());
         assert!(!dir.path().join(SECRETS_FILE).exists());
+        assert!(!dir.path().join(SECRETS_KEY_FILE).exists());
+    }
+
+    #[test]
+    fn deleting_a_secret_never_creates_the_local_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = EncryptedFileStore::new(dir.path());
+        store.delete("msa:abc").unwrap();
+        assert!(!dir.path().join(SECRETS_FILE).exists());
+        assert!(!dir.path().join(SECRETS_KEY_FILE).exists());
+        // Removing the last secret also removes the encrypted file but keeps
+        // the key file that records the user's earlier consent.
+        store.set("k", "v").unwrap();
+        store.delete("k").unwrap();
+        assert!(!dir.path().join(SECRETS_FILE).exists());
+        assert!(dir.path().join(SECRETS_KEY_FILE).exists());
+    }
+
+    #[test]
+    fn logout_clears_metadata_even_when_the_keychain_is_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join(ACCOUNTS_FILE),
+            br#"{"accounts":{"msa":{"type":"msa","username":"Steve"}},"default":"msa"}"#,
+        )
+        .unwrap();
+        let mut manager = AccountManager::with_store(dir.path(), Box::new(Unavailable)).unwrap();
+        manager.clear().unwrap();
+        assert!(manager.accounts().as_object().unwrap().is_empty());
+        assert!(manager.get_default().is_none());
+        let saved = fs::read_to_string(dir.path().join(ACCOUNTS_FILE)).unwrap();
+        assert!(!saved.contains("Steve"));
         assert!(!dir.path().join(SECRETS_KEY_FILE).exists());
     }
 }

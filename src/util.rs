@@ -8,6 +8,10 @@ use std::{env, fs};
 
 use sha1::{Digest, Sha1};
 
+/// Shared RAM bounds for the CLI and the TUI so both accept the same values.
+pub const MIN_RAM_MB: u32 = 128;
+pub const MAX_RAM_MB: u32 = 65_536;
+
 /// Detect OS name (matches Mojang naming).
 pub fn os_name() -> &'static str {
     if cfg!(windows) {

@@ -1,4 +1,4 @@
-//! A terminal-native frontend for mc-launcher.
+//! A terminal-native frontend for Hot-RS-Launcher.
 //!
 //! The CLI remains the source of truth: the TUI is an additional action in the
 //! same binary, and every long-running operation reuses the CLI/download core.
@@ -53,7 +53,7 @@ impl TerminalSession {
             EnableBracketedPaste,
             EnableMouseCapture,
             Hide,
-            SetTitle("mc-launcher"),
+            SetTitle("Hot-RS-Launcher"),
             Clear(ClearType::All)
         ) {
             let _ = disable_raw_mode();
@@ -98,7 +98,7 @@ impl TerminalSession {
             DisableBracketedPaste,
             DisableMouseCapture,
             LeaveAlternateScreen,
-            SetTitle("mc-launcher")
+            SetTitle("Hot-RS-Launcher")
         )
         .map_err(|e| e.to_string())?;
         let _ = stdout.flush();
@@ -235,8 +235,8 @@ pub fn run(launcher: MinecraftLauncher, bootstrap: Bootstrap) -> Result<(), Stri
             println!(
                 "  {}",
                 app.lang().pick(
-                    "mc-launcher TUI closed · CLI is still available with --help",
-                    "mc-launcher TUI 已关闭 · 仍可使用 CLI（--help）"
+                    "Hot-RS-Launcher TUI closed · CLI is still available with --help",
+                    "Hot-RS-Launcher TUI 已关闭 · 仍可使用 CLI（--help）"
                 )
             );
             Ok(())
@@ -264,6 +264,7 @@ fn event_loop(
     tx: &jobs::EventSender,
 ) -> Result<(), String> {
     let mut suspended: Option<app::SuspendTask> = None;
+    let mut last_input = Instant::now();
     loop {
         app.tick();
         for _ in 0..256 {
@@ -282,12 +283,17 @@ fn event_loop(
             .draw(|frame| ui::render(frame, app))
             .map_err(|e| format!("Cannot draw TUI: {e}"))?;
 
+        // Full frame rate only while something animates or right after input;
+        // an idle dashboard settles to ~8 FPS instead of 30.
         let frame_wait = if app.settings.reduced_motion {
             Duration::from_millis(100)
-        } else {
+        } else if app.wants_fast_frames() || last_input.elapsed() < Duration::from_millis(1500) {
             Duration::from_millis(33)
+        } else {
+            Duration::from_millis(120)
         };
         if event::poll(frame_wait).map_err(|e| format!("Input error: {e}"))? {
+            last_input = Instant::now();
             match event::read().map_err(|e| format!("Input error: {e}"))? {
                 Event::Key(key) => {
                     if key.kind != KeyEventKind::Release {

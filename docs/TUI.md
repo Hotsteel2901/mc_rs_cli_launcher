@@ -1,11 +1,11 @@
-# mc-launcher TUI
+# Hot-RS-Launcher TUI
 
-`mc-launcher tui` 是同一个 CLI 二进制里的全屏终端前端。它不是 GUI，也不替代命令行：所有下载、校验、账号存储、加载器安装和启动逻辑仍然来自原来的 CLI 核心；TUI 只是把这些能力组织成一个可键盘和鼠标操作、带实时进度和动效的界面。
+`hot-rs-launcher tui` 是同一个 CLI 二进制里的全屏终端前端。它不是 GUI，也不替代命令行：所有下载、校验、账号存储、加载器安装和启动逻辑仍然来自原来的 CLI 核心；TUI 只是把这些能力组织成一个可键盘和鼠标操作、带实时进度和动效的界面。
 
 ```sh
-mc-launcher tui
-mc-launcher ui          # 别名
-mc-launcher --dir ./minecraft tui
+hot-rs-launcher tui
+hot-rs-launcher ui          # 别名
+hot-rs-launcher --dir ./minecraft tui
 ```
 
 需要交互式终端（stdin/stdout 都是 TTY）、ANSI 光标寻址能力和 UTF-8 字体；`TERM=dumb` 会被拒绝。在管道、CI 或 `--help` 式重定向下运行会直接报错退出，不会挂起。
@@ -13,35 +13,40 @@ mc-launcher --dir ./minecraft tui
 ## 界面
 
 ```text
- ◆ mclauncher  v2.3.0                 ◆ cli-first                ● Steve  ·  1.21.4 · Fabric  · auto
-────────────────────────────────────────────────────────────────────────────────────────────────────
-╭────────────────────╮ ╭ INSTANCE ─────────────────────────────────────────────────────────────────╮
-│      ▄██████▄      │ │M I N E C R A F T                            ╭────────────────────────────╮│
-│     ██  ██  ██     │ │C L I   ·   L A U N C H E R                  │           ▶  PLAY          ││
-│     ████▀▀████     │ │                                             │         press enter        ││
-│     ████  ████     │ │◆ 1.21.4  ·  Fabric  ·  1 mod                ╰────────────────────────────╯│
-│     ▀▀██████▀▀     │ │◉ Steve  ·  OFFLINE                                                        │
-│     mc launcher    │ │                                             RAM  4 GB                     │
-│       v2.3.0       │ │                                             LOAD Fabric                   │
-│                    │ │                                             PATH ~/minecraft/versions/... │
-│▌ ◈ Dashboard    1  │ ╰───────────────────────────────────────────────────────────────────────────╯
-│                    │
-│  ▤ Versions        │ ╭ VERSIONS ───────╮╭ MODS ACTIVE ─────╮╭ MEMORY ─────────╮╭ JAVA ───────────╮
-│                    │ │1                ││1                 ││4 GB             ││Java 21          │
-│  ❖ Mods            │ │1.21.4           ││1 disabled        ││4 threads        ││auto-detected    │
-│                    │ │                 ││                  ││                 ││                 │
-│  ◉ Accounts        │ ╰─────────────────╯╰──────────────────╯╰─────────────────╯╰─────────────────╯
-│                    │
-│  ✧ Settings        │ ╭ RECENT ACTIVITY  ·  l for the full log ───────────────────────────────────╮
-│                    │ │00:12 ✓ Fabric profile ready                                               │
-│  ≡ Activity        │ │00:12 · 1 version installed · source auto                                 │
-│                    │ │00:12 · Minecraft 1.21.4 detected                                          │
-│ ◈ 4 GB  4 threads  │ │00:12 ! A mod is disabled                                                  │
-│ ◆ 1.21.4  Fabric   │ │00:12 ✕ Example error entry                                                │
-│ ↻ 0.2s             │ │00:12 · internal detail                                                    │
-╰────────────────────╯ ╰───────────────────────────────────────────────────────────────────────────╯
- enter  play   n  new version   i  loader   s  search mods   tab  switch   ?  help   q  quit
- ● READY  ~/minecraft                                             src auto  ·  ↻ 00:12  ·  20:14 UTC
+ ◆ Hot-RS-Launcher  v2.4.0                 ◆ cli-first                     ● Steve  ·  1.21.4 · Fabric  · auto
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+╭────────────────────╮ ╭ INSTANCE ───────────────────────────────────────────────────────────────────────────╮
+│      ▄██████▄      │ │M I N E C R A F T                                 ╭─────────────────────────────────╮│
+│     ██  ██  ██     │ │C L I   ·   L A U N C H E R                       │             ▶  PLAY             ││
+│     ████▀▀████     │ │                                                  │           press enter           ││
+│     ████  ████     │ │◆ 1.21.4  ·  Fabric  ·  1 mod                     ╰─────────────────────────────────╯│
+│     ▀▀██████▀▀     │ │◉ Steve  ·  OFFLINE                                                                  │
+│   Hot-RS-Launcher  │ │                                                  RAM  4 GB                          │
+│       v2.4.0       │ │                                                  LOAD Fabric                        │
+│                    │ │                                                  PATH ~/minecraft                   │
+│▌ ◈ Dashboard    1  │ ╰─────────────────────────────────────────────────────────────────────────────────────╯
+│                    │                                                                                        
+│  ▤ Versions        │ ╭ VERSIONS ──────────╮╭ MODS ACTIVE ───────╮╭ MEMORY ───────────╮╭ JAVA ──────────────╮
+│                    │ │1                   ││1                   ││4 GB               ││detecting           │
+│  ❖ Mods            │ │1.21.4              ││1 disabled          ││16 threads         ││scanning system…    │
+│                    │ │                    ││                    ││                   ││                    │
+│  ◉ Accounts        │ ╰────────────────────╯╰────────────────────╯╰───────────────────╯╰────────────────────╯
+│                    │                                                                                        
+│  ✧ Settings        │ ╭ RECENT ACTIVITY  ·  l for the full log ─────────────────────────────────────────────╮
+│                    │ │00:00 · Hot-RS-Launcher TUI ready                                                    │
+│  ≡ Activity        │ │00:00 · Game directory: ~/minecraft                                                  │
+│                    │ │00:00 · 1 version(s) installed · source auto                                         │
+│  ✦ About           │ │00:00 · Version 1.21.4 detected                                                      │
+│                    │ │00:00 ✓ Fabric profile ready                                                         │
+│                    │ │00:00 ! A mod is disabled                                                            │
+│                    │ │00:00 ✕ Example error entry                                                          │
+│                    │ │00:00 · internal detail                                                              │
+│ ◈ 4 GB  16 threads │ │                                                                                     │
+│ ◆ 1.21.4  Fabric   │ │                                                                                     │
+│ ↻ 0.0s             │ │                                                                                     │
+╰────────────────────╯ ╰─────────────────────────────────────────────────────────────────────────────────────╯
+ enter  play   n  new version   i  loader   s  search mods   tab  switch   ?  help   q  quit                  
+ ● READY  ~/minecraft                                                        src auto  ·  ↻ 0.0s  ·  02:10 UTC
 ```
 
 窗口宽度小于 96 列时自动切换为顶部标签页布局；小于 52×16 时显示可读的尺寸提示而不是崩溃。所有界面使用真彩色，并在窄终端中裁剪而不是溢出。
@@ -56,6 +61,7 @@ mc-launcher --dir ./minecraft tui
 | Accounts | 账号列表、默认账号、离线账号、Microsoft 浏览器/设备码登录、登出 |
 | Settings | 界面语言（English / 中文）、内存、窗口尺寸、下载线程、官方/BMCLAPI 源、Java 路径、减少动效、开场动画 |
 | Activity | 完整活动日志、实时追踪、暂停跟随、清空 |
+| 关于（About） | 版本、作者、GitHub（@Hotsteel2901）与 Codeberg（@hotsteel）仓库地址、许可证；`g` / `b` 在浏览器中打开 |
 | 全局 | 后台任务面板、分阶段进度、实时传输速度、每文件百分比、取消任务、Toast、帮助；底部状态栏与任务面板 |
 
 ## 快捷键
@@ -65,7 +71,7 @@ mc-launcher --dir ./minecraft tui
 | 按键 | 行为 |
 | --- | --- |
 | `Tab` / `Shift+Tab` | 下一个 / 上一个界面 |
-| `1` … `6` | 直接切换界面 |
+| `1` … `7` | 直接切换界面 |
 | `↑` `↓` | 移动选择 |
 | `Enter` | 执行当前界面的主要动作 |
 | `Esc` | 返回 Dashboard；关闭弹窗；关闭已完成的任务面板 |
@@ -131,6 +137,13 @@ mc-launcher --dir ./minecraft tui
 | `s` | 立即保存（修改通常会自动保存） |
 | `R` | 恢复默认值（保留活跃版本） |
 
+### About
+
+| 按键 | 行为 |
+| --- | --- |
+| `g` | 在浏览器中打开 GitHub 仓库 |
+| `b` | 在浏览器中打开 Codeberg 仓库 |
+
 ### Activity
 
 | 按键 | 行为 |
@@ -163,12 +176,12 @@ mc-launcher --dir ./minecraft tui
 }
 ```
 
-- `ram_mb`：512–32768，512 MB 步进。
+- `ram_mb`：128–65536，512 MB 步进（与 CLI `--ram` 一致）。
 - `width` / `height`：0 表示交给 Minecraft 决定；其余会限制在安全范围。
-- `threads`：1–64，默认 16；下载器复用 HTTP/TLS 连接，资源文件并发数至少为 16。
+- `threads`：1–64，默认 16；下载器复用 HTTP/TLS 连接。资源文件使用 `threads × 2` 的并发（至少 16、最多 64；镜像上限 24）。
 - `language`：`en`（默认）或 `zh`；在 Settings 第一项切换后立即生效并保存。命令行与日志中的底层工具输出仍保持英文。
 - `active_loader`：`fabric` / `forge` / `neoforge`，或用 `null` 表示自动选择第一个已安装加载器；未安装的加载器会先要求安装。
-- `source`：`auto` / `official` / `bmcl`。`auto` 对资源文件优先 BMCLAPI（失败即回退官方），库与元数据仍官方优先；`official` 完全禁用镜像。
+- `source`：`auto` / `official` / `bmcl`。`auto` 会为资源文件同时测速官方与 BMCLAPI 并整批使用更快的一方（失败文件回退另一源），库与元数据仍官方优先；`official` 完全禁用镜像。
 - `java`：空表示自动检测。
 - 首次打开 TUI 时，命令行的 `--ram`、`--threads`、`--java`、`--width`、`--height`、`--official`、`--bmcl` 会覆盖配置文件；`-v` 会选择已安装的版本作为活跃实例。之后以文件为准。
 - 文件损坏时界面会提示并采用默认值；建议手动修复或删除后重新配置。
@@ -177,9 +190,10 @@ mc-launcher --dir ./minecraft tui
 
 资源（assets）是大量小文件，延迟和握手成本远高于字节数。CLI/TUI 共用以下优化：
 
-- 进程级 HTTP agent 复用 TCP/TLS 连接，每个主机最多保留 64 条空闲连接，避免每个资源重新握手。
-- 资源文件在 `auto` 源模式下优先 BMCLAPI，失败后立即回退官方；重试按“尝试轮次”而不是“先耗尽官方三次再试镜像”，不再为每个资源等待 1+2+4 秒。
-- 默认 16 个下载线程（1–64 可调）；资源池至少保持 16 并发，旧配置里的 4 线程也不会再成为瓶颈。
+- 进程级 HTTP agent 复用 TCP/TLS 连接，每个主机最多保留 128 条空闲连接，避免每个资源重新握手。
+- `auto` 源模式先用 2 个小型资源对象**并行探测**官方与 BMCLAPI，整批走更快的一方；单个文件失败仍会回退另一源，最后再对失败文件单独重试一轮（TLS 抖动不再导致整批失败）。
+- 资源并发为 `threads × 2`（至少 16、最多 64）；BMCLAPI 对高并发握手敏感，镜像上限固定 24。默认 16 线程时资源池为 32。
+- 空闲 2 秒后冻结渐变、Logo 与粒子时钟，只以约 8 FPS 重绘时钟；有任务、Toast、Splash 或最近输入时立即恢复 30 FPS（`reduced_motion` 固定 10 FPS）。120×40 伪终端实测空闲流量从约 118 KiB/s 降到 **0.87 KiB/s**。
 - 资源先写同目录临时文件，校验 SHA-1 后原子改名；不再对每个小文件执行 `fsync`，避免磁盘屏障把并发下载串行化。
 - 缺失文件快速跳过哈希探测；已存在文件仍会校验，损坏缓存仍会重新下载。
 
@@ -205,8 +219,8 @@ mc-launcher --dir ./minecraft tui
 - `src/tui/theme.rs`：真彩色主题、渐变、缓动、进度条。
 - `src/progress.rs`：CLI 与 TUI 共用的下载进度总线，以及跨进程的 `@@MC_TUI@@` JSON 进度行。
 - 自动测试使用 `TestBackend` 在 120×40、100×32、80×24、60×20、52×16 和过小尺寸下渲染全部界面、弹窗、任务状态、搜索、Splash、Toast 与粒子；同时验证中英文切换、鼠标热区点击/滚轮和弹窗按钮。开发验证中还使用伪终端冒烟测试检查进入/离开备用屏幕、括号粘贴与鼠标模式开关、按键退出和退出码。
-- `mc-launcher tui` 在非 TTY 下会明确失败，不会阻塞 CI。
+- `hot-rs-launcher tui` 在非 TTY 下会明确失败，不会阻塞 CI。
 
 ## 为什么还是 CLI-only
 
-TUI 没有引入 GUI 工具包、窗口系统或后台服务；它就是 `mc-launcher` 的一个动作。它复用同一份 `--dir`、下载源、账号安全存储、加载器安装器和模组管理代码，因此任何自动化脚本、CI 或服务器都可以继续只用原来的 CLI 命令。
+TUI 没有引入 GUI 工具包、窗口系统或后台服务；它就是 `hot-rs-launcher` 的一个动作。它复用同一份 `--dir`、下载源、账号安全存储、加载器安装器和模组管理代码，因此任何自动化脚本、CI 或服务器都可以继续只用原来的 CLI 命令。

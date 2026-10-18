@@ -6,7 +6,7 @@ use crate::http;
 
 const MODRINTH_API: &str = "https://api.modrinth.com/v2";
 #[allow(dead_code)]
-const LAUNCHER_NAME: &str = "simple-mc-cli";
+const LAUNCHER_NAME: &str = "hot-rs-launcher";
 #[allow(dead_code)]
 const LAUNCHER_VER: &str = env!("CARGO_PKG_VERSION");
 

@@ -1,6 +1,6 @@
 //! Minecraft metadata, libraries, native archives and content-addressed assets.
 use crate::error::{AppError, AppResult};
-use crate::{http, util};
+use crate::{http, progress, util};
 use rayon::prelude::*;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -375,33 +375,79 @@ impl VersionManager {
             .as_object()
             .ok_or("Asset index has no objects map")?;
         let mut downloads = std::collections::BTreeMap::new();
+        let mut samples: Vec<(u64, String)> = Vec::new();
         for object in objects.values() {
             let hash = object["hash"].as_str().ok_or("Missing asset hash")?;
             if hash.len() != 40 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
                 return Err("Invalid asset SHA-1".into());
             }
+            let size = object["size"].as_u64().unwrap_or(0);
+            // Typical small objects make the cheapest, most representative probe.
+            if samples.len() < 2 && (8_000..=262_144).contains(&size) {
+                samples.push((size, hash.to_string()));
+            }
             let dest = self.assets_dir.join("objects").join(&hash[..2]).join(hash);
             downloads.insert(hash, dest);
         }
-        // Assets are latency-bound and tiny. Even an old config or a low
-        // --threads value should not serialize thousands of independent GETs
-        // behind four workers; keep a modest floor while respecting 64.
-        let asset_workers = max_workers.clamp(1, 64).max(16);
+        if samples.is_empty() {
+            samples.extend(downloads.keys().take(2).map(|hash| (0, hash.to_string())));
+        }
+        let sample_hashes: Vec<String> = samples.into_iter().map(|(_, hash)| hash).collect();
+        // In Auto mode measure both origins once per batch instead of always
+        // assuming the mirror is faster; the winner gets the whole asset stage.
+        let prefer_mirror = match http::source_mode() {
+            http::SourceMode::Official => false,
+            http::SourceMode::BmclApi => true,
+            http::SourceMode::Auto => http::prefer_mirror_for_assets(&sample_hashes),
+        };
+        let asset_workers = http::asset_worker_count(max_workers, prefer_mirror);
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(asset_workers)
             .build()
             .map_err(|e| AppError::Generic(e.to_string()))?;
-        pool.install(|| {
-            downloads.par_iter().try_for_each(|(hash, dest)| {
+        let failed: Vec<(&str, PathBuf, String)> = pool.install(|| {
+            downloads
+                .par_iter()
+                .filter_map(|(hash, dest)| {
+                    let url = format!(
+                        "https://resources.download.minecraft.net/{}/{}",
+                        &hash[..2],
+                        hash
+                    );
+                    http::download_asset(&url, dest, "Asset", Some(hash), 3, prefer_mirror)
+                        .err()
+                        .map(|error| (*hash, dest.clone(), error))
+                })
+                .collect()
+        });
+        if progress::is_cancelled() {
+            return Err("Download cancelled".into());
+        }
+        if !failed.is_empty() {
+            // Retry only the stragglers: transient TLS resets are the usual
+            // cause when many connections are opened at once, and a serial pass
+            // is much cheaper than restarting the whole batch.
+            let mut hard = Vec::new();
+            for (hash, dest, first) in &failed {
                 let url = format!(
                     "https://resources.download.minecraft.net/{}/{}",
                     &hash[..2],
                     hash
                 );
-                http::download_asset(&url, dest, "Asset", Some(hash), 3)
-            })
-        })
-        .map_err(AppError::Http)?;
+                if let Err(second) =
+                    http::download_asset(&url, dest, "Asset", Some(hash), 4, prefer_mirror)
+                {
+                    hard.push(format!("{hash}: {first}; retry: {second}"));
+                }
+            }
+            if !hard.is_empty() {
+                return Err(AppError::Generic(format!(
+                    "{} asset file(s) could not be downloaded; first error: {}",
+                    hard.len(),
+                    hard[0]
+                )));
+            }
+        }
         // Older clients need named assets as well as the content-addressed store.
         let virtual_assets = index_data["virtual"].as_bool().unwrap_or(false);
         let resources = index_data["map_to_resources"].as_bool().unwrap_or(false);

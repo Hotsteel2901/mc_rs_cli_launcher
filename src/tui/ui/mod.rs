@@ -81,7 +81,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let t = if app.settings.reduced_motion {
         0.0
     } else {
-        app.session_start.elapsed().as_secs_f64()
+        app.anim_time()
     };
     let compact = area.width < 96;
     let job_visible = app.job.is_some() && app.show_job_panel;
@@ -198,14 +198,14 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect, t: f64) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            "mc",
+            "Hot-RS",
             Style::default()
                 .fg(theme::LIME)
                 .bg(theme::SURFACE)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            "launcher",
+            "-Launcher",
             Style::default()
                 .fg(theme::mix(theme::GREEN, theme::CYAN, 0.35))
                 .bg(theme::SURFACE)
@@ -570,14 +570,14 @@ fn render_logo(frame: &mut Frame, app: &App, area: Rect, t: f64) {
     if area.height > 5 {
         let word = Line::from(vec![
             Span::styled(
-                "mc ",
+                "Hot-RS",
                 Style::default()
                     .fg(theme::mix(theme::LIME, theme::TEXT, 0.15))
                     .bg(theme::SURFACE)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                "launcher",
+                "-Launcher",
                 Style::default()
                     .fg(theme::mix(theme::GREEN, theme::CYAN, 0.4))
                     .bg(theme::SURFACE),
@@ -687,6 +687,10 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect, t: f64) {
                 ("g / G", lang.pick("top / follow", "顶部 / 跟随")),
                 ("f", lang.pick("follow", "跟随")),
                 ("c", lang.pick("clear", "清空")),
+            ],
+            Screen::About => vec![
+                ("g", lang.pick("github", "github")),
+                ("b", lang.pick("codeberg", "codeberg")),
             ],
         });
         // Reserve room for the always-present help and quit hints (20 cells
@@ -1139,10 +1143,7 @@ fn render_splash(frame: &mut Frame, area: Rect, app: &App) {
     for index in 0..70usize {
         let x = (index * 73 + 11) % width.max(1);
         let y = (index * 37 + 5) % height.max(1);
-        let twinkle =
-            ((index as f64 * 0.7 + app.session_start.elapsed().as_secs_f64() * 2.2).sin() * 0.5
-                + 0.5)
-                .powf(4.0);
+        let twinkle = ((index as f64 * 0.7 + app.anim_time() * 2.2).sin() * 0.5 + 0.5).powf(4.0);
         if twinkle < 0.08 {
             continue;
         }
@@ -1164,7 +1165,7 @@ fn render_splash(frame: &mut Frame, area: Rect, app: &App) {
         .border_style(Style::default().fg(theme::mix(
             theme::GREEN,
             theme::CYAN,
-            0.4 + theme::pulse(app.session_start.elapsed().as_secs_f64(), 2.0) * 0.2,
+            0.4 + theme::pulse(app.anim_time(), 2.0) * 0.2,
         )))
         .style(Style::default().bg(theme::SURFACE));
     let inner = block.inner(panel);
@@ -1179,7 +1180,7 @@ fn render_splash(frame: &mut Frame, area: Rect, app: &App) {
             Constraint::Min(0),
         ])
         .split(inner);
-    let logo = Paragraph::new(creeper_lines(app.session_start.elapsed().as_secs_f64()))
+    let logo = Paragraph::new(creeper_lines(app.anim_time()))
         .alignment(Alignment::Center)
         .style(Style::default().bg(theme::SURFACE));
     frame.render_widget(logo, rows[0]);
@@ -1189,7 +1190,7 @@ fn render_splash(frame: &mut Frame, area: Rect, app: &App) {
             theme::GREEN,
             theme::CYAN,
             theme::SURFACE,
-            app.session_start.elapsed().as_secs_f64() * 1.3,
+            app.anim_time() * 1.3,
             true,
         )))
         .alignment(Alignment::Center)
@@ -1220,7 +1221,7 @@ fn render_splash(frame: &mut Frame, area: Rect, app: &App) {
         bar_width,
         theme::GREEN,
         theme::CYAN,
-        app.session_start.elapsed().as_secs_f64(),
+        app.anim_time(),
         theme::SURFACE,
     );
     let dots = ".".repeat((app.frame as usize / 8) % 4);
@@ -1292,11 +1293,11 @@ fn creeper_lines(t: f64) -> Vec<Line<'static>> {
 }
 
 fn render_too_small(frame: &mut Frame, area: Rect, app: &App) {
-    let t = app.session_start.elapsed().as_secs_f64();
+    let t = app.anim_time();
     let mut lines = vec![
         Line::from(""),
         Line::from(vec![Span::styled(
-            "mc-launcher",
+            "Hot-RS-Launcher",
             Style::default()
                 .fg(theme::GREEN)
                 .bg(theme::BG)
@@ -1349,6 +1350,7 @@ pub fn screen_color(screen: Screen) -> Color {
         Screen::Accounts => theme::GOLD,
         Screen::Settings => theme::BLUE,
         Screen::Logs => theme::PINK,
+        Screen::About => theme::LIME,
     }
 }
 
@@ -1490,6 +1492,25 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| render(frame, app)).unwrap();
         dump_terminal(&terminal)
+    }
+
+    #[test]
+    fn about_screen_shows_author_and_both_repositories() {
+        let (mut app, _dir) = app_with_data();
+        app.splash_until = None;
+        app.screen = Screen::About;
+        let text = render_at(&mut app, 110, 34);
+        assert!(text.contains("Hotsteel2901"), "{text}");
+        assert!(
+            text.contains("github.com/Hotsteel2901/mc_rs_cli_launcher"),
+            "{text}"
+        );
+        assert!(
+            text.contains("codeberg.org/hotsteel/mc_rs_cli_launcher"),
+            "{text}"
+        );
+        assert!(text.contains("GPL-3.0-only"), "{text}");
+        assert!(text.contains("2.4.0"), "{text}");
     }
 
     #[test]
@@ -1696,12 +1717,18 @@ mod tests {
             (Screen::Accounts, "账号详情"),
             (Screen::Logs, "活动"),
             (Screen::Settings, "偏好设置"),
+            (Screen::About, "关于"),
         ] {
             app.screen = screen;
             app.modal = None;
             let text = compact(&render_at(&mut app, 110, 34));
             assert!(text.contains(expected), "missing {expected}: {text}");
         }
+
+        app.screen = Screen::About;
+        let text = compact(&render_at(&mut app, 110, 34));
+        assert!(text.contains("两个托管平台上的仓库同名"), "{text}");
+        assert!(text.contains("与Mojang/Microsoft无隶属关系"), "{text}");
 
         app.screen = Screen::Mods;
         app.search.open = true;
@@ -1958,6 +1985,8 @@ mod tests {
         println!("=== SETTINGS ===\n{}", render_at(&mut app, 110, 34));
         app.screen = Screen::Logs;
         println!("=== LOGS ===\n{}", render_at(&mut app, 110, 34));
+        app.screen = Screen::About;
+        println!("=== ABOUT ===\n{}", render_at(&mut app, 110, 34));
         app.screen = Screen::Mods;
         app.search.open = true;
         app.search.focus = SearchFocus::Input;
