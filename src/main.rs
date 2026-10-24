@@ -1431,7 +1431,10 @@ fn cmd_list_java(game_dir: &std::path::Path, mc_version: Option<String>) {
         crate::info!("Install Mojang's runtime: hot-rs-launcher install-java --java-major 21");
         return;
     }
-    let recommended = java::best_java(&infos, required).map(|info| info.path.clone());
+    // Only mark a recommendation when a version requirement is known; without
+    // one the newest runtime is not necessarily the right choice.
+    let recommended = required
+        .and_then(|major| java::best_java(&infos, Some(major)).map(|info| info.path.clone()));
     for info in &infos {
         let marker = if Some(&info.path) == recommended.as_ref() {
             " *"
