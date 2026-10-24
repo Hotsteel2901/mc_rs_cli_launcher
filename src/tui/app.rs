@@ -25,12 +25,15 @@ use crate::tui::jobs::{self, BackendEvent, EventSender, LogLevel};
 use crate::tui::theme;
 
 pub const SPLASH_MS: u64 = 1100;
+/// Number of rows rendered by the Settings screen.
+pub const SETTINGS_ROWS: usize = 11;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screen {
     Dashboard,
     Versions,
     Mods,
+    Content,
     Accounts,
     Settings,
     Logs,
@@ -38,10 +41,11 @@ pub enum Screen {
 }
 
 impl Screen {
-    pub const ALL: [Screen; 7] = [
+    pub const ALL: [Screen; 8] = [
         Screen::Dashboard,
         Screen::Versions,
         Screen::Mods,
+        Screen::Content,
         Screen::Accounts,
         Screen::Settings,
         Screen::Logs,
@@ -53,6 +57,7 @@ impl Screen {
             Screen::Dashboard => lang.pick("Dashboard", "概览"),
             Screen::Versions => lang.pick("Versions", "版本"),
             Screen::Mods => lang.pick("Mods", "模组"),
+            Screen::Content => lang.pick("Content", "内容"),
             Screen::Accounts => lang.pick("Accounts", "账号"),
             Screen::Settings => lang.pick("Settings", "设置"),
             Screen::Logs => lang.pick("Activity", "活动"),
@@ -65,6 +70,7 @@ impl Screen {
             Screen::Dashboard => "◈",
             Screen::Versions => "▤",
             Screen::Mods => "❖",
+            Screen::Content => "▣",
             Screen::Accounts => "◉",
             Screen::Settings => "✧",
             Screen::Logs => "≡",
@@ -82,6 +88,32 @@ impl Screen {
 
     fn previous(self) -> Self {
         Self::ALL[(self.index() + Self::ALL.len() - 1) % Self::ALL.len()]
+    }
+}
+
+/// Which local content list the Content screen is showing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContentKind {
+    Saves,
+    ResourcePacks,
+}
+
+impl ContentKind {
+    pub const ALL: [ContentKind; 2] = [Self::Saves, Self::ResourcePacks];
+
+    pub fn title(self, lang: Lang) -> &'static str {
+        match self {
+            Self::Saves => lang.pick("Saves", "存档"),
+            Self::ResourcePacks => lang.pick("Resource packs", "资源包"),
+        }
+    }
+
+    pub fn index(self) -> usize {
+        Self::ALL.iter().position(|kind| *kind == self).unwrap_or(0)
+    }
+
+    pub fn next(self) -> Self {
+        Self::ALL[(self.index() + 1) % Self::ALL.len()]
     }
 }
 
@@ -161,6 +193,8 @@ pub enum InputAction {
     RenameVersion,
     CopyVersion,
     ExportModpack,
+    ImportSave,
+    ImportResourcePack,
 }
 
 #[derive(Clone, Debug)]
@@ -175,6 +209,8 @@ pub enum ConfirmAction {
     ResetSettings,
     RemoveVersion(String),
     ApplyUpdates,
+    DeleteSave(String),
+    DeleteResourcePack(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -211,6 +247,8 @@ pub enum MouseAction {
     SettingsIncrease(usize),
     VersionsRow(usize),
     ModsRow(usize),
+    ContentTab(usize),
+    ContentRow(usize),
     AccountsRow(usize),
     SearchInput,
     SearchRow(usize),
@@ -579,6 +617,13 @@ pub struct App {
     pub mods: Vec<ModRow>,
     pub mod_sel: usize,
     pub mod_state: ListState,
+    pub content_kind: ContentKind,
+    pub saves: Vec<crate::content::SaveEntry>,
+    pub save_sel: usize,
+    pub save_state: ListState,
+    pub resourcepacks: Vec<crate::content::ResourcePackEntry>,
+    pub pack_sel: usize,
+    pub pack_state: ListState,
     pub accounts: Vec<AccountRow>,
     pub account_sel: usize,
     pub account_state: ListState,
@@ -669,6 +714,13 @@ impl App {
             mods: Vec::new(),
             mod_sel: 0,
             mod_state: ListState::default(),
+            content_kind: ContentKind::Saves,
+            saves: Vec::new(),
+            save_sel: 0,
+            save_state: ListState::default(),
+            resourcepacks: Vec::new(),
+            pack_sel: 0,
+            pack_state: ListState::default(),
             accounts: Vec::new(),
             account_sel: 0,
             account_state: ListState::default(),
@@ -893,6 +945,7 @@ impl App {
         }
 
         self.refresh_mods();
+        self.refresh_content();
         self.refresh_accounts();
         if let Some(remote) = self.remote_versions.as_mut() {
             let installed: HashSet<&str> = self.versions.iter().map(|v| v.id.as_str()).collect();
@@ -948,6 +1001,41 @@ impl App {
         if !self.mods.is_empty() {
             self.mod_state.select(Some(self.mod_sel));
         }
+    }
+
+    /// Reload worlds and resource packs for the active instance.
+    pub fn refresh_content(&mut self) {
+        let manager = crate::content::ContentManager::new(&self.game_dir);
+        let version = self.settings.active_version.clone();
+        self.saves = version
+            .as_deref()
+            .map(|id| manager.list_saves(id))
+            .unwrap_or_default();
+        self.resourcepacks = version
+            .as_deref()
+            .map(|id| manager.list_resourcepacks(id))
+            .unwrap_or_default();
+
+        self.save_sel = self.save_sel.min(self.saves.len().saturating_sub(1));
+        self.save_state = ListState::default();
+        if !self.saves.is_empty() {
+            self.save_state.select(Some(self.save_sel));
+        }
+        self.pack_sel = self
+            .pack_sel
+            .min(self.resourcepacks.len().saturating_sub(1));
+        self.pack_state = ListState::default();
+        if !self.resourcepacks.is_empty() {
+            self.pack_state.select(Some(self.pack_sel));
+        }
+    }
+
+    pub fn selected_save(&self) -> Option<&crate::content::SaveEntry> {
+        self.saves.get(self.save_sel)
+    }
+
+    pub fn selected_resourcepack(&self) -> Option<&crate::content::ResourcePackEntry> {
+        self.resourcepacks.get(self.pack_sel)
     }
 
     pub fn refresh_accounts(&mut self) {
@@ -1518,18 +1606,22 @@ impl App {
                 AppCommand::None
             }
             KeyCode::Char('4') => {
-                self.screen = Screen::Accounts;
+                self.screen = Screen::Content;
                 AppCommand::None
             }
             KeyCode::Char('5') => {
-                self.screen = Screen::Settings;
+                self.screen = Screen::Accounts;
                 AppCommand::None
             }
             KeyCode::Char('6') => {
-                self.screen = Screen::Logs;
+                self.screen = Screen::Settings;
                 AppCommand::None
             }
             KeyCode::Char('7') => {
+                self.screen = Screen::Logs;
+                AppCommand::None
+            }
+            KeyCode::Char('8') => {
                 self.screen = Screen::About;
                 AppCommand::None
             }
@@ -1545,6 +1637,7 @@ impl App {
                 Screen::Dashboard => self.handle_dashboard_key(key),
                 Screen::Versions => self.handle_versions_key(key),
                 Screen::Mods => self.handle_mods_key(key),
+                Screen::Content => self.handle_content_key(key),
                 Screen::Accounts => self.handle_accounts_key(key),
                 Screen::Settings => self.handle_settings_key(key),
                 Screen::Logs => self.handle_logs_key(key),
@@ -1601,19 +1694,19 @@ impl App {
             MouseAction::StatMods => self.screen = Screen::Mods,
             MouseAction::StatSettings => self.screen = Screen::Settings,
             MouseAction::SettingsRow(index) => {
-                self.settings_cursor = index.min(8);
+                self.settings_cursor = index.min(SETTINGS_ROWS - 1);
             }
             MouseAction::SettingsDecrease(index) => {
-                self.settings_cursor = index.min(8);
-                if matches!(index, 0 | 6 | 7 | 8) {
+                self.settings_cursor = index.min(SETTINGS_ROWS - 1);
+                if matches!(index, 0 | 6 | 7 | 9 | 10) {
                     self.settings_activate();
                 } else {
                     self.settings_adjust(-1);
                 }
             }
             MouseAction::SettingsIncrease(index) => {
-                self.settings_cursor = index.min(8);
-                if matches!(index, 0 | 6 | 7 | 8) {
+                self.settings_cursor = index.min(SETTINGS_ROWS - 1);
+                if matches!(index, 0 | 6 | 7 | 9 | 10) {
                     self.settings_activate();
                 } else {
                     self.settings_adjust(1);
@@ -1641,6 +1734,36 @@ impl App {
                     self.mod_state.select(Some(index));
                 }
             }
+            MouseAction::ContentTab(index) => {
+                if let Some(kind) = ContentKind::ALL.get(index) {
+                    self.content_kind = *kind;
+                }
+            }
+            MouseAction::ContentRow(index) => match self.content_kind {
+                ContentKind::Saves => {
+                    if index >= self.saves.len() {
+                        return AppCommand::None;
+                    }
+                    if double_click && self.save_sel == index {
+                        let folder = self.saves[index].folder.clone();
+                        self.begin_backup_save(folder);
+                    } else {
+                        self.save_sel = index;
+                        self.save_state.select(Some(index));
+                    }
+                }
+                ContentKind::ResourcePacks => {
+                    if index >= self.resourcepacks.len() {
+                        return AppCommand::None;
+                    }
+                    if double_click && self.pack_sel == index {
+                        self.toggle_selected_resourcepack();
+                    } else {
+                        self.pack_sel = index;
+                        self.pack_state.select(Some(index));
+                    }
+                }
+            },
             MouseAction::AccountsRow(index) => {
                 if index >= self.accounts.len() {
                     return AppCommand::None;
@@ -1774,6 +1897,7 @@ impl App {
                     self.mod_state.select(Some(self.mod_sel));
                 }
             }
+            Screen::Content => self.move_content_selection(if up { -1 } else { 1 }),
             Screen::Accounts => {
                 if !self.accounts.is_empty() {
                     self.account_sel = if up {
@@ -1788,7 +1912,7 @@ impl App {
                 self.settings_cursor = if up {
                     self.settings_cursor.saturating_sub(1)
                 } else {
-                    (self.settings_cursor + 1).min(8)
+                    (self.settings_cursor + 1).min(SETTINGS_ROWS - 1)
                 };
             }
             Screen::Logs => {
@@ -2025,6 +2149,364 @@ impl App {
         }
     }
 
+    fn handle_content_key(&mut self, key: KeyEvent) -> AppCommand {
+        match key.code {
+            KeyCode::Up => self.move_content_selection(-1),
+            KeyCode::Down => self.move_content_selection(1),
+            KeyCode::PageUp => self.move_content_selection(-8),
+            KeyCode::PageDown => self.move_content_selection(8),
+            KeyCode::Char('t') | KeyCode::Char('[') | KeyCode::Char(']') => {
+                self.content_kind = self.content_kind.next();
+            }
+            KeyCode::Char(' ') | KeyCode::Enter => match self.content_kind {
+                ContentKind::Saves => self.backup_selected_save(),
+                ContentKind::ResourcePacks => self.toggle_selected_resourcepack(),
+            },
+            KeyCode::Char('b') => {
+                if self.content_kind == ContentKind::Saves {
+                    self.backup_selected_save();
+                }
+            }
+            KeyCode::Char('i') => self.open_content_import(),
+            KeyCode::Char('x') => self.confirm_delete_content(),
+            KeyCode::Char('o') => self.open_content_dir(),
+            KeyCode::Char('v') => self.open_installed_version_picker(),
+            KeyCode::Char('r') => {
+                self.refresh_content();
+                self.log_and_toast(
+                    LogLevel::Info,
+                    self.lang().pick("Content list refreshed", "内容列表已刷新"),
+                );
+            }
+            _ => {}
+        }
+        AppCommand::None
+    }
+
+    fn move_content_selection(&mut self, delta: isize) {
+        match self.content_kind {
+            ContentKind::Saves => {
+                if !self.saves.is_empty() {
+                    self.save_sel = (self.save_sel as isize + delta)
+                        .clamp(0, self.saves.len() as isize - 1)
+                        as usize;
+                    self.save_state.select(Some(self.save_sel));
+                }
+            }
+            ContentKind::ResourcePacks => {
+                if !self.resourcepacks.is_empty() {
+                    self.pack_sel = (self.pack_sel as isize + delta)
+                        .clamp(0, self.resourcepacks.len() as isize - 1)
+                        as usize;
+                    self.pack_state.select(Some(self.pack_sel));
+                }
+            }
+        }
+    }
+
+    fn backup_selected_save(&mut self) {
+        let Some(save) = self.selected_save() else {
+            self.toast(
+                LogLevel::Warn,
+                self.lang().pick("No world selected", "未选择存档"),
+            );
+            return;
+        };
+        let folder = save.folder.clone();
+        self.begin_backup_save(folder);
+    }
+
+    fn toggle_selected_resourcepack(&mut self) {
+        let lang = self.lang();
+        let Some(pack) = self.selected_resourcepack() else {
+            self.toast(
+                LogLevel::Warn,
+                lang.pick("No resource pack selected", "未选择资源包"),
+            );
+            return;
+        };
+        let file = pack.file.clone();
+        let enabled = !pack.enabled;
+        let Some(version) = self.settings.active_version.clone() else {
+            self.toast(
+                LogLevel::Warn,
+                lang.pick(
+                    "Select an installed version first",
+                    "请先选择一个已安装版本",
+                ),
+            );
+            return;
+        };
+        let manager = crate::content::ContentManager::new(&self.game_dir);
+        match manager.set_resourcepack_enabled(&version, &file, enabled) {
+            Ok(_) => {
+                self.refresh_content();
+                if let Some(index) = self.resourcepacks.iter().position(|pack| pack.file == file) {
+                    self.pack_sel = index;
+                    self.pack_state.select(Some(index));
+                }
+                let message = if lang == Lang::Chinese {
+                    format!("{}资源包 {file}", if enabled { "已启用" } else { "已禁用" })
+                } else {
+                    format!(
+                        "{} resource pack {file}",
+                        if enabled { "Enabled" } else { "Disabled" }
+                    )
+                };
+                self.log_and_toast(LogLevel::Ok, message);
+            }
+            Err(error) => self.log_and_toast(LogLevel::Error, error.to_string()),
+        }
+    }
+
+    fn open_content_import(&mut self) {
+        let lang = self.lang();
+        let (title, hint, action) = match self.content_kind {
+            ContentKind::Saves => (
+                lang.pick("Import world", "导入存档").to_string(),
+                lang.pick(
+                    "Path to a world .zip (launcher backup or vanilla world)",
+                    "存档 .zip 的路径（启动器备份或原版世界压缩包）",
+                )
+                .to_string(),
+                InputAction::ImportSave,
+            ),
+            ContentKind::ResourcePacks => (
+                lang.pick("Import resource pack", "导入资源包").to_string(),
+                lang.pick(
+                    "Path to a pack .zip or folder",
+                    "资源包 .zip 或文件夹的路径",
+                )
+                .to_string(),
+                InputAction::ImportResourcePack,
+            ),
+        };
+        self.modal = Some(Modal::Input {
+            title,
+            hint,
+            input: TextInput::new("").with_max_chars(1024),
+            action,
+            error: None,
+        });
+    }
+
+    fn confirm_delete_content(&mut self) {
+        let lang = self.lang();
+        match self.content_kind {
+            ContentKind::Saves => {
+                let Some(save) = self.selected_save() else {
+                    self.toast(LogLevel::Warn, lang.pick("No world selected", "未选择存档"));
+                    return;
+                };
+                let folder = save.folder.clone();
+                let name = save.name.clone();
+                self.modal = Some(Modal::Confirm {
+                    title: if lang == Lang::Chinese {
+                        format!("删除存档 {name}")
+                    } else {
+                        format!("Delete world {name}")
+                    },
+                    lines: vec![
+                        if lang == Lang::Chinese {
+                            format!("永久删除文件夹 {folder} 及其中的区域文件？")
+                        } else {
+                            format!("Permanently delete folder {folder} and its region files?")
+                        },
+                        lang.pick(
+                            "Back it up first with b; this cannot be undone.",
+                            "建议先按 b 备份；此操作无法撤销。",
+                        )
+                        .into(),
+                    ],
+                    action: ConfirmAction::DeleteSave(folder),
+                    danger: true,
+                });
+            }
+            ContentKind::ResourcePacks => {
+                let Some(pack) = self.selected_resourcepack() else {
+                    self.toast(
+                        LogLevel::Warn,
+                        lang.pick("No resource pack selected", "未选择资源包"),
+                    );
+                    return;
+                };
+                let file = pack.file.clone();
+                self.modal = Some(Modal::Confirm {
+                    title: lang.pick("Delete resource pack", "删除资源包").into(),
+                    lines: vec![
+                        if lang == Lang::Chinese {
+                            format!("从实例中删除 {file}？")
+                        } else {
+                            format!("Remove {file} from this instance?")
+                        },
+                        lang.pick(
+                            "It is also removed from options.txt.",
+                            "它也会从 options.txt 中移除。",
+                        )
+                        .into(),
+                    ],
+                    action: ConfirmAction::DeleteResourcePack(file),
+                    danger: true,
+                });
+            }
+        }
+    }
+
+    fn open_content_dir(&mut self) {
+        let lang = self.lang();
+        let Some(version) = self.settings.active_version.clone() else {
+            self.toast(
+                LogLevel::Warn,
+                lang.pick(
+                    "Select an installed version first",
+                    "请先选择一个已安装版本",
+                ),
+            );
+            return;
+        };
+        let manager = crate::content::ContentManager::new(&self.game_dir);
+        let dir = match self.content_kind {
+            ContentKind::Saves => manager.saves_dir(&version),
+            ContentKind::ResourcePacks => manager.resourcepacks_dir(&version),
+        };
+        match dir {
+            Ok(path) => {
+                let _ = std::fs::create_dir_all(&path);
+                open_path(&path);
+                self.toast(LogLevel::Info, path.display().to_string());
+            }
+            Err(error) => self.log_and_toast(LogLevel::Error, error.to_string()),
+        }
+    }
+
+    fn begin_backup_save(&mut self, folder: String) {
+        let lang = self.lang();
+        if self.job.as_ref().is_some_and(JobView::is_running) {
+            self.toast(
+                LogLevel::Warn,
+                lang.pick("Wait for the current task to finish", "请等待当前任务完成"),
+            );
+            return;
+        }
+        let Some(version) = self.settings.active_version.clone() else {
+            self.toast(
+                LogLevel::Warn,
+                lang.pick(
+                    "Select an installed version first",
+                    "请先选择一个已安装版本",
+                ),
+            );
+            return;
+        };
+        let id = self.next_job_id;
+        self.next_job_id += 1;
+        self.pending_activate = None;
+        self.pending_loader = None;
+        self.pending_update_apply = false;
+        self.show_job_panel = true;
+        self.job = Some(JobView::new(
+            id,
+            if lang == Lang::Chinese {
+                format!("备份存档 {folder}")
+            } else {
+                format!("Backup world {folder}")
+            },
+        ));
+        progress::reset_cancel();
+        progress::set_job(id);
+        jobs::start_backup_save(self.tx.clone(), id, self.game_dir.clone(), version, folder);
+    }
+
+    fn begin_import_save(&mut self, archive: std::path::PathBuf) {
+        let lang = self.lang();
+        if self.job.as_ref().is_some_and(JobView::is_running) {
+            self.toast(
+                LogLevel::Warn,
+                lang.pick("Wait for the current task to finish", "请等待当前任务完成"),
+            );
+            return;
+        }
+        let Some(version) = self.settings.active_version.clone() else {
+            self.toast(
+                LogLevel::Warn,
+                lang.pick(
+                    "Select an installed version first",
+                    "请先选择一个已安装版本",
+                ),
+            );
+            return;
+        };
+        let label = archive
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| "world.zip".into());
+        let id = self.next_job_id;
+        self.next_job_id += 1;
+        self.pending_activate = None;
+        self.pending_loader = None;
+        self.pending_update_apply = false;
+        self.show_job_panel = true;
+        self.job = Some(JobView::new(
+            id,
+            if lang == Lang::Chinese {
+                format!("导入存档 {label}")
+            } else {
+                format!("Import world {label}")
+            },
+        ));
+        progress::reset_cancel();
+        progress::set_job(id);
+        jobs::start_import_save(self.tx.clone(), id, self.game_dir.clone(), version, archive);
+    }
+
+    fn begin_import_resourcepack(&mut self, source: std::path::PathBuf) {
+        let lang = self.lang();
+        if self.job.as_ref().is_some_and(JobView::is_running) {
+            self.toast(
+                LogLevel::Warn,
+                lang.pick("Wait for the current task to finish", "请等待当前任务完成"),
+            );
+            return;
+        }
+        let Some(version) = self.settings.active_version.clone() else {
+            self.toast(
+                LogLevel::Warn,
+                lang.pick(
+                    "Select an installed version first",
+                    "请先选择一个已安装版本",
+                ),
+            );
+            return;
+        };
+        let label = source
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| "pack.zip".into());
+        let id = self.next_job_id;
+        self.next_job_id += 1;
+        self.pending_activate = None;
+        self.pending_loader = None;
+        self.pending_update_apply = false;
+        self.show_job_panel = true;
+        self.job = Some(JobView::new(
+            id,
+            if lang == Lang::Chinese {
+                format!("导入资源包 {label}")
+            } else {
+                format!("Import resource pack {label}")
+            },
+        ));
+        progress::reset_cancel();
+        progress::set_job(id);
+        jobs::start_import_resourcepack(
+            self.tx.clone(),
+            id,
+            self.game_dir.clone(),
+            version,
+            source,
+        );
+    }
+
     fn handle_accounts_key(&mut self, key: KeyEvent) -> AppCommand {
         match key.code {
             KeyCode::Up => {
@@ -2101,7 +2583,7 @@ impl App {
                 AppCommand::None
             }
             KeyCode::Down => {
-                self.settings_cursor = (self.settings_cursor + 1).min(8);
+                self.settings_cursor = (self.settings_cursor + 1).min(SETTINGS_ROWS - 1);
                 AppCommand::None
             }
             KeyCode::Left => {
@@ -2564,6 +3046,60 @@ impl App {
                 self.begin_apply_updates();
                 AppCommand::None
             }
+            ConfirmAction::DeleteSave(folder) => {
+                let lang = self.lang();
+                let Some(version) = self.settings.active_version.clone() else {
+                    return AppCommand::None;
+                };
+                match crate::content::ContentManager::new(&self.game_dir)
+                    .delete_save(&version, &folder)
+                {
+                    Ok(freed) => {
+                        self.refresh_content();
+                        let message = if lang == Lang::Chinese {
+                            format!("已删除存档 {folder}，释放 {}", theme::format_bytes(freed))
+                        } else {
+                            format!(
+                                "Deleted world {folder} ({} freed)",
+                                theme::format_bytes(freed)
+                            )
+                        };
+                        self.log_and_toast(LogLevel::Ok, message);
+                    }
+                    Err(error) => {
+                        let prefix = lang.pick("Delete failed", "删除失败");
+                        self.log_and_toast(LogLevel::Error, format!("{prefix}: {error}"));
+                    }
+                }
+                AppCommand::None
+            }
+            ConfirmAction::DeleteResourcePack(file) => {
+                let lang = self.lang();
+                let Some(version) = self.settings.active_version.clone() else {
+                    return AppCommand::None;
+                };
+                match crate::content::ContentManager::new(&self.game_dir)
+                    .delete_resourcepack(&version, &file)
+                {
+                    Ok(freed) => {
+                        self.refresh_content();
+                        let message = if lang == Lang::Chinese {
+                            format!("已删除资源包 {file}，释放 {}", theme::format_bytes(freed))
+                        } else {
+                            format!(
+                                "Deleted resource pack {file} ({} freed)",
+                                theme::format_bytes(freed)
+                            )
+                        };
+                        self.log_and_toast(LogLevel::Ok, message);
+                    }
+                    Err(error) => {
+                        let prefix = lang.pick("Delete failed", "删除失败");
+                        self.log_and_toast(LogLevel::Error, format!("{prefix}: {error}"));
+                    }
+                }
+                AppCommand::None
+            }
         }
     }
 
@@ -2679,6 +3215,46 @@ impl App {
                     )
                 };
                 self.log_and_toast(LogLevel::Ok, message);
+                Ok(())
+            }
+            InputAction::ImportSave => {
+                let lang = self.lang();
+                let raw = value.trim();
+                if raw.is_empty() {
+                    return Err(lang
+                        .pick("World archive path is empty", "存档压缩包路径为空")
+                        .to_string());
+                }
+                let path = crate::util::absolute_path(std::path::Path::new(raw))
+                    .map_err(|error| error.to_string())?;
+                if !path.is_file() {
+                    return Err(if lang == Lang::Chinese {
+                        format!("找不到存档压缩包：{}", path.display())
+                    } else {
+                        format!("World archive not found: {}", path.display())
+                    });
+                }
+                self.begin_import_save(path);
+                Ok(())
+            }
+            InputAction::ImportResourcePack => {
+                let lang = self.lang();
+                let raw = value.trim();
+                if raw.is_empty() {
+                    return Err(lang
+                        .pick("Resource pack path is empty", "资源包路径为空")
+                        .to_string());
+                }
+                let path = crate::util::absolute_path(std::path::Path::new(raw))
+                    .map_err(|error| error.to_string())?;
+                if !path.exists() {
+                    return Err(if lang == Lang::Chinese {
+                        format!("找不到资源包：{}", path.display())
+                    } else {
+                        format!("Resource pack not found: {}", path.display())
+                    });
+                }
+                self.begin_import_resourcepack(path);
                 Ok(())
             }
             InputAction::ExportModpack => {
@@ -4417,6 +4993,13 @@ fn open_url(url: &str) {
         .spawn(move || {
             let _ = webbrowser::open(&url);
         });
+}
+
+/// Open a local directory with the system file manager.
+fn open_path(path: &std::path::Path) {
+    if let Ok(url) = url::Url::from_file_path(path) {
+        open_url(url.as_str());
+    }
 }
 
 fn open_modrinth(slug: &str) {

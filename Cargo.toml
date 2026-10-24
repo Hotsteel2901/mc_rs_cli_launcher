@@ -1,6 +1,6 @@
 [package]
 name = "hot-rs-launcher"
-version = "2.5.0"
+version = "2.6.0"
 edition = "2021"
 description = "Hot-RS-Launcher — a Rust Minecraft CLI launcher with Microsoft/offline accounts, Fabric/Forge/NeoForge, Modrinth mods and an optional terminal UI"
 authors = ["Hotsteel2901"]
@@ -14,6 +14,7 @@ serde_json = "1"
 sha1 = "0.10"
 md-5 = "0.10"
 zip = "0.6"
+flate2 = "1"
 regex = "1"
 webbrowser = "0.8"
 url = "2"

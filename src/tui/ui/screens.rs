@@ -10,7 +10,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::tui::app::{App, MouseAction, Screen, SearchFocus};
+use crate::content::game_mode_label;
+use crate::tui::app::{App, ContentKind, MouseAction, Screen, SearchFocus};
 use crate::tui::i18n::Lang;
 use crate::tui::theme;
 use crate::tui::ui::log_line;
@@ -22,6 +23,7 @@ pub fn render_screen(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
         Screen::Dashboard => dashboard(frame, app, area, t),
         Screen::Versions => versions(frame, app, area, t),
         Screen::Mods => mods(frame, app, area, t),
+        Screen::Content => content(frame, app, area, t),
         Screen::Accounts => accounts(frame, app, area, t),
         Screen::Settings => settings(frame, app, area, t),
         Screen::Logs => logs(frame, app, area, t),
@@ -1232,6 +1234,601 @@ fn mod_detail(frame: &mut Frame, app: &App, area: Rect, t: f64) {
             .style(Style::default().bg(theme::SURFACE)),
         inner,
     );
+}
+
+// ── content (saves / resource packs) ─────────────────────────────
+
+fn content(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(4)])
+        .split(area);
+    render_content_tabs(frame, app, rows[0], t);
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(46),
+            Constraint::Length(1),
+            Constraint::Percentage(54),
+        ])
+        .split(rows[1]);
+    content_list(frame, app, columns[0], t);
+    content_detail(frame, app, columns[2], t);
+}
+
+fn render_content_tabs(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
+    let lang = app.lang();
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)])
+        .split(area);
+    for (index, kind) in ContentKind::ALL.iter().enumerate() {
+        let active = *kind == app.content_kind;
+        let color = theme::ORANGE;
+        let bg = if active {
+            theme::mix(theme::SURFACE, color, 0.18 + theme::pulse(t, 1.6) * 0.05)
+        } else {
+            theme::SURFACE
+        };
+        let count = match kind {
+            ContentKind::Saves => app.saves.len(),
+            ContentKind::ResourcePacks => app.resourcepacks.len(),
+        };
+        let marker = if active { "▸" } else { " " };
+        let label = format!(" {marker} {} · {count} ", kind.title(lang));
+        let style = if active {
+            Style::default()
+                .fg(theme::mix(color, theme::TEXT, 0.25))
+                .bg(bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme::TEXT_FAINT).bg(bg)
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![Span::styled(label, style)]))
+                .style(Style::default().bg(bg)),
+            chunks[index],
+        );
+        register_mouse(chunks[index], MouseAction::ContentTab(index));
+    }
+}
+
+fn content_list(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
+    let lang = app.lang();
+    let version = app
+        .settings
+        .active_version
+        .clone()
+        .unwrap_or_else(|| lang.pick("no version", "无版本").into());
+    let title = match app.content_kind {
+        ContentKind::Saves => format!(
+            "{} · {} · {}",
+            lang.pick("SAVES", "存档"),
+            app.saves.len(),
+            version
+        ),
+        ContentKind::ResourcePacks => {
+            let enabled = app.resourcepacks.iter().filter(|pack| pack.enabled).count();
+            format!(
+                "{} · {} / {} · {}",
+                lang.pick("RESOURCE PACKS", "资源包"),
+                enabled,
+                app.resourcepacks.len(),
+                version
+            )
+        }
+    };
+    let block = panel(title, theme::ORANGE, true, t, theme::SURFACE);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if app.settings.active_version.is_none() {
+        empty_state(
+            frame,
+            area,
+            "▣",
+            lang.pick("No active version", "没有活跃版本"),
+            &[lang.pick(
+                "Select an installed instance first.",
+                "请先选择一个已安装实例。",
+            )],
+            theme::ORANGE,
+            t,
+        );
+        return;
+    }
+    match app.content_kind {
+        ContentKind::Saves => {
+            if app.saves.is_empty() {
+                empty_state(
+                    frame,
+                    area,
+                    "▣",
+                    lang.pick("No worlds yet", "还没有存档"),
+                    &[
+                        lang.pick(
+                            "Start the game once, or press i to import a world zip.",
+                            "先启动一次游戏，或按 i 导入存档压缩包。",
+                        ),
+                        lang.pick(
+                            "Backups are stored under backups/saves.",
+                            "备份会保存在 backups/saves。",
+                        ),
+                    ],
+                    theme::ORANGE,
+                    t,
+                );
+                return;
+            }
+            let items: Vec<ListItem> = app
+                .saves
+                .iter()
+                .enumerate()
+                .map(|(index, row)| {
+                    let selection = index == app.save_sel;
+                    let bg = if selection {
+                        theme::mix(theme::SURFACE, theme::ORANGE, 0.16)
+                    } else {
+                        theme::SURFACE
+                    };
+                    let icon = if row.has_icon { "◆" } else { "◇" };
+                    let icon_color = if row.hardcore {
+                        theme::RED
+                    } else {
+                        theme::ORANGE
+                    };
+                    let right = format!("{:>9}", short_bytes(row.size));
+                    let width = inner.width.saturating_sub(14) as usize;
+                    let line = Line::from(vec![
+                        Span::styled(format!(" {icon} "), Style::default().fg(icon_color).bg(bg)),
+                        Span::styled(
+                            format!(
+                                "{:<width$}",
+                                theme::truncate_chars(&row.name, width),
+                                width = width
+                            ),
+                            Style::default()
+                                .fg(if selection {
+                                    theme::TEXT
+                                } else {
+                                    theme::TEXT_DIM
+                                })
+                                .bg(bg)
+                                .add_modifier(if selection {
+                                    Modifier::BOLD
+                                } else {
+                                    Modifier::empty()
+                                }),
+                        ),
+                        Span::styled(
+                            right,
+                            Style::default()
+                                .fg(if selection {
+                                    theme::ORANGE
+                                } else {
+                                    theme::TEXT_FAINT
+                                })
+                                .bg(bg),
+                        ),
+                    ]);
+                    ListItem::new(line)
+                })
+                .collect();
+            render_content_rows(
+                frame,
+                app,
+                inner,
+                items,
+                app.saves.len(),
+                app.save_sel,
+                theme::ORANGE,
+            );
+        }
+        ContentKind::ResourcePacks => {
+            if app.resourcepacks.is_empty() {
+                empty_state(
+                    frame,
+                    area,
+                    "▣",
+                    lang.pick("No resource packs", "没有资源包"),
+                    &[
+                        lang.pick(
+                            "Press i to import a .zip or folder.",
+                            "按 i 导入 .zip 或文件夹。",
+                        ),
+                        lang.pick(
+                            "Enabled packs are stored in options.txt.",
+                            "启用的资源包会写入 options.txt。",
+                        ),
+                    ],
+                    theme::ORANGE,
+                    t,
+                );
+                return;
+            }
+            let items: Vec<ListItem> = app
+                .resourcepacks
+                .iter()
+                .enumerate()
+                .map(|(index, row)| {
+                    let selection = index == app.pack_sel;
+                    let bg = if selection {
+                        theme::mix(theme::SURFACE, theme::ORANGE, 0.16)
+                    } else {
+                        theme::SURFACE
+                    };
+                    let (status, color) = if !row.valid {
+                        ("✕", theme::RED)
+                    } else if row.enabled {
+                        ("●", theme::GREEN)
+                    } else {
+                        ("○", theme::TEXT_FAINT)
+                    };
+                    let right = format!("{:>9}", short_bytes(row.size));
+                    let width = inner.width.saturating_sub(14) as usize;
+                    let line = Line::from(vec![
+                        Span::styled(format!(" {status} "), Style::default().fg(color).bg(bg)),
+                        Span::styled(
+                            format!(
+                                "{:<width$}",
+                                theme::truncate_chars(&row.file, width),
+                                width = width
+                            ),
+                            Style::default()
+                                .fg(if selection {
+                                    theme::TEXT
+                                } else {
+                                    theme::TEXT_DIM
+                                })
+                                .bg(bg)
+                                .add_modifier(if selection {
+                                    Modifier::BOLD
+                                } else {
+                                    Modifier::empty()
+                                }),
+                        ),
+                        Span::styled(
+                            right,
+                            Style::default()
+                                .fg(if selection {
+                                    theme::ORANGE
+                                } else {
+                                    theme::TEXT_FAINT
+                                })
+                                .bg(bg),
+                        ),
+                    ]);
+                    ListItem::new(line)
+                })
+                .collect();
+            render_content_rows(
+                frame,
+                app,
+                inner,
+                items,
+                app.resourcepacks.len(),
+                app.pack_sel,
+                theme::ORANGE,
+            );
+        }
+    }
+}
+
+fn render_content_rows(
+    frame: &mut Frame,
+    _app: &mut App,
+    inner: Rect,
+    items: Vec<ListItem>,
+    len: usize,
+    selected: usize,
+    color: Color,
+) {
+    let list = List::new(items)
+        .highlight_symbol("▌")
+        .highlight_style(Style::default().bg(theme::mix(theme::SURFACE, color, 0.16)))
+        .style(Style::default().bg(theme::SURFACE));
+    let visible = inner.height as usize;
+    let offset = window_offset(selected, len, visible);
+    let mut state = ListState::default()
+        .with_offset(offset)
+        .with_selected(Some(selected));
+    frame.render_stateful_widget(list, inner, &mut state);
+    let count = visible.min(len.saturating_sub(offset));
+    for slot in 0..count {
+        register_mouse(
+            Rect {
+                x: inner.x,
+                y: inner.y + slot as u16,
+                width: inner.width,
+                height: 1,
+            },
+            MouseAction::ContentRow(offset + slot),
+        );
+    }
+}
+
+fn content_detail(frame: &mut Frame, app: &App, area: Rect, t: f64) {
+    let lang = app.lang();
+    let block = panel(
+        lang.pick("CONTENT DETAIL", "内容详情"),
+        theme::ORANGE,
+        true,
+        t,
+        theme::SURFACE,
+    );
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    match app.content_kind {
+        ContentKind::Saves => {
+            let Some(save) = app.selected_save() else {
+                empty_state(
+                    frame,
+                    area,
+                    "▣",
+                    lang.pick("Select a world", "选择一个存档"),
+                    &[lang.pick(
+                        "Back up or delete the selected world here.",
+                        "在这里备份或删除所选存档。",
+                    )],
+                    theme::ORANGE,
+                    t,
+                );
+                return;
+            };
+            let version = save
+                .version
+                .clone()
+                .unwrap_or_else(|| lang.pick("unknown", "未知").to_string());
+            let mode = save
+                .game_type
+                .map(|code| game_mode_label(code, lang == Lang::Chinese))
+                .unwrap_or_else(|| lang.pick("unknown", "未知"));
+            let age = save
+                .modified
+                .and_then(|time| std::time::SystemTime::now().duration_since(time).ok());
+            let path = app
+                .settings
+                .active_version
+                .as_deref()
+                .map(|id| {
+                    app.game_dir
+                        .join("versions")
+                        .join(id)
+                        .join("saves")
+                        .join(&save.folder)
+                })
+                .unwrap_or_default();
+            let mut lines = vec![
+                Line::from(vec![
+                    Span::styled(
+                        theme::truncate_chars(&save.name, inner.width.saturating_sub(2) as usize),
+                        Style::default()
+                            .fg(theme::mix(theme::ORANGE, theme::TEXT, 0.2))
+                            .bg(theme::SURFACE)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled("  ", Style::default().bg(theme::SURFACE)),
+                    if save.hardcore {
+                        badge(lang.pick("HARDCORE", "极限"), theme::RED, theme::SURFACE)
+                    } else {
+                        Span::styled("", Style::default().bg(theme::SURFACE))
+                    },
+                ]),
+                Line::from(""),
+                kv(
+                    lang.pick("Folder", "文件夹"),
+                    save.folder.clone(),
+                    theme::TEXT_DIM,
+                ),
+                kv(lang.pick("Version", "版本"), version, theme::CYAN),
+                kv(
+                    lang.pick("Game mode", "游戏模式"),
+                    mode.to_string(),
+                    theme::PURPLE,
+                ),
+                kv(
+                    lang.pick("Size", "大小"),
+                    theme::format_bytes(save.size),
+                    theme::GOLD,
+                ),
+                kv(
+                    lang.pick("Modified", "修改时间"),
+                    age_label(lang, age),
+                    theme::TEXT_DIM,
+                ),
+                kv(
+                    lang.pick("Icon", "图标"),
+                    if save.has_icon {
+                        lang.pick("present", "有").to_string()
+                    } else {
+                        lang.pick("missing", "无").to_string()
+                    },
+                    theme::TEXT_FAINT,
+                ),
+                kv(
+                    lang.pick("Path", "路径"),
+                    theme::truncate_chars(
+                        &path.display().to_string(),
+                        inner.width.saturating_sub(14) as usize,
+                    ),
+                    theme::TEXT_FAINT,
+                ),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("◈ ", Style::default().fg(theme::ORANGE).bg(theme::SURFACE)),
+                    Span::styled(
+                        lang.pick(
+                            "Backups include region files, level.dat and icons.",
+                            "备份包含区域文件、level.dat 和图标。",
+                        ),
+                        Style::default().fg(theme::TEXT_FAINT).bg(theme::SURFACE),
+                    ),
+                ]),
+                Line::from(""),
+            ];
+            push_content_hints(
+                &mut lines,
+                lang,
+                &[
+                    ("b", lang.pick(" backup world", " 备份存档"), theme::GREEN),
+                    ("i", lang.pick(" import world", " 导入存档"), theme::CYAN),
+                    ("x", lang.pick(" delete world", " 删除存档"), theme::RED),
+                    ("o", lang.pick(" open folder", " 打开目录"), theme::TEXT_DIM),
+                ],
+            );
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: true })
+                    .style(Style::default().bg(theme::SURFACE)),
+                inner,
+            );
+        }
+        ContentKind::ResourcePacks => {
+            let Some(pack) = app.selected_resourcepack() else {
+                empty_state(
+                    frame,
+                    area,
+                    "▣",
+                    lang.pick("Select a resource pack", "选择一个资源包"),
+                    &[lang.pick(
+                        "Toggle, import or delete packs here.",
+                        "在这里启停、导入或删除资源包。",
+                    )],
+                    theme::ORANGE,
+                    t,
+                );
+                return;
+            };
+            let state = if !pack.valid {
+                badge(lang.pick("INVALID", "无效"), theme::RED, theme::SURFACE)
+            } else if pack.enabled {
+                badge(lang.pick("ENABLED", "已启用"), theme::GREEN, theme::SURFACE)
+            } else {
+                badge(lang.pick("DISABLED", "已禁用"), theme::GOLD, theme::SURFACE)
+            };
+            let format = pack
+                .pack_format
+                .map(|value| format!("{value}"))
+                .unwrap_or_else(|| "-".into());
+            let path = app
+                .settings
+                .active_version
+                .as_deref()
+                .map(|id| {
+                    app.game_dir
+                        .join("versions")
+                        .join(id)
+                        .join("resourcepacks")
+                        .join(&pack.file)
+                })
+                .unwrap_or_default();
+            let mut lines = vec![
+                Line::from(vec![
+                    Span::styled(
+                        theme::truncate_chars(&pack.file, inner.width.saturating_sub(2) as usize),
+                        Style::default()
+                            .fg(theme::mix(theme::ORANGE, theme::TEXT, 0.2))
+                            .bg(theme::SURFACE)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled("  ", Style::default().bg(theme::SURFACE)),
+                    state,
+                ]),
+                Line::from(""),
+                kv(lang.pick("Format", "格式"), format, theme::CYAN),
+                kv(
+                    lang.pick("Type", "类型"),
+                    if pack.is_dir {
+                        lang.pick("folder", "文件夹").to_string()
+                    } else {
+                        "zip".to_string()
+                    },
+                    theme::PURPLE,
+                ),
+                kv(
+                    lang.pick("Size", "大小"),
+                    theme::format_bytes(pack.size),
+                    theme::GOLD,
+                ),
+                kv(
+                    lang.pick("Compatible", "兼容"),
+                    if pack.incompatible {
+                        lang.pick("marked incompatible", "标记为不兼容").to_string()
+                    } else {
+                        lang.pick("yes", "是").to_string()
+                    },
+                    if pack.incompatible {
+                        theme::RED
+                    } else {
+                        theme::GREEN
+                    },
+                ),
+                kv(
+                    lang.pick("Path", "路径"),
+                    theme::truncate_chars(
+                        &path.display().to_string(),
+                        inner.width.saturating_sub(14) as usize,
+                    ),
+                    theme::TEXT_FAINT,
+                ),
+                Line::from(""),
+            ];
+            if !pack.description.is_empty() {
+                lines.push(Line::from(vec![Span::styled(
+                    theme::truncate_chars(
+                        &pack.description,
+                        inner.width.saturating_sub(2) as usize,
+                    ),
+                    Style::default().fg(theme::TEXT_DIM).bg(theme::SURFACE),
+                )]));
+                lines.push(Line::from(""));
+            }
+            lines.push(Line::from(vec![
+                Span::styled("◈ ", Style::default().fg(theme::ORANGE).bg(theme::SURFACE)),
+                Span::styled(
+                    lang.pick(
+                        "Enabling edits options.txt; packs load on the next launch.",
+                        "启用状态写入 options.txt，下次启动生效。",
+                    ),
+                    Style::default().fg(theme::TEXT_FAINT).bg(theme::SURFACE),
+                ),
+            ]));
+            lines.push(Line::from(""));
+            push_content_hints(
+                &mut lines,
+                lang,
+                &[
+                    ("space", lang.pick(" toggle", " 启停"), theme::GREEN),
+                    ("i", lang.pick(" import pack", " 导入资源包"), theme::CYAN),
+                    ("x", lang.pick(" delete pack", " 删除资源包"), theme::RED),
+                    ("o", lang.pick(" open folder", " 打开目录"), theme::TEXT_DIM),
+                ],
+            );
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: true })
+                    .style(Style::default().bg(theme::SURFACE)),
+                inner,
+            );
+        }
+    }
+}
+
+fn push_content_hints(lines: &mut Vec<Line<'static>>, _lang: Lang, hints: &[(&str, &str, Color)]) {
+    for (key, text, color) in hints {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(" [{key}] "),
+                Style::default()
+                    .fg(theme::BG)
+                    .bg(*color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                (*text).to_string(),
+                Style::default().fg(theme::TEXT_DIM).bg(theme::SURFACE),
+            ),
+        ]));
+    }
 }
 
 // ── accounts ──────────────────────────────────────────────────────

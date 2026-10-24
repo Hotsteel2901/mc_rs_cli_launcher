@@ -147,7 +147,7 @@ fn help_lines(app: &App) -> Vec<Line<'static>> {
         Line::from(""),
         section(tr("GLOBAL", "全局")),
         Line::from(vec![key("tab / shift+tab"), desc(tr("switch screen", "切换界面"))]),
-        Line::from(vec![key("1 … 6"), desc(tr("jump to a screen directly", "直接跳转到界面"))]),
+        Line::from(vec![key("1 … 8"), desc(tr("jump to a screen directly", "直接跳转到界面"))]),
         Line::from(vec![key("?"), desc(tr("this help", "显示此帮助"))]),
         Line::from(vec![key("j"), desc(tr("show or hide the job panel", "显示/隐藏任务面板"))]),
         Line::from(vec![key("c"), desc(tr("cancel a running task", "取消正在运行的任务"))]),
@@ -214,6 +214,37 @@ fn help_lines(app: &App) -> Vec<Line<'static>> {
             key("U"),
             desc(tr("download and apply all updates", "下载并应用全部更新")),
         ]),
+        Line::from(vec![
+            key("U"),
+            desc(tr("download and apply all updates", "下载并应用全部更新")),
+        ]),
+        Line::from(""),
+        section(tr("CONTENT", "内容")),
+        Line::from(vec![
+            key("t"),
+            desc(tr("switch between saves and resource packs", "在存档和资源包之间切换")),
+        ]),
+        Line::from(vec![
+            key("space"),
+            desc(tr("enable / disable the selected resource pack", "启用/禁用所选资源包")),
+        ]),
+        Line::from(vec![
+            key("b"),
+            desc(tr("back up the selected world", "备份所选存档")),
+        ]),
+        Line::from(vec![
+            key("i"),
+            desc(tr("import a world zip or resource pack", "导入存档压缩包或资源包")),
+        ]),
+        Line::from(vec![
+            key("x"),
+            desc(tr("delete the selected world or pack", "删除所选存档或资源包")),
+        ]),
+        Line::from(vec![
+            key("o"),
+            desc(tr("open the saves / resourcepacks folder", "打开存档/资源包目录")),
+        ]),
+        Line::from(vec![key("v"), desc(tr("switch the active instance", "切换活跃实例"))]),
         Line::from(""),
         section(tr("ACCOUNTS", "账号")),
         Line::from(vec![key("a"), desc(tr("add an offline profile", "添加离线档案"))]),

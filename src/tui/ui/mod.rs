@@ -14,7 +14,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Sparkline};
 use ratatui::Frame;
 
-use crate::tui::app::{App, JobView, LogLine, MouseAction, Screen, SearchFocus};
+use crate::tui::app::{App, ContentKind, JobView, LogLine, MouseAction, Screen, SearchFocus};
 use crate::tui::i18n;
 use crate::tui::jobs::LogLevel;
 use crate::tui::theme;
@@ -669,6 +669,24 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect, t: f64) {
                 ("s", lang.pick("search", "搜索")),
                 ("v", lang.pick("version", "版本")),
             ],
+            Screen::Content => match app.content_kind {
+                ContentKind::Saves => vec![
+                    ("t", lang.pick("tab", "切换")),
+                    ("enter", lang.pick("backup", "备份")),
+                    ("i", lang.pick("import", "导入")),
+                    ("x", lang.pick("delete", "删除")),
+                    ("o", lang.pick("folder", "目录")),
+                    ("v", lang.pick("version", "版本")),
+                ],
+                ContentKind::ResourcePacks => vec![
+                    ("t", lang.pick("tab", "切换")),
+                    ("space", lang.pick("toggle", "启停")),
+                    ("i", lang.pick("import", "导入")),
+                    ("x", lang.pick("delete", "删除")),
+                    ("o", lang.pick("folder", "目录")),
+                    ("v", lang.pick("version", "版本")),
+                ],
+            },
             Screen::Accounts => vec![
                 ("↑↓", lang.pick("select", "选择")),
                 ("a", lang.pick("offline", "离线")),
@@ -1347,6 +1365,7 @@ pub fn screen_color(screen: Screen) -> Color {
         Screen::Dashboard => theme::GREEN,
         Screen::Versions => theme::CYAN,
         Screen::Mods => theme::PURPLE,
+        Screen::Content => theme::ORANGE,
         Screen::Accounts => theme::GOLD,
         Screen::Settings => theme::BLUE,
         Screen::Logs => theme::PINK,
@@ -1418,8 +1437,8 @@ mod tests {
     use super::*;
     use crate::progress::TransferEvent;
     use crate::tui::app::{
-        Bootstrap, ConfirmAction, JobView, Modal, MouseAction, PickerItem, PickerKind, PickerState,
-        Screen, SearchFocus,
+        Bootstrap, ConfirmAction, ContentKind, JobView, Modal, MouseAction, PickerItem, PickerKind,
+        PickerState, Screen, SearchFocus,
     };
     use crate::tui::input::TextInput;
     use crate::tui::jobs::LogLevel;
@@ -1443,6 +1462,34 @@ mod tests {
         std::fs::write(version.join("1.21.4.jar"), vec![0u8; 2048]).unwrap();
         std::fs::write(version.join("mods/sodium.jar"), vec![0u8; 1536]).unwrap();
         std::fs::write(version.join("mods/lithium.jar.disabled"), vec![0u8; 700]).unwrap();
+        std::fs::create_dir_all(version.join("saves").join("World One")).unwrap();
+        std::fs::write(
+            version.join("saves").join("World One").join("level.dat"),
+            b"fixture",
+        )
+        .unwrap();
+        std::fs::write(
+            version.join("saves").join("World One").join("icon.png"),
+            b"png",
+        )
+        .unwrap();
+        std::fs::create_dir_all(version.join("resourcepacks")).unwrap();
+        {
+            use std::io::Write;
+            let file =
+                std::fs::File::create(version.join("resourcepacks").join("Pack.zip")).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            zip.start_file("pack.mcmeta", zip::write::FileOptions::default())
+                .unwrap();
+            zip.write_all(br#"{"pack":{"pack_format":15,"description":"Test pack"}}"#)
+                .unwrap();
+            zip.finish().unwrap();
+        }
+        std::fs::write(
+            version.join("options.txt"),
+            b"renderDistance:12\nresourcePacks:[\"file/Pack.zip\",\"vanilla\"]\n",
+        )
+        .unwrap();
         let fabric_profile = game
             .join("libraries")
             .join("fabric")
@@ -1579,6 +1626,102 @@ mod tests {
             text.contains("press u") || text.contains("可更新"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn settings_cursor_reaches_every_row() {
+        let (mut app, _dir) = app_with_data();
+        app.splash_until = None;
+        app.screen = Screen::Settings;
+        app.settings_cursor = 0;
+        for _ in 0..20 {
+            let _ = app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        assert_eq!(app.settings_cursor, crate::tui::app::SETTINGS_ROWS - 1);
+    }
+
+    #[test]
+    fn content_screen_toggles_packs_and_deletes_worlds() {
+        let (mut app, _dir) = app_with_data();
+        app.splash_until = None;
+        app.screen = Screen::Content;
+        assert_eq!(app.content_kind, ContentKind::Saves);
+        assert_eq!(app.saves.len(), 1);
+        assert_eq!(app.saves[0].folder, "World One");
+        assert!(app.saves[0].has_icon);
+
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
+        assert_eq!(app.content_kind, ContentKind::ResourcePacks);
+        assert_eq!(app.resourcepacks.len(), 1);
+        assert!(app.resourcepacks[0].enabled);
+
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert!(!app.resourcepacks[0].enabled);
+        let options =
+            std::fs::read_to_string(app.game_dir.join("versions/1.21.4/options.txt")).unwrap();
+        assert!(!options.contains("file/Pack.zip"));
+        assert!(options.contains("renderDistance:12"));
+
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert!(app.resourcepacks[0].enabled);
+
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
+        assert_eq!(app.content_kind, ContentKind::Saves);
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(matches!(
+            app.modal,
+            Some(Modal::Confirm {
+                action: ConfirmAction::DeleteSave(_),
+                ..
+            })
+        ));
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        assert!(app.saves.is_empty());
+        assert!(!app
+            .game_dir
+            .join("versions/1.21.4/saves/World One")
+            .exists());
+    }
+
+    #[test]
+    fn renders_content_screen_with_saves_and_packs() {
+        let (mut app, _dir) = app_with_data();
+        app.splash_until = None;
+        app.screen = Screen::Content;
+        let text = render_at(&mut app, 110, 34);
+        assert!(text.contains("World One"), "{text}");
+        assert!(text.contains("SAVES") || text.contains("存档"), "{text}");
+
+        app.content_kind = ContentKind::ResourcePacks;
+        let text = render_at(&mut app, 110, 34);
+        assert!(text.contains("Pack.zip"), "{text}");
+        assert!(
+            text.contains("ENABLED") || text.contains("已启用"),
+            "{text}"
+        );
+        let text = render_at(&mut app, 80, 24);
+        assert!(text.contains("Pack.zip"), "{text}");
+        let text = render_at(&mut app, 60, 20);
+        assert!(!text.trim().is_empty(), "{text}");
+    }
+
+    #[test]
+    fn mouse_switches_content_tabs() {
+        let (mut app, _dir) = app_with_data();
+        app.splash_until = None;
+        app.screen = Screen::Content;
+        let (x, y, action) = find_action(&mut app, 110, 34, |action| {
+            matches!(action, MouseAction::ContentTab(1))
+        })
+        .expect("content tab hitbox");
+        let _ = app.handle_mouse(left_click(x, y), Some(action));
+        assert_eq!(app.content_kind, ContentKind::ResourcePacks);
+        let (x, y, action) = find_action(&mut app, 110, 34, |action| {
+            matches!(action, MouseAction::ContentTab(0))
+        })
+        .expect("content tab hitbox");
+        let _ = app.handle_mouse(left_click(x, y), Some(action));
+        assert_eq!(app.content_kind, ContentKind::Saves);
     }
 
     #[test]
@@ -1764,6 +1907,7 @@ mod tests {
         for (screen, expected) in [
             (Screen::Versions, "版本详情"),
             (Screen::Mods, "模组详情"),
+            (Screen::Content, "内容详情"),
             (Screen::Accounts, "账号详情"),
             (Screen::Logs, "活动"),
             (Screen::Settings, "偏好设置"),

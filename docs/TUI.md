@@ -13,7 +13,7 @@ hot-rs-launcher --dir ./minecraft tui
 ## 界面
 
 ```text
- ◆ Hot-RS-Launcher  v2.5.0                 ◆ cli-first                     ● Steve  ·  1.21.4 · Fabric  · auto
+ ◆ Hot-RS-Launcher  v2.6.0                 ◆ cli-first                     ● Steve  ·  1.21.4 · Fabric  · auto
 ──────────────────────────────────────────────────────────────────────────────────────────────────────────────
 ╭────────────────────╮ ╭ INSTANCE ───────────────────────────────────────────────────────────────────────────╮
 │      ▄██████▄      │ │M I N E C R A F T                                 ╭─────────────────────────────────╮│
@@ -22,14 +22,14 @@ hot-rs-launcher --dir ./minecraft tui
 │     ████  ████     │ │◆ 1.21.4  ·  Fabric  ·  1 mod                     ╰─────────────────────────────────╯│
 │     ▀▀██████▀▀     │ │◉ Steve  ·  OFFLINE                                                                  │
 │   Hot-RS-Launcher  │ │                                                  RAM  4 GB                          │
-│       v2.5.0       │ │                                                  LOAD Fabric                        │
+│       v2.6.0       │ │                                                  LOAD Fabric                        │
 │                    │ │                                                  PATH ~/minecraft                   │
 │▌ ◈ Dashboard    1  │ ╰─────────────────────────────────────────────────────────────────────────────────────╯
 │                    │                                                                                        
 │  ▤ Versions        │ ╭ VERSIONS ──────────╮╭ MODS ACTIVE ───────╮╭ MEMORY ───────────╮╭ JAVA ──────────────╮
 │                    │ │1                   ││1                   ││4 GB               ││detecting           │
 │  ❖ Mods            │ │1.21.4              ││1 disabled          ││16 threads         ││scanning system…    │
-│                    │ │                    ││                    ││                   ││                    │
+│  ▣ Content         │ │                    ││                    ││                   ││                    │
 │  ◉ Accounts        │ ╰────────────────────╯╰────────────────────╯╰───────────────────╯╰────────────────────╯
 │                    │                                                                                        
 │  ✧ Settings        │ ╭ RECENT ACTIVITY  ·  l for the full log ─────────────────────────────────────────────╮
@@ -58,6 +58,7 @@ hot-rs-launcher --dir ./minecraft tui
 | Dashboard | 活跃实例、账号、加载器、RAM、Java、版本/模组统计；一键启动；空目录引导 |
 | Versions | 本地版本列表、详情（基准版本、Java 要求、磁盘占用）、设为活跃、启动、下载远程版本、选择/安装 Fabric/Forge/NeoForge、重命名/复制/删除实例、导出 .mrpack |
 | Mods | 已安装模组列表、启用/禁用、卸载、按当前版本与加载器搜索 Modrinth、安装、检查/应用 Modrinth 更新（`↑` 标记） |
+| Content | 存档列表（名称、版本、模式、大小、图标）与备份/导入/删除；资源包列表（启用状态、pack_format、描述）与启停/导入/删除；`t` 切换两类，`o` 打开目录 |
 | Accounts | 账号列表、默认账号、离线账号、Microsoft 浏览器/设备码登录、登出 |
 | Settings | 界面语言（English / 中文）、内存、窗口尺寸、下载线程、官方/BMCLAPI 源、Java 运行时选择（带推荐项）、JVM 参数、GC 预设、减少动效、开场动画 |
 | Activity | 完整活动日志、实时追踪、暂停跟随、清空 |
@@ -71,7 +72,7 @@ hot-rs-launcher --dir ./minecraft tui
 | 按键 | 行为 |
 | --- | --- |
 | `Tab` / `Shift+Tab` | 下一个 / 上一个界面 |
-| `1` … `7` | 直接切换界面 |
+| `1` … `8` | 直接切换界面 |
 | `↑` `↓` | 移动选择 |
 | `Enter` | 执行当前界面的主要动作 |
 | `Esc` | 返回 Dashboard；关闭弹窗；关闭已完成的任务面板 |
@@ -123,6 +124,20 @@ hot-rs-launcher --dir ./minecraft tui
 | `v` | 切换活跃 Minecraft 版本 |
 | `u` | 检查 Modrinth 更新（后台任务） |
 | `U` | 应用全部可用更新（确认后下载并替换） |
+| `r` | 刷新 |
+
+### Content
+
+| 按键 | 行为 |
+| --- | --- |
+| `t` / `[` / `]` | 在存档和资源包之间切换 |
+| `↑` `↓` / `PgUp` `PgDn` | 移动选择 |
+| `space` / `Enter` | 资源包：启用 / 禁用；存档：备份 |
+| `b` | 备份所选存档 |
+| `i` | 导入存档或资源包（输入路径） |
+| `x` | 删除所选内容（确认） |
+| `o` | 打开存档 / 资源包目录 |
+| `v` | 切换活跃实例 |
 | `r` | 刷新 |
 
 ### Accounts
@@ -225,15 +240,18 @@ Java 行会列出 `JAVA_HOME`、`PATH`、系统扫描和 `<game_dir>/java` 下�
 - Versions 页的 `d` 会在确认后删除实例目录（含存档和模组），`R`/`c` 会改写版本 JSON 与加载器 profile 的键；需要保留存档时请用 CLI `remove-version --keep-saves`。
 - 导出整合包会对已安装 JAR 做 SHA-1 查询；Modrinth 不可达时全部模组会作为 overrides 打包，并在活动日志中提示。导入会安全解压 overrides（拒绝路径穿越），模组文件按 SHA-1 校验后原子写入。
 - 启动失败后 TUI 会读取最新崩溃报告/日志，把匹配到的诊断写入活动日志；它只做启发式分析，不修改任何文件。
+- Content 页的删除操作都有确认框；CLI 对应命令要求 `--yes`。备份/导入在后台任务中运行，可被 `c` 取消。
+- 导入存档会拒绝没有 `level.dat` 的压缩包，重名时自动追加后缀；资源包导入会校验根目录 `pack.mcmeta`。`options.txt` 只重写 `resourcePacks` / `incompatibleResourcePacks` 行，其他设置保持不变。
+- 资源包启停写入 `options.txt`，在下次启动游戏时生效；TUI 不会重命名资源包文件。
 
 ## 实现与验证
 
 - `src/tui/app.rs`：状态、输入分发、本地数据刷新、后台事件归并。
-- `src/tui/jobs.rs`：线程/子进程任务、进度协议、取消与进程树清理，以及更新检查/批量更新/整合包导出任务。
+- `src/tui/jobs.rs`：线程/子进程任务、进度协议、取消与进程树清理，以及更新检查/批量更新/整合包导出、存档备份/导入与资源包导入任务。
 - `src/tui/ui/`：布局、各界面、弹窗、Toast、粒子、Splash。
 - `src/tui/theme.rs`：真彩色主题、渐变、缓动、进度条。
 - `src/progress.rs`：CLI 与 TUI 共用的下载进度总线，以及跨进程的 `@@MC_TUI@@` JSON 进度行。
-- `src/instance.rs` / `src/update.rs` / `src/diagnose.rs`：实例生命周期与 .mrpack、Modrinth 更新、崩溃诊断；TUI 只负责展示与触发。
+- `src/instance.rs` / `src/update.rs` / `src/diagnose.rs` / `src/content.rs`：实例生命周期与 .mrpack、Modrinth 更新、崩溃诊断、存档与资源包；TUI 只负责展示与触发。
 - 自动测试使用 `TestBackend` 在 120×40、100×32、80×24、60×20、52×16 和过小尺寸下渲染全部界面、弹窗、任务状态、搜索、Splash、Toast 与粒子；同时验证中英文切换、鼠标热区点击/滚轮和弹窗按钮，以及 Java 选择器、JVM/GC 设置、更新标记和实例重命名/删除。
 - 开发验证中使用伪终端冒烟测试检查进入/离开备用屏幕、括号粘贴与鼠标模式开关、按键退出和退出码；本轮还实际驱动了 Versions 重命名对话框和 Java 选择器。
 - `hot-rs-launcher tui` 在非 TTY 下会明确失败，不会阻塞 CI。

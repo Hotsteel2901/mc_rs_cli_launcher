@@ -288,6 +288,63 @@ pub fn start_export_modpack(
     });
 }
 
+pub fn start_backup_save(
+    tx: EventSender,
+    id: u64,
+    game_dir: std::path::PathBuf,
+    instance: String,
+    folder: String,
+) {
+    spawn_job(tx, id, format!("Backup world {folder}"), move |tx, id| {
+        progress::reset_cancel();
+        phase(tx, id, 1, 2, "Archive world files");
+        let manager = crate::content::ContentManager::new(&game_dir);
+        let path = manager
+            .backup_save(&instance, &folder, None)
+            .map_err(|error| error.to_string())?;
+        phase(tx, id, 2, 2, "Finish archive");
+        Ok(format!("World backup: {}", path.display()))
+    });
+}
+
+pub fn start_import_save(
+    tx: EventSender,
+    id: u64,
+    game_dir: std::path::PathBuf,
+    instance: String,
+    archive: std::path::PathBuf,
+) {
+    spawn_job(tx, id, "Import world".to_string(), move |tx, id| {
+        progress::reset_cancel();
+        phase(tx, id, 1, 2, "Read world archive");
+        let manager = crate::content::ContentManager::new(&game_dir);
+        let folder = manager
+            .import_save(&instance, &archive, None)
+            .map_err(|error| error.to_string())?;
+        phase(tx, id, 2, 2, "Extract world files");
+        Ok(format!("Imported world as '{folder}'"))
+    });
+}
+
+pub fn start_import_resourcepack(
+    tx: EventSender,
+    id: u64,
+    game_dir: std::path::PathBuf,
+    instance: String,
+    source: std::path::PathBuf,
+) {
+    spawn_job(tx, id, "Import resource pack".to_string(), move |tx, id| {
+        progress::reset_cancel();
+        phase(tx, id, 1, 2, "Validate pack metadata");
+        let manager = crate::content::ContentManager::new(&game_dir);
+        let name = manager
+            .import_resourcepack(&instance, &source)
+            .map_err(|error| error.to_string())?;
+        phase(tx, id, 2, 2, "Copy pack files");
+        Ok(format!("Imported resource pack '{name}'"))
+    });
+}
+
 pub fn start_java_probe(tx: EventSender) {
     let failure_tx = tx.clone();
     let spawned = std::thread::Builder::new()

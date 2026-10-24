@@ -5,6 +5,7 @@
 
 mod account;
 mod auth;
+mod content;
 mod diagnose;
 mod error;
 mod fabric;
@@ -32,6 +33,7 @@ use clap::{arg, value_parser, ArgAction, Command};
 use rayon::prelude::*;
 
 use crate::auth::MicrosoftAuth;
+use crate::content::{game_mode_label, ContentManager};
 use crate::fabric::FabricManager;
 use crate::forge::ForgeManager;
 use crate::http::SourceMode;
@@ -225,6 +227,12 @@ fn build_cli() -> Command {
              hot-rs-launcher backup -v 1.21.4 --with-mods\n  \
              hot-rs-launcher diagnose -v 1.21.4          # Analyze the latest crash\n  \
              hot-rs-launcher play --dry-run --gc g1       # Print the command only\n  \
+             hot-rs-launcher list-saves -v 1.21.4         # List worlds\n  \
+             hot-rs-launcher backup-save 'My World' -v 1.21.4\n  \
+             hot-rs-launcher import-save ./MyWorld.zip -v 1.21.4\n  \
+             hot-rs-launcher list-resourcepacks -v 1.21.4\n  \
+             hot-rs-launcher enable-resourcepack MyPack.zip -v 1.21.4\n  \
+             hot-rs-launcher import-resourcepack ./MyPack.zip -v 1.21.4\n  \
              hot-rs-launcher tui                         # Full-screen terminal UI",
         )
         // Global options
@@ -308,6 +316,13 @@ fn build_cli() -> Command {
             arg!(--"install-loader" "Install the modpack loader after importing")
                 .action(ArgAction::SetTrue),
         )
+        .arg(
+            arg!(--json "Print machine-readable JSON for list commands").action(ArgAction::SetTrue),
+        )
+        .arg(
+            arg!(--yes "Confirm destructive content operations (delete-save, delete-resourcepack)")
+                .action(ArgAction::SetTrue),
+        )
         // Positional: action
         .arg(
             arg!([ACTION] "Action to perform")
@@ -346,6 +361,15 @@ fn build_cli() -> Command {
                     "backup",
                     "list-backups",
                     "restore-backup",
+                    "list-saves",
+                    "backup-save",
+                    "import-save",
+                    "delete-save",
+                    "list-resourcepacks",
+                    "enable-resourcepack",
+                    "disable-resourcepack",
+                    "import-resourcepack",
+                    "delete-resourcepack",
                     "tui",
                     "ui",
                 ]),
@@ -451,6 +475,8 @@ fn main() {
     let keep_mods = matches.get_flag("keep-mods");
     let with_mods = matches.get_flag("with-mods");
     let install_loader = matches.get_flag("install-loader");
+    let json_output = matches.get_flag("json");
+    let assume_yes = matches.get_flag("yes");
 
     // Resolve source mode: manual > auto-detect
     let manual_mode = if official_flag && bmcl_flag {
@@ -608,6 +634,84 @@ fn main() {
                 std::path::Path::new(&archive),
                 mc_version.as_deref(),
             );
+        }
+        "list-saves" => cmd_list_saves(&game_dir, mc_version.clone(), json_output),
+        "backup-save" => {
+            let folder = query.clone().unwrap_or_else(|| {
+                crate::die!(
+                    "Provide the world folder to back up.",
+                    "Example: hot-rs-launcher backup-save 'My World' -v 1.21.4"
+                )
+            });
+            cmd_backup_save(&game_dir, mc_version.clone(), &folder, output.clone());
+        }
+        "import-save" => {
+            let archive = query.clone().unwrap_or_else(|| {
+                crate::die!(
+                    "Provide the world archive to import.",
+                    "Example: hot-rs-launcher import-save ./MyWorld.zip -v 1.21.4"
+                )
+            });
+            cmd_import_save(
+                &game_dir,
+                mc_version.clone(),
+                std::path::Path::new(&archive),
+                new_name.as_deref(),
+            );
+        }
+        "delete-save" => {
+            let folder = query.clone().unwrap_or_else(|| {
+                crate::die!(
+                    "Provide the world folder to delete.",
+                    "Example: hot-rs-launcher delete-save 'My World' -v 1.21.4 --yes"
+                )
+            });
+            if !assume_yes {
+                crate::die!(
+                    "Refusing to delete a world without --yes.",
+                    "Re-run with --yes after checking the folder name."
+                );
+            }
+            cmd_delete_save(&game_dir, mc_version.clone(), &folder);
+        }
+        "list-resourcepacks" => cmd_list_resourcepacks(&game_dir, mc_version.clone(), json_output),
+        "enable-resourcepack" | "disable-resourcepack" => {
+            let file = query.clone().unwrap_or_else(|| {
+                crate::die!(
+                    "Provide the resource pack file name.",
+                    "Example: hot-rs-launcher enable-resourcepack MyPack.zip -v 1.21.4"
+                )
+            });
+            cmd_set_resourcepack(
+                &game_dir,
+                mc_version.clone(),
+                &file,
+                action == "enable-resourcepack",
+            );
+        }
+        "import-resourcepack" => {
+            let source = query.clone().unwrap_or_else(|| {
+                crate::die!(
+                    "Provide the resource pack zip or folder to import.",
+                    "Example: hot-rs-launcher import-resourcepack ./MyPack.zip -v 1.21.4"
+                )
+            });
+            cmd_import_resourcepack(&game_dir, mc_version.clone(), std::path::Path::new(&source));
+        }
+        "delete-resourcepack" => {
+            let file = query.clone().unwrap_or_else(|| {
+                crate::die!(
+                    "Provide the resource pack file name to delete.",
+                    "Example: hot-rs-launcher delete-resourcepack MyPack.zip -v 1.21.4 --yes"
+                )
+            });
+            if !assume_yes {
+                crate::die!(
+                    "Refusing to delete a resource pack without --yes.",
+                    "Re-run with --yes after checking the file name."
+                );
+            }
+            cmd_delete_resourcepack(&game_dir, mc_version.clone(), &file);
         }
         "play" => {
             let options = crate::launcher::LaunchOptions {
@@ -1360,6 +1464,260 @@ fn cmd_download(launcher: &mut MinecraftLauncher, mc_version: Option<&str>, no_a
         });
 }
 
+fn content_age(modified: Option<SystemTime>) -> String {
+    modified
+        .and_then(|time| SystemTime::now().duration_since(time).ok())
+        .map(crate::tui::theme::format_duration)
+        .unwrap_or_else(|| "-".into())
+}
+
+fn cmd_list_saves(game_dir: &std::path::Path, mc_version: Option<String>, json: bool) {
+    let instance = resolve_mc_version_quiet(mc_version, game_dir, json);
+    let saves = ContentManager::new(game_dir).list_saves(&instance);
+    if json {
+        let value = serde_json::json!({
+            "instance": instance,
+            "saves": saves.iter().map(|save| serde_json::json!({
+                "folder": save.folder,
+                "name": save.name,
+                "version": save.version,
+                "game_type": save.game_type,
+                "game_mode": save.game_type.map(|code| game_mode_label(code, false)),
+                "hardcore": save.hardcore,
+                "size": save.size,
+                "modified": save.modified_unix(),
+                "has_icon": save.has_icon,
+            })).collect::<Vec<_>>(),
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&value).unwrap_or_default()
+        );
+        return;
+    }
+    crate::log::header(&format!("Saves · {}", instance));
+    if saves.is_empty() {
+        crate::warn_msg!("No worlds found for '{}'.", instance);
+        crate::info!(
+            "Worlds live in versions/{}/saves/. Start the game once to create one.",
+            instance
+        );
+        return;
+    }
+    for save in &saves {
+        let label = if save.folder != save.name {
+            format!("{} ({})", save.name, save.folder)
+        } else {
+            save.name.clone()
+        };
+        let mode = save
+            .game_type
+            .map(|code| game_mode_label(code, false))
+            .unwrap_or("unknown");
+        let version = save.version.as_deref().unwrap_or("-");
+        let hardcore = if save.hardcore { "  [hardcore]" } else { "" };
+        println!(
+            "  {:<40} {:<10} {:<10} {:>9}  {}{}",
+            crate::tui::theme::truncate_chars(&label, 40),
+            version,
+            mode,
+            crate::tui::theme::format_bytes(save.size),
+            content_age(save.modified),
+            hardcore
+        );
+    }
+    crate::info!("{} world(s).", saves.len());
+    crate::info!(
+        "Back up with: hot-rs-launcher backup-save '<folder>' -v {}",
+        instance
+    );
+}
+
+fn cmd_backup_save(
+    game_dir: &std::path::Path,
+    mc_version: Option<String>,
+    folder: &str,
+    output: Option<PathBuf>,
+) {
+    let instance = resolve_mc_version(mc_version, game_dir);
+    crate::log::header(&format!("Backup world · {}", instance));
+    let manager = ContentManager::new(game_dir);
+    let path = manager
+        .backup_save(&instance, folder, output.as_deref())
+        .unwrap_or_else(|error| crate::die!(format!("Backup failed: {error}")));
+    let size = path.metadata().map(|meta| meta.len()).unwrap_or(0);
+    crate::success!(
+        "World backup: {} ({})",
+        path.display(),
+        crate::tui::theme::format_bytes(size)
+    );
+    crate::info!(
+        "Import with: hot-rs-launcher import-save '{}' -v {}",
+        path.display(),
+        instance
+    );
+}
+
+fn cmd_import_save(
+    game_dir: &std::path::Path,
+    mc_version: Option<String>,
+    archive: &std::path::Path,
+    name: Option<&str>,
+) {
+    let instance = resolve_mc_version(mc_version, game_dir);
+    crate::log::header(&format!("Import world · {}", instance));
+    crate::info!("Archive: {}", archive.display());
+    let manager = ContentManager::new(game_dir);
+    let folder = manager
+        .import_save(&instance, archive, name)
+        .unwrap_or_else(|error| crate::die!(format!("Import failed: {error}")));
+    crate::success!("Imported world as '{}'.", folder);
+    crate::info!(
+        "Back it up again with: hot-rs-launcher backup-save '{}' -v {}",
+        folder,
+        instance
+    );
+}
+
+fn cmd_delete_save(game_dir: &std::path::Path, mc_version: Option<String>, folder: &str) {
+    let instance = resolve_mc_version(mc_version, game_dir);
+    crate::log::header(&format!("Delete world · {}", instance));
+    let manager = ContentManager::new(game_dir);
+    let freed = manager
+        .delete_save(&instance, folder)
+        .unwrap_or_else(|error| crate::die!(format!("Delete failed: {error}")));
+    crate::success!(
+        "Deleted world '{}' ({} freed).",
+        folder,
+        crate::tui::theme::format_bytes(freed)
+    );
+}
+
+fn cmd_list_resourcepacks(game_dir: &std::path::Path, mc_version: Option<String>, json: bool) {
+    let instance = resolve_mc_version_quiet(mc_version, game_dir, json);
+    let packs = ContentManager::new(game_dir).list_resourcepacks(&instance);
+    if json {
+        let value = serde_json::json!({
+            "instance": instance,
+            "resourcepacks": packs.iter().map(|pack| serde_json::json!({
+                "file": pack.file,
+                "enabled": pack.enabled,
+                "incompatible": pack.incompatible,
+                "is_dir": pack.is_dir,
+                "size": pack.size,
+                "pack_format": pack.pack_format,
+                "description": pack.description,
+                "valid": pack.valid,
+            })).collect::<Vec<_>>(),
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&value).unwrap_or_default()
+        );
+        return;
+    }
+    crate::log::header(&format!("Resource packs · {}", instance));
+    if packs.is_empty() {
+        crate::warn_msg!("No resource packs installed for '{}'.", instance);
+        crate::info!(
+            "Import one with: hot-rs-launcher import-resourcepack ./pack.zip -v {}",
+            instance
+        );
+        return;
+    }
+    for pack in &packs {
+        let status = if !pack.valid {
+            "[bad]"
+        } else if pack.enabled {
+            "[on] "
+        } else {
+            "[off]"
+        };
+        let format = pack
+            .pack_format
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".into());
+        println!(
+            "  {} {:<36} {:>9}  fmt {:<4} {}",
+            status,
+            crate::tui::theme::truncate_chars(&pack.file, 36),
+            crate::tui::theme::format_bytes(pack.size),
+            format,
+            crate::tui::theme::one_line(&pack.description, 60)
+        );
+    }
+    crate::info!("{} pack(s).", packs.len());
+    crate::info!(
+        "Toggle with: hot-rs-launcher enable-resourcepack '<file>' -v {}",
+        instance
+    );
+}
+
+fn cmd_set_resourcepack(
+    game_dir: &std::path::Path,
+    mc_version: Option<String>,
+    file: &str,
+    enabled: bool,
+) {
+    let instance = resolve_mc_version(mc_version, game_dir);
+    let manager = ContentManager::new(game_dir);
+    let changed = manager
+        .set_resourcepack_enabled(&instance, file, enabled)
+        .unwrap_or_else(|error| crate::die!(format!("Resource pack update failed: {error}")));
+    let state = if enabled { "Enabled" } else { "Disabled" };
+    if changed {
+        crate::success!("{state} '{}' for {}.", file, instance);
+    } else {
+        crate::info!("'{}' is already disabled for {}.", file, instance);
+    }
+    if let Some(pack) = manager
+        .list_resourcepacks(&instance)
+        .into_iter()
+        .find(|pack| pack.file == file)
+    {
+        if !pack.valid {
+            crate::warn_msg!("This pack has no readable pack.mcmeta; Minecraft may ignore it.");
+        }
+        if pack.incompatible {
+            crate::info!("Minecraft marks this pack as incompatible with the current version.");
+        }
+    }
+}
+
+fn cmd_import_resourcepack(
+    game_dir: &std::path::Path,
+    mc_version: Option<String>,
+    source: &std::path::Path,
+) {
+    let instance = resolve_mc_version(mc_version, game_dir);
+    crate::log::header(&format!("Import resource pack · {}", instance));
+    crate::info!("Source: {}", source.display());
+    let manager = ContentManager::new(game_dir);
+    let name = manager
+        .import_resourcepack(&instance, source)
+        .unwrap_or_else(|error| crate::die!(format!("Import failed: {error}")));
+    crate::success!("Imported resource pack '{}'.", name);
+    crate::info!(
+        "Enable it with: hot-rs-launcher enable-resourcepack '{}' -v {}",
+        name,
+        instance
+    );
+}
+
+fn cmd_delete_resourcepack(game_dir: &std::path::Path, mc_version: Option<String>, file: &str) {
+    let instance = resolve_mc_version(mc_version, game_dir);
+    crate::log::header(&format!("Delete resource pack · {}", instance));
+    let manager = ContentManager::new(game_dir);
+    let freed = manager
+        .delete_resourcepack(&instance, file)
+        .unwrap_or_else(|error| crate::die!(format!("Delete failed: {error}")));
+    crate::success!(
+        "Deleted resource pack '{}' ({} freed).",
+        file,
+        crate::tui::theme::format_bytes(freed)
+    );
+}
+
 fn cmd_play(launcher: &mut MinecraftLauncher, options: crate::launcher::LaunchOptions) {
     let account = launcher.accounts.get_default();
     if account.is_none() && !options.dry_run {
@@ -1762,6 +2120,16 @@ fn cmd_restore_backup(game_dir: &std::path::Path, archive: &std::path::Path, tar
 // ─── helpers ───────────────────────────────────────────────────────
 
 fn resolve_mc_version(mc_version: Option<String>, game_dir: &std::path::Path) -> String {
+    resolve_mc_version_quiet(mc_version, game_dir, false)
+}
+
+/// Same lookup, optionally suppressing the auto-detect message so JSON output
+/// stays machine-readable.
+fn resolve_mc_version_quiet(
+    mc_version: Option<String>,
+    game_dir: &std::path::Path,
+    quiet: bool,
+) -> String {
     if let Some(v) = mc_version {
         return v;
     }
@@ -1772,7 +2140,9 @@ fn resolve_mc_version(mc_version: Option<String>, game_dir: &std::path::Path) ->
         );
     }
     let v = installed.last().unwrap().clone();
-    crate::info!("Auto-detected version: {}", v);
+    if !quiet {
+        crate::info!("Auto-detected version: {}", v);
+    }
     v
 }
 

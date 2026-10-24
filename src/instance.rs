@@ -1026,7 +1026,7 @@ fn patch_profile(path: &Path, from: &str, to: &str) -> AppResult<()> {
 }
 
 /// "20241024-193000" in UTC, without pulling in a date-time crate.
-fn utc_stamp(time: SystemTime) -> String {
+pub(crate) fn utc_stamp(time: SystemTime) -> String {
     let seconds = time
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs() as i64)

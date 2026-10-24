@@ -22,6 +22,7 @@ pub const GOLD: Color = Color::Rgb(245, 199, 91);
 pub const RED: Color = Color::Rgb(240, 110, 120);
 pub const PURPLE: Color = Color::Rgb(176, 145, 245);
 pub const PINK: Color = Color::Rgb(240, 150, 195);
+pub const ORANGE: Color = Color::Rgb(245, 156, 92);
 
 pub const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 

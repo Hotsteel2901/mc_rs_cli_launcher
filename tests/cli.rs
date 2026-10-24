@@ -307,6 +307,138 @@ fn diagnose_reports_crash_reports_offline() {
     assert!(String::from_utf8_lossy(&empty.stdout).contains("No crash report"));
 }
 
+#[test]
+fn content_commands_manage_worlds_and_resource_packs_offline() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = dir.path().join("game");
+    make_instance(&game, "1.21.4");
+    let version = game.join("versions/1.21.4");
+    let packs = version.join("resourcepacks");
+    std::fs::create_dir_all(&packs).unwrap();
+    {
+        use std::io::Write;
+        let file = std::fs::File::create(packs.join("Pack.zip")).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        zip.start_file("pack.mcmeta", zip::write::FileOptions::default())
+            .unwrap();
+        zip.write_all(b"{\"pack\":{\"pack_format\":15,\"description\":\"Test pack\"}}")
+            .unwrap();
+        zip.finish().unwrap();
+    }
+    std::fs::write(
+        version.join("options.txt"),
+        b"renderDistance:12\nresourcePacks:[\"file/Pack.zip\",\"vanilla\"]\n",
+    )
+    .unwrap();
+
+    let saves = run(&game, &["list-saves", "-v", "1.21.4", "--json"]);
+    assert!(
+        saves.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&saves.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&saves.stdout).unwrap();
+    assert_eq!(value["saves"][0]["folder"], "world");
+
+    // Without -v the auto-detected version must not pollute JSON output.
+    let auto = run(&game, &["list-saves", "--json"]);
+    assert!(auto.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&auto.stdout).unwrap();
+    assert_eq!(value["instance"], "1.21.4");
+    assert_eq!(value["saves"][0]["name"], "world");
+
+    let listed = run(&game, &["list-resourcepacks", "-v", "1.21.4", "--json"]);
+    assert!(listed.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(value["resourcepacks"][0]["file"], "Pack.zip");
+    assert_eq!(value["resourcepacks"][0]["enabled"], true);
+    assert_eq!(value["resourcepacks"][0]["pack_format"], 15);
+
+    let source = dir.path().join("imported-pack.zip");
+    std::fs::copy(packs.join("Pack.zip"), &source).unwrap();
+    let imported_pack = run(
+        &game,
+        &[
+            "import-resourcepack",
+            source.to_str().unwrap(),
+            "-v",
+            "1.21.4",
+        ],
+    );
+    assert!(
+        imported_pack.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&imported_pack.stderr)
+    );
+    assert!(packs.join("imported-pack.zip").is_file());
+
+    let archive = dir.path().join("world.zip");
+    let backup = run(
+        &game,
+        &[
+            "backup-save",
+            "world",
+            "-o",
+            archive.to_str().unwrap(),
+            "-v",
+            "1.21.4",
+        ],
+    );
+    assert!(
+        backup.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&backup.stderr)
+    );
+    assert!(archive.is_file());
+
+    assert!(!run(&game, &["delete-save", "world", "-v", "1.21.4"])
+        .status
+        .success());
+    let deleted = run(&game, &["delete-save", "world", "-v", "1.21.4", "--yes"]);
+    assert!(deleted.status.success());
+    assert!(!version.join("saves/world").exists());
+
+    let imported = run(
+        &game,
+        &[
+            "import-save",
+            archive.to_str().unwrap(),
+            "--name",
+            "Restored",
+            "-v",
+            "1.21.4",
+        ],
+    );
+    assert!(
+        imported.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&imported.stderr)
+    );
+    assert!(version.join("saves/Restored/level.dat").is_file());
+
+    let disabled = run(&game, &["disable-resourcepack", "Pack.zip", "-v", "1.21.4"]);
+    assert!(disabled.status.success());
+    let options = std::fs::read_to_string(version.join("options.txt")).unwrap();
+    assert!(!options.contains("file/Pack.zip"));
+    assert!(options.contains("renderDistance:12"));
+    let enabled = run(&game, &["enable-resourcepack", "Pack.zip", "-v", "1.21.4"]);
+    assert!(enabled.status.success());
+    let options = std::fs::read_to_string(version.join("options.txt")).unwrap();
+    assert!(options.contains("file/Pack.zip"));
+
+    assert!(
+        !run(&game, &["delete-resourcepack", "Pack.zip", "-v", "1.21.4"])
+            .status
+            .success()
+    );
+    let removed = run(
+        &game,
+        &["delete-resourcepack", "Pack.zip", "-v", "1.21.4", "--yes"],
+    );
+    assert!(removed.status.success());
+    assert!(!packs.join("Pack.zip").exists());
+}
+
 #[cfg(unix)]
 #[test]
 fn dry_run_prints_the_command_without_starting_the_game() {

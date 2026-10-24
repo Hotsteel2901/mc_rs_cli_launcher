@@ -1,5 +1,31 @@
 # 验证记录
 
+## 2026-10-24 · Hot-RS-Launcher 2.6.0（本地 Linux）
+
+本轮新增存档与资源包管理（CLI + TUI）。
+
+| 验证项目 | 结果 |
+| --- | --- |
+| `cargo fmt --all -- --check` | 通过 |
+| 单元测试 | 128 / 128（另 1 个 `#[ignore]` 手动预览） |
+| CLI 集成测试 | 12 / 12 |
+| `cargo clippy --locked --all-targets -- -D warnings` | 通过 |
+| `cargo build --locked --release` | 通过 |
+| 伪终端冒烟（120×40） | `4` 进入内容页；`t` 切换资源包；空格禁用后 options.txt 更新；`t` 返回存档；`x` 打开删除确认并用 `n` 取消；退出码 0 |
+| 手动 CLI 冒烟 | list-saves（NBT 名称/模式/极限标记）、list-resourcepacks、backup-save、delete-save --yes、import-save、enable/disable-resourcepack、import/delete-resourcepack、`--json` 输出 |
+
+新增自动测试覆盖：
+
+- level.dat：gzip/原始 NBT 解析（LevelName、Version.Name、GameType、hardcore），损坏时回退。
+- 存档：忽略没有 level.dat 的目录；大小/图标/时间；备份 ZIP 往返；原版世界 ZIP（根 level.dat）；重名自动追加后缀；拒绝非世界压缩包；删除与路径穿越拒绝。
+- 资源包：options.txt 读写保留其他键；启用置顶；incompatible 清理；zip/文件夹导入校验；删除同步清理引用；pack.mcmeta 描述与 pack_format。
+- TUI：内容页 tab 切换、资源包启停写回 options.txt、删除确认、不同终端尺寸渲染、鼠标点击 tab。
+- CLI：上述命令的离线端到端测试与 JSON 输出。
+
+未覆盖：真实 Minecraft 客户端读取 options.txt/存档的兼容性、Windows/macOS 文件管理器打开目录、数 GB 大型世界备份耗时。
+
+---
+
 ## 2026-10-24 · Hot-RS-Launcher 2.5.0（本地 Linux）
 
 本轮新增：Java 运行时发现/安装、实例重命名/复制/删除、备份恢复、Modrinth .mrpack 导入导出、模组更新检查与应用、崩溃诊断、启动参数（GC / JVM 参数 / 直连 / 全屏 / dry-run），以及 TUI 对应界面与快捷键。
