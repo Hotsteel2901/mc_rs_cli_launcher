@@ -1,5 +1,31 @@
 # 验证记录
 
+## 2026-10-24 · Hot-RS-Launcher 2.7.0（本地 Linux）
+
+本轮新增 Modrinth 浏览下载层（模组 / 资源包 / 光影包）、光影加载器识别与提示、优化模组推荐安装，以及依赖自动安装。
+
+| 验证项目 | 结果 |
+| --- | --- |
+| `cargo fmt --all -- --check` | 通过 |
+| 单元测试 | 139 / 139（另 1 个 `#[ignore]` 手动预览） |
+| CLI 集成测试 | 13 / 13 |
+| `cargo clippy --locked --all-targets -- -D warnings` | 通过 |
+| `cargo build --locked --release` | 通过 |
+| 伪终端冒烟（120×40） | `3` → `s` 打开模组浏览；`]`/`c`/`b` 翻页、切分类、回浏览；`4` → `t` → `d` 分别浏览资源包和光影；光影结果显示 `Iris + OptiFine`；退出码 0 |
+| 真实网络（CLI） | 浏览/搜索模组、资源包、光影；下载资源包并启用；下载 BSL 光影并启用；`--install-loader` 自动安装 Iris + Sodium；`optimize-mods --apply --yes` 批量安装；`install-mod --yes` 自动安装 Iris 的 Sodium 依赖 |
+
+新增自动测试覆盖：
+
+- 光影：options.txt / optionsof.txt 的 `shaderPack` 读写、启用/禁用/删除、加载器元数据记录、Iris/OptiFine 安装探测、zip/文件夹导入校验。
+- 浏览：默认浏览状态、翻页、optimization 分类切换、浏览重置、结果解析（加载器标签、已安装标记）、TUI 渲染。
+- 光影加载器提示：支持 Iris 时提示安装 Iris；仅 OptiFine 时显示手动安装提示。
+- 优化模组：快捷键确认、Iris/Oculus 过滤、批量安装路径（真实网络手测）。
+- CLI：`list-shaders`/`enable-shader`/`disable-shader`/`import-shader`/`delete-shader` 的离线端到端测试。
+
+未覆盖：真实 Minecraft 客户端读取光影/资源包设置、真实 OptiFine 安装流程、Windows/macOS 文件管理器与终端差异、大量模组同时安装的冲突求解。
+
+---
+
 ## 2026-10-24 · Hot-RS-Launcher 2.6.0（本地 Linux）
 
 本轮新增存档与资源包管理（CLI + TUI）。

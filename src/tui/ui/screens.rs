@@ -10,7 +10,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::content::game_mode_label;
+use crate::content::{game_mode_label, ShaderSupport};
+use crate::discover::DiscoverKind;
 use crate::tui::app::{App, ContentKind, MouseAction, Screen, SearchFocus};
 use crate::tui::i18n::Lang;
 use crate::tui::theme;
@@ -1260,7 +1261,11 @@ fn render_content_tabs(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
     let lang = app.lang();
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)])
+        .constraints([
+            Constraint::Ratio(1, 3),
+            Constraint::Ratio(1, 3),
+            Constraint::Ratio(1, 3),
+        ])
         .split(area);
     for (index, kind) in ContentKind::ALL.iter().enumerate() {
         let active = *kind == app.content_kind;
@@ -1273,6 +1278,7 @@ fn render_content_tabs(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
         let count = match kind {
             ContentKind::Saves => app.saves.len(),
             ContentKind::ResourcePacks => app.resourcepacks.len(),
+            ContentKind::Shaders => app.shaders.len(),
         };
         let marker = if active { "▸" } else { " " };
         let label = format!(" {marker} {} · {count} ", kind.title(lang));
@@ -1314,6 +1320,16 @@ fn content_list(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
                 lang.pick("RESOURCE PACKS", "资源包"),
                 enabled,
                 app.resourcepacks.len(),
+                version
+            )
+        }
+        ContentKind::Shaders => {
+            let enabled = app.shaders.iter().filter(|shader| shader.enabled).count();
+            format!(
+                "{} · {} / {} · {}",
+                lang.pick("SHADER PACKS", "光影包"),
+                enabled,
+                app.shaders.len(),
                 version
             )
         }
@@ -1507,6 +1523,92 @@ fn content_list(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
                 items,
                 app.resourcepacks.len(),
                 app.pack_sel,
+                theme::ORANGE,
+            );
+        }
+        ContentKind::Shaders => {
+            if app.shaders.is_empty() {
+                empty_state(
+                    frame,
+                    area,
+                    "▣",
+                    lang.pick("No shader packs", "没有光影包"),
+                    &[
+                        lang.pick(
+                            "Press d to browse Modrinth, or i to import a .zip.",
+                            "按 d 浏览 Modrinth，或按 i 导入 .zip。",
+                        ),
+                        lang.pick(
+                            "Enabling writes shaderPack to options.txt.",
+                            "启用状态会写入 options.txt 的 shaderPack。",
+                        ),
+                    ],
+                    theme::ORANGE,
+                    t,
+                );
+                return;
+            }
+            let items: Vec<ListItem> = app
+                .shaders
+                .iter()
+                .enumerate()
+                .map(|(index, row)| {
+                    let selection = index == app.shader_sel;
+                    let bg = if selection {
+                        theme::mix(theme::SURFACE, theme::ORANGE, 0.16)
+                    } else {
+                        theme::SURFACE
+                    };
+                    let (status, color) = if row.enabled {
+                        ("●", theme::GREEN)
+                    } else {
+                        ("○", theme::TEXT_FAINT)
+                    };
+                    let label = row.title.as_deref().unwrap_or(&row.file);
+                    let right = format!("{:>9}", short_bytes(row.size));
+                    let width = inner.width.saturating_sub(14) as usize;
+                    let line = Line::from(vec![
+                        Span::styled(format!(" {status} "), Style::default().fg(color).bg(bg)),
+                        Span::styled(
+                            format!(
+                                "{:<width$}",
+                                theme::truncate_chars(label, width),
+                                width = width
+                            ),
+                            Style::default()
+                                .fg(if selection {
+                                    theme::TEXT
+                                } else {
+                                    theme::TEXT_DIM
+                                })
+                                .bg(bg)
+                                .add_modifier(if selection {
+                                    Modifier::BOLD
+                                } else {
+                                    Modifier::empty()
+                                }),
+                        ),
+                        Span::styled(
+                            right,
+                            Style::default()
+                                .fg(if selection {
+                                    theme::ORANGE
+                                } else {
+                                    theme::TEXT_FAINT
+                                })
+                                .bg(bg),
+                        ),
+                    ]);
+                    ListItem::new(line)
+                })
+                .collect();
+            render_content_rows(
+                frame,
+                app,
+                inner,
+                items,
+                app.shaders.len(),
+                app.shader_sel,
                 theme::ORANGE,
             );
         }
@@ -1800,6 +1902,134 @@ fn content_detail(frame: &mut Frame, app: &App, area: Rect, t: f64) {
                     ("space", lang.pick(" toggle", " 启停"), theme::GREEN),
                     ("i", lang.pick(" import pack", " 导入资源包"), theme::CYAN),
                     ("x", lang.pick(" delete pack", " 删除资源包"), theme::RED),
+                    ("o", lang.pick(" open folder", " 打开目录"), theme::TEXT_DIM),
+                ],
+            );
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: true })
+                    .style(Style::default().bg(theme::SURFACE)),
+                inner,
+            );
+        }
+        ContentKind::Shaders => {
+            let Some(shader) = app.selected_shader() else {
+                empty_state(
+                    frame,
+                    area,
+                    "▣",
+                    lang.pick("Select a shader pack", "选择一个光影包"),
+                    &[lang.pick(
+                        "Toggle, browse or delete shader packs here.",
+                        "在这里启停、浏览或删除光影包。",
+                    )],
+                    theme::ORANGE,
+                    t,
+                );
+                return;
+            };
+            let state = if shader.enabled {
+                badge(lang.pick("ENABLED", "已启用"), theme::GREEN, theme::SURFACE)
+            } else {
+                badge(lang.pick("DISABLED", "已禁用"), theme::GOLD, theme::SURFACE)
+            };
+            let support = shader.support;
+            let support_text = support
+                .map(|support| support.summary(lang == Lang::Chinese))
+                .unwrap_or_else(|| lang.pick("unknown", "未知").to_string());
+            let version = app.settings.active_version.clone().unwrap_or_default();
+            let loaders =
+                crate::content::ContentManager::new(&app.game_dir).shader_loader_status(&version);
+            let path = app
+                .game_dir
+                .join("versions")
+                .join(&version)
+                .join("shaderpacks")
+                .join(&shader.file);
+            let title = shader.title.as_deref().unwrap_or(&shader.file);
+            let mut lines = vec![
+                Line::from(vec![
+                    Span::styled(
+                        theme::truncate_chars(title, inner.width.saturating_sub(2) as usize),
+                        Style::default()
+                            .fg(theme::mix(theme::ORANGE, theme::TEXT, 0.2))
+                            .bg(theme::SURFACE)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled("  ", Style::default().bg(theme::SURFACE)),
+                    state,
+                ]),
+                Line::from(""),
+                kv(
+                    lang.pick("File", "文件"),
+                    theme::one_line(&shader.file, 200),
+                    theme::TEXT_DIM,
+                ),
+                kv(lang.pick("Loaders", "加载器"), support_text, theme::PURPLE),
+                kv(
+                    lang.pick("Type", "类型"),
+                    if shader.is_dir {
+                        lang.pick("folder", "文件夹").to_string()
+                    } else {
+                        "zip".to_string()
+                    },
+                    theme::PURPLE,
+                ),
+                kv(
+                    lang.pick("Size", "大小"),
+                    theme::format_bytes(shader.size),
+                    theme::GOLD,
+                ),
+                kv(
+                    lang.pick("Path", "路径"),
+                    theme::truncate_chars(
+                        &path.display().to_string(),
+                        inner.width.saturating_sub(14) as usize,
+                    ),
+                    theme::TEXT_FAINT,
+                ),
+                Line::from(""),
+            ];
+            if let Some(support) = support {
+                if support.iris && !loaders.iris {
+                    lines.push(Line::from(vec![Span::styled(
+                        lang.pick(
+                            "Iris is not installed; install it from Mods browse (iris).",
+                            "尚未安装 Iris；可在模组浏览中搜索 iris 安装。",
+                        ),
+                        Style::default().fg(theme::GOLD).bg(theme::SURFACE),
+                    )]));
+                }
+                if support.optifine && !loaders.optifine && !support.iris {
+                    lines.push(Line::from(vec![Span::styled(
+                        lang.pick(
+                            "OptiFine is required; install it manually from optifine.net.",
+                            "需要 OptiFine；请从 optifine.net 手动安装。",
+                        ),
+                        Style::default().fg(theme::GOLD).bg(theme::SURFACE),
+                    )]));
+                }
+                lines.push(Line::from(""));
+            }
+            lines.push(Line::from(vec![
+                Span::styled("◈ ", Style::default().fg(theme::ORANGE).bg(theme::SURFACE)),
+                Span::styled(
+                    lang.pick(
+                        "Enabling writes shaderPack to options.txt (and optionsof.txt for OptiFine).",
+                        "启用状态写入 options.txt 的 shaderPack（OptiFine 还会写入 optionsof.txt）。",
+                    ),
+                    Style::default().fg(theme::TEXT_FAINT).bg(theme::SURFACE),
+                ),
+            ]));
+            lines.push(Line::from(""));
+            push_content_hints(
+                &mut lines,
+                lang,
+                &[
+                    ("space", lang.pick(" toggle", " 启停"), theme::GREEN),
+                    ("d", lang.pick(" browse shaders", " 浏览光影"), theme::CYAN),
+                    ("i", lang.pick(" import shader", " 导入光影"), theme::CYAN),
+                    ("x", lang.pick(" delete shader", " 删除光影"), theme::RED),
                     ("o", lang.pick(" open folder", " 打开目录"), theme::TEXT_DIM),
                 ],
             );
@@ -2752,9 +2982,19 @@ pub fn render_search(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
         ])
         .split(area);
     let input_focused = app.search.focus == SearchFocus::Input;
+    let accent = match app.search.kind {
+        DiscoverKind::Mods => theme::PURPLE,
+        DiscoverKind::ResourcePacks => theme::ORANGE,
+        DiscoverKind::Shaders => theme::CYAN,
+    };
+    let mode = if app.search.browse {
+        lang.pick("BROWSE", "浏览")
+    } else {
+        lang.pick("SEARCH", "搜索")
+    };
     let input_block = panel(
-        lang.pick("SEARCH MODRINTH", "搜索 Modrinth"),
-        theme::CYAN,
+        format!("{mode} · {}", app.search.kind.title(lang == Lang::Chinese)),
+        accent,
         input_focused,
         t,
         theme::SURFACE,
@@ -2781,7 +3021,10 @@ pub fn render_search(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
                 input_focused,
                 t,
                 theme::SURFACE,
-                lang.pick("type a mod name, then press enter", "输入模组名后按回车"),
+                lang.pick(
+                    "browse popular · type to search · enter",
+                    "浏览热门 · 输入搜索 · 回车",
+                ),
             )
             .spans,
         );
@@ -2810,9 +3053,51 @@ pub fn render_search(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
         );
     }
 
+    let page_label = if lang == Lang::Chinese {
+        format!("第 {} 页", app.search.page + 1)
+    } else {
+        format!("page {}", app.search.page + 1)
+    };
+    let sort_label = if lang == Lang::Chinese {
+        format!("排序 {}", app.search.sort)
+    } else {
+        format!("sort {}", app.search.sort)
+    };
+    let category_label = if lang == Lang::Chinese {
+        format!("分类 {}", app.search.category.as_deref().unwrap_or("all"))
+    } else {
+        format!(
+            "category {}",
+            app.search.category.as_deref().unwrap_or("all")
+        )
+    };
+    let total_label = if lang == Lang::Chinese {
+        format!("共 {} 个", app.search.total_hits)
+    } else {
+        format!("{} total", app.search.total_hits)
+    };
+    let hints = lang.pick(
+        "[ ] page · b browse · c category · tab focus",
+        "[ ] 翻页 · b 浏览 · c 分类 · tab 切换焦点",
+    );
+    let info =
+        format!(" ◆ {page_label} · {sort_label} · {category_label} · {total_label} · {hints}");
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![Span::styled(
+            theme::truncate_chars(&info, area.width as usize),
+            Style::default().fg(theme::TEXT_FAINT).bg(theme::SURFACE),
+        )]))
+        .style(Style::default().bg(theme::SURFACE)),
+        rows[1],
+    );
+
     let results = panel(
-        lang.pick("RESULTS", "结果"),
-        theme::CYAN,
+        format!(
+            "{} · {}",
+            lang.pick("RESULTS", "结果"),
+            app.search.kind.title(lang == Lang::Chinese)
+        ),
+        accent,
         !input_focused,
         t,
         theme::SURFACE,
@@ -2886,15 +3171,18 @@ pub fn render_search(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
             frame,
             rows[2],
             "⌕",
-            lang.pick("Search Modrinth", "搜索 Modrinth"),
+            lang.pick("Nothing to show", "没有内容"),
             &[
-                lang.pick("Type a query and press enter.", "输入关键词后按回车。"),
+                lang.pick(
+                    "Press b to browse popular projects, or type a query.",
+                    "按 b 浏览热门项目，或输入关键词搜索。",
+                ),
                 lang.pick(
                     "Facets use the active version and loader.",
                     "筛选条件使用当前版本与加载器。",
                 ),
             ],
-            theme::CYAN,
+            accent,
             t,
         );
         return;
@@ -2907,40 +3195,65 @@ pub fn render_search(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
         .map(|(index, hit)| {
             let selection = index == app.search.selected;
             let bg = if selection {
-                theme::mix(theme::SURFACE, theme::CYAN, 0.13)
+                theme::mix(theme::SURFACE, accent, 0.13)
             } else {
                 theme::SURFACE
             };
+            let installed = if hit.installed {
+                match hit.installed_version.as_deref() {
+                    Some(version) if !version.is_empty() => {
+                        format!("  [{} {version}]", lang.pick("installed", "已安装"))
+                    }
+                    _ => format!("  [{}]", lang.pick("installed", "已安装")),
+                }
+            } else {
+                String::new()
+            };
             let title = format!(
-                "{}  {}",
-                theme::truncate_chars(&hit.title, 34),
-                if selection { "›" } else { "" }
+                "{} {}{}",
+                theme::truncate_chars(&hit.title, 32),
+                installed,
+                if selection { " ›" } else { "" }
             );
             let author = if hit.author == "unknown" {
                 lang.pick("unknown", "未知")
             } else {
                 &hit.author
             };
+            let support = if app.search.kind == DiscoverKind::Shaders {
+                let support = ShaderSupport::from_labels(hit.loaders.iter().map(String::as_str));
+                if support.is_empty() {
+                    String::new()
+                } else if lang == Lang::Chinese {
+                    format!(" · 光影加载器 {}", support.summary(true))
+                } else {
+                    format!(" · shader loaders {}", support.label())
+                }
+            } else {
+                String::new()
+            };
             let meta = if lang == Lang::Chinese {
                 format!(
-                    "作者 {} · {} 次下载 · {}",
+                    "作者 {} · {} 次下载{}{}",
                     author,
                     format_num(hit.downloads),
+                    support,
                     if hit.categories.is_empty() {
-                        "未分类".to_string()
+                        " · 未分类".to_string()
                     } else {
-                        hit.categories.clone()
+                        format!(" · {}", hit.categories)
                     }
                 )
             } else {
                 format!(
-                    "by {} · {} downloads · {}",
+                    "by {} · {} downloads{}{}",
                     author,
                     format_num(hit.downloads),
+                    support,
                     if hit.categories.is_empty() {
-                        "uncategorized".into()
+                        " · uncategorized".into()
                     } else {
-                        hit.categories.clone()
+                        format!(" · {}", hit.categories)
                     }
                 )
             };
@@ -2957,11 +3270,7 @@ pub fn render_search(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
                     Span::styled(
                         " ◆ ",
                         Style::default()
-                            .fg(if selection {
-                                theme::CYAN
-                            } else {
-                                theme::TEXT_FAINT
-                            })
+                            .fg(if selection { accent } else { theme::TEXT_FAINT })
                             .bg(bg),
                     ),
                     Span::styled(
@@ -2992,7 +3301,7 @@ pub fn render_search(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
         .collect();
     let list = List::new(items)
         .highlight_symbol("▌")
-        .highlight_style(Style::default().bg(theme::mix(theme::SURFACE, theme::CYAN, 0.13)))
+        .highlight_style(Style::default().bg(theme::mix(theme::SURFACE, accent, 0.13)))
         .style(Style::default().bg(theme::SURFACE));
     let item_height = 4usize;
     let visible_items = (results_inner.height as usize / item_height).max(1);

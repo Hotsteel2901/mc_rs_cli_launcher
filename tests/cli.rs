@@ -439,6 +439,91 @@ fn content_commands_manage_worlds_and_resource_packs_offline() {
     assert!(!packs.join("Pack.zip").exists());
 }
 
+#[test]
+fn shader_management_commands_work_offline() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = dir.path().join("game");
+    make_instance(&game, "1.21.4");
+    let version = game.join("versions/1.21.4");
+    let shaders = version.join("shaderpacks");
+    std::fs::create_dir_all(&shaders).unwrap();
+    {
+        use std::io::Write;
+        let file = std::fs::File::create(shaders.join("TestShader.zip")).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        zip.start_file(
+            "shaders/shaders.properties",
+            zip::write::FileOptions::default(),
+        )
+        .unwrap();
+        zip.write_all(b"profile.MEDIUM=\n").unwrap();
+        zip.finish().unwrap();
+    }
+    std::fs::write(
+        version.join("options.txt"),
+        b"renderDistance:12\nshaderPack:TestShader.zip\n",
+    )
+    .unwrap();
+
+    let listed = run(&game, &["list-shaders", "-v", "1.21.4", "--json"]);
+    assert!(
+        listed.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(value["shaders"][0]["file"], "TestShader.zip");
+    assert_eq!(value["shaders"][0]["enabled"], true);
+    assert_eq!(value["loaders"]["iris"], false);
+
+    assert!(run(&game, &["disable-shader", "-v", "1.21.4"])
+        .status
+        .success());
+    let options = std::fs::read_to_string(version.join("options.txt")).unwrap();
+    assert!(options.contains("shaderPack:OFF"));
+    assert!(options.contains("renderDistance:12"));
+
+    assert!(
+        run(&game, &["enable-shader", "TestShader.zip", "-v", "1.21.4"])
+            .status
+            .success()
+    );
+    let options = std::fs::read_to_string(version.join("options.txt")).unwrap();
+    assert!(options.contains("shaderPack:TestShader.zip"));
+
+    let source = dir.path().join("ImportedShader.zip");
+    std::fs::copy(shaders.join("TestShader.zip"), &source).unwrap();
+    let imported = run(
+        &game,
+        &["import-shader", source.to_str().unwrap(), "-v", "1.21.4"],
+    );
+    assert!(
+        imported.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&imported.stderr)
+    );
+    assert!(shaders.join("ImportedShader.zip").is_file());
+
+    assert!(!run(
+        &game,
+        &["delete-shader", "ImportedShader.zip", "-v", "1.21.4"]
+    )
+    .status
+    .success());
+    let removed = run(
+        &game,
+        &[
+            "delete-shader",
+            "ImportedShader.zip",
+            "-v",
+            "1.21.4",
+            "--yes",
+        ],
+    );
+    assert!(removed.status.success());
+    assert!(!shaders.join("ImportedShader.zip").exists());
+}
+
 #[cfg(unix)]
 #[test]
 fn dry_run_prints_the_command_without_starting_the_game() {

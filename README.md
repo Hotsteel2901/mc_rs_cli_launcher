@@ -1,6 +1,6 @@
 # Hot-RS-Launcher
 
-Rust 编写的 Minecraft 命令行启动器。支持 Microsoft / 离线账号、按 Minecraft 版本隔离游戏目录、Fabric / Forge / NeoForge、Java 运行时管理、实例重命名/复制/删除、Modrinth 模组更新、.mrpack 整合包导入导出、崩溃诊断、存档与资源包管理，以及备份恢复。内置可选的全屏终端前端 `hot-rs-launcher tui`，仍然只依赖 CLI 核心，不引入 GUI。
+Rust 编写的 Minecraft 命令行启动器。支持 Microsoft / 离线账号、按 Minecraft 版本隔离游戏目录、Fabric / Forge / NeoForge、Java 运行时管理、实例重命名/复制/删除、Modrinth 模组/资源包/光影包浏览与下载、优化模组推荐安装、模组更新、.mrpack 整合包导入导出、崩溃诊断、存档与资源包管理，以及备份恢复。内置可选的全屏终端前端 `hot-rs-launcher tui`，仍然只依赖 CLI 核心，不引入 GUI。
 
 > 离线账号不提供正版认证，不能进入要求正版认证的服务器。Microsoft 登录需要拥有 Minecraft Java Edition 的账号。
 
@@ -51,6 +51,12 @@ hot-rs-launcher import-modpack my-pack.mrpack --dir ./minecraft
 hot-rs-launcher list-saves -v 1.21.4 --dir ./minecraft
 hot-rs-launcher backup-save 'My World' -v 1.21.4 --dir ./minecraft
 hot-rs-launcher list-resourcepacks -v 1.21.4 --dir ./minecraft
+
+# 浏览与下载资源包、光影包、优化模组
+hot-rs-launcher search --browse -v 1.21.4 --dir ./minecraft
+hot-rs-launcher search-resourcepacks -v 1.21.4 --dir ./minecraft
+hot-rs-launcher search-shaders -v 1.21.4 --dir ./minecraft
+hot-rs-launcher optimize-mods -v 1.21.4 --limit 8 --dir ./minecraft
 ```
 
 默认目录是可执行文件所在目录下的 `minecraft/`。`-v` / `--version` 指 **Minecraft 版本**；启动器版本使用 `--launcher-version`。`latest` 和 `latest-snapshot` 分别解析最新正式版和快照版。省略命令等同 `play`。
@@ -61,13 +67,14 @@ hot-rs-launcher list-resourcepacks -v 1.21.4 --dir ./minecraft
 hot-rs-launcher tui
 ```
 
-同一个 CLI 二进制里的键盘/鼠标驱动全屏界面，包含动态 Dashboard、远程版本选择与下载、加载器选择与安装、Modrinth 搜索/安装、模组启停与更新检查、账号管理、实例重命名/复制/删除/导出整合包、存档备份/导入/删除、资源包启停/导入/删除、设置（语言、内存、窗口、下载源、Java 运行时选择、JVM 参数、GC 预设）、活动日志和「关于」页（`8` 直达，`g` / `b` 可打开 GitHub / Codeberg）。文件下载有分阶段进度、实时速度、每文件百分比和可取消的任务面板；界面支持 30 FPS 渐变/脉冲/Toast/粒子动效；空闲 2 秒后暂停环境动画，终端输出从约 118 KiB/s 降到 1 KiB/s 以下，并可在设置中关闭开场动画和减少动效。
+同一个 CLI 二进制里的键盘/鼠标驱动全屏界面，包含动态 Dashboard、远程版本选择与下载、加载器选择与安装、Modrinth 搜索/安装、模组启停与更新检查、账号管理、实例重命名/复制/删除/导出整合包、Modrinth 浏览下载（模组/资源包/光影包，默认浏览、可搜索、翻页和分类过滤）、优化模组一键安装、存档备份/导入/删除、资源包与光影包启停/导入/删除、设置（语言、内存、窗口、下载源、Java 运行时选择、JVM 参数、GC 预设）、活动日志和「关于」页（`8` 直达，`g` / `b` 可打开 GitHub / Codeberg）。文件下载有分阶段进度、实时速度、每文件百分比和可取消的任务面板；界面支持 30 FPS 渐变/脉冲/Toast/粒子动效；空闲 2 秒后暂停环境动画，终端输出从约 118 KiB/s 降到 1 KiB/s 以下，并可在设置中关闭开场动画和减少动效。
 
 - 需要交互式终端和 ANSI 支持；stdin/stdout 不是 TTY 或 `TERM=dumb` 时会明确报错，不会在 CI 或管道中挂起。
 - 支持中英文界面切换（默认 English），在 Settings 第一项即时切换并自动保存。
 - 支持鼠标点击侧栏/标签、主按钮、列表行、设置项和弹窗按钮，滚轮可移动选择；点击列表行选中，双击执行主要动作。
 - 设置中的 Java 行会列出本机检测到的运行时并标注推荐项；模组页按 `u` 检查更新、按 `U` 批量应用，列表用 `↑` 标记可更新项；启动失败后崩溃诊断会写入活动日志。
-- 内容页按 `t` 在存档与资源包之间切换：`space` 启停资源包，`b` 备份存档，`i` 导入，`x` 删除（确认），`o` 打开对应目录；备份和导入在后台任务中运行，带阶段进度。
+- 内容页按 `t` 在存档 / 资源包 / 光影包之间切换：`d` 浏览下载，`space` 启停资源包或光影，`b` 备份存档，`i` 导入，`x` 删除（确认），`o` 打开对应目录；备份和导入在后台任务中运行，带阶段进度。
+- 模组页按 `s` / `/` 打开 Modrinth 浏览（默认列出热门模组，输入关键词回车搜索）；按 `O` 一键安装推荐优化模组。资源包/光影的浏览结果会显示已安装状态，光影会标注 `Iris`、`OptiFine` 或两者，并在安装后提示安装对应的光影加载器。
 - 下载默认 16 并发、复用 HTTP/TLS 连接；资源下载使用更宽的并发池（默认 32，最高 64，BMCLAPI 上限 24），并在 `auto` 模式下先测速再决定用官方还是镜像。
 - 窗口宽度小于 96 列自动切换顶部标签布局；小于 52×16 显示尺寸提示。
 - 终端始终在退出、错误、挂起和主线程 panic 时恢复；运行任务退出时会被取消并清理子进程树。
@@ -207,6 +214,61 @@ hot-rs-launcher delete-resourcepack MyPack.zip -v 1.21.4 --yes
 - 资源包启用状态直接读写实例 `options.txt` 的 `resourcePacks` 列表（启用时置顶，并清理 `incompatibleResourcePacks`），不会重命名文件。`import-resourcepack` 接受 `.zip` 或文件夹并校验根目录 `pack.mcmeta`；删除时同步清理 options.txt 中的引用。
 - `--json` 可用于脚本读取存档/资源包列表。
 
+## 资源包、光影包与优化模组
+
+### 浏览与搜索
+
+```sh
+hot-rs-launcher search --browse -v 1.21.4
+hot-rs-launcher search sodium --limit 5 --page 2
+hot-rs-launcher search --browse --category optimization -v 1.21.4
+hot-rs-launcher search-resourcepacks -v 1.21.4
+hot-rs-launcher search-resourcepacks stay-true -v 1.21.4
+hot-rs-launcher search-shaders -v 1.21.4
+hot-rs-launcher search-shaders complementary --limit 5
+```
+
+- 不提供关键词（或使用 `--browse`）时按下载量浏览热门项目；提供关键词时按相关度搜索。
+- `--page` / `--limit` 翻页，`--sort relevance|downloads|newest|updated` 排序，`--category` 过滤 Modrinth 分类（例如 `optimization`），`--json` 输出原始结果。
+- 模组结果会标注已安装版本；光影结果会从 Modrinth 的加载器分类识别 `Iris`、`OptiFine` 或 `Iris + OptiFine`。
+
+### 下载与安装
+
+```sh
+hot-rs-launcher download-resourcepack translations-for-sodium -v 1.21.4 --enable
+hot-rs-launcher download-shader bsl-shaders -v 1.21.4 --enable
+hot-rs-launcher download-shader bsl-shaders -v 1.21.4 --enable --install-loader
+hot-rs-launcher install-mod iris -v 1.21.4 --loader fabric --yes
+```
+
+- `download-resourcepack` 下载兼容当前版本的最新资源包到 `resourcepacks/`，`--enable` 立即写入 options.txt。
+- `download-shader` 优先选择同时支持 Iris 和 OptiFine 的版本，下载到 `shaderpacks/` 并记录加载器支持；`--install-loader` 会在 Fabric/NeoForge 上安装 Iris、在 Forge 上安装 Oculus（及其必需依赖）。
+- 只支持 OptiFine 的光影会提示手动从 optifine.net 安装；启动器不运行 OptiFine 安装器。
+- `install-mod --yes` 自动安装必需依赖，`--no-deps` 跳过依赖处理；TUI 中的模组安装默认使用自动依赖。
+
+### 光影管理
+
+```sh
+hot-rs-launcher list-shaders -v 1.21.4
+hot-rs-launcher enable-shader BSL_v10.1.8.zip -v 1.21.4
+hot-rs-launcher disable-shader -v 1.21.4
+hot-rs-launcher import-shader ./Complementary.zip -v 1.21.4
+hot-rs-launcher delete-shader BSL_v10.1.8.zip -v 1.21.4 --yes
+```
+
+- 启用状态写入 options.txt 的 `shaderPack`；检测到 OptiFine 时同时更新 `optionsof.txt`。
+- 下载的光影会在实例的 `launcher_content.json` 记录来源与 Iris/OptiFine 支持，管理界面据此显示加载器标签；本地导入的光影显示为未知。
+
+### 优化模组
+
+```sh
+hot-rs-launcher optimize-mods -v 1.21.4 --limit 8
+hot-rs-launcher optimize-mods -v 1.21.4 --apply --yes
+```
+
+- 从 Modrinth 的 `optimization` 分类按下载量取推荐项，按当前版本与加载器过滤，并标注已安装；Iris/Oculus 属于光影加载器，不会出现在该列表。
+- `--apply --yes` 批量安装缺失项，已安装的跳过，必需依赖自动安装；TUI 模组页按 `O` 触发同样的流程。
+
 ## 启动参数
 
 ```sh
@@ -230,8 +292,9 @@ minecraft/
   launcher_tui.json            # 可选：TUI 偏好（语言、内存、窗口、源、Java 等）
   launcher_secrets.enc         # 可选：钥匙串不可用时的加密令牌（需用户同意）
   launcher_secrets.key         # 可选：上述加密文件的本地密钥（0600）
-  versions/<id>/               # 该实例的 saves、mods、resourcepacks、config、日志及客户端
+  versions/<id>/               # 该实例的 saves、mods、resourcepacks、shaderpacks、config、日志及客户端
     instance.json              # 可选：重命名/复制/整合包实例的基准版本与加载器
+    launcher_content.json      # 可选：下载的光影包加载器支持与来源元数据
   libraries/                   # 共享库和加载器 profile
   assets/                      # 资源索引、对象及旧版虚拟资源
   natives/<id>/                # 原生库
@@ -251,7 +314,7 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo build --locked --release
 ```
 
-CI 在 Linux、Windows、macOS 执行上述命令。测试使用本地 HTTP fixture 和模拟钥匙串，不需要正版账号；Unix 上用假的 Java 可执行文件验证离线启动参数、工作目录和子进程退出码。TUI 使用 `TestBackend` 在多种终端尺寸下渲染全部界面（含「关于」页）、弹窗和任务状态，并验证中英文切换、鼠标热区和 Java/GC/更新相关界面；开发验证中还使用伪终端冒烟测试检查备用屏幕、括号粘贴、鼠标捕获开关、实例重命名对话框与按键退出。实例生命周期、备份恢复、.mrpack 往返、存档 NBT/备份导入和资源包 options.txt 读写都有离线集成测试；模组更新只对纯比较逻辑做单元测试，真实 Modrinth 调用需要网络。非 TTY 下的 `tui` 会明确失败，不会阻塞 CI。这不是实际 Minecraft 图形界面或 Microsoft 服务的端到端测试。参见 [验证记录](docs/VALIDATION.md) 与 [TUI 说明](docs/TUI.md)。
+CI 在 Linux、Windows、macOS 执行上述命令。测试使用本地 HTTP fixture 和模拟钥匙串，不需要正版账号；Unix 上用假的 Java 可执行文件验证离线启动参数、工作目录和子进程退出码。TUI 使用 `TestBackend` 在多种终端尺寸下渲染全部界面（含「关于」页）、弹窗和任务状态，并验证中英文切换、鼠标热区和 Java/GC/更新相关界面；开发验证中还使用伪终端冒烟测试检查备用屏幕、括号粘贴、鼠标捕获开关、实例重命名对话框与按键退出。实例生命周期、备份恢复、.mrpack 往返、存档 NBT/备份导入、资源包与光影 options 读写都有离线集成测试；浏览/搜索、光影加载器识别和优化推荐只对解析与筛选逻辑做单元测试，真实 Modrinth 下载需要网络（本地已用真实网络手测）。非 TTY 下的 `tui` 会明确失败，不会阻塞 CI。这不是实际 Minecraft 图形界面或 Microsoft 服务的端到端测试。参见 [验证记录](docs/VALIDATION.md) 与 [TUI 说明](docs/TUI.md)。
 
 ## 许可证
 

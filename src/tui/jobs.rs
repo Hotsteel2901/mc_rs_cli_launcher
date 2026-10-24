@@ -345,6 +345,113 @@ pub fn start_import_resourcepack(
     });
 }
 
+pub fn start_install_resourcepack(
+    tx: EventSender,
+    id: u64,
+    game_dir: std::path::PathBuf,
+    instance: String,
+    slug: String,
+    title: String,
+) {
+    spawn_job(
+        tx,
+        id,
+        format!("Install resource pack {title}"),
+        move |tx, id| {
+            progress::reset_cancel();
+            phase(tx, id, 1, 2, "Resolve Modrinth project");
+            let report = crate::discover::install_resourcepack(&game_dir, &instance, &slug, true)
+                .map_err(|error| error.to_string())?;
+            phase(tx, id, 2, 2, "Enable resource pack");
+            Ok(format!(
+                "Installed resource pack '{}' ({})",
+                report.title, report.file
+            ))
+        },
+    );
+}
+
+pub fn start_install_shader(
+    tx: EventSender,
+    id: u64,
+    game_dir: std::path::PathBuf,
+    instance: String,
+    slug: String,
+    title: String,
+) {
+    spawn_job(tx, id, format!("Install shader {title}"), move |tx, id| {
+        progress::reset_cancel();
+        phase(tx, id, 1, 2, "Resolve Modrinth project");
+        let report = crate::discover::install_shader(&game_dir, &instance, &slug, true)
+            .map_err(|error| error.to_string())?;
+        phase(tx, id, 2, 2, "Enable shader pack");
+        Ok(format!(
+            "Installed shader '{}' ({}) · {}",
+            report.title,
+            report.file,
+            report.support.summary(false)
+        ))
+    });
+}
+
+pub fn start_import_shader(
+    tx: EventSender,
+    id: u64,
+    game_dir: std::path::PathBuf,
+    instance: String,
+    source: std::path::PathBuf,
+) {
+    spawn_job(tx, id, "Import shader pack".to_string(), move |tx, id| {
+        progress::reset_cancel();
+        phase(tx, id, 1, 2, "Validate shader files");
+        let manager = crate::content::ContentManager::new(&game_dir);
+        let name = manager
+            .import_shader(&instance, &source)
+            .map_err(|error| error.to_string())?;
+        phase(tx, id, 2, 2, "Copy shader files");
+        Ok(format!("Imported shader pack '{name}'"))
+    });
+}
+
+pub fn start_optimize_mods(
+    tx: EventSender,
+    id: u64,
+    game_dir: std::path::PathBuf,
+    settings: Settings,
+    instance: String,
+    loader: String,
+) {
+    let title = format!("Optimize {instance}");
+    let _ = tx.send(BackendEvent::JobStarted {
+        id,
+        title: title.clone(),
+    });
+    let failure_tx = tx.clone();
+    let spawned = std::thread::Builder::new()
+        .name("mc-tui-optimize".into())
+        .spawn(move || {
+            let mut args = Vec::new();
+            cli_base_args(&game_dir, &settings, &mut args);
+            args.push("optimize-mods".into());
+            args.push("-v".into());
+            args.push(instance);
+            args.push("--loader".into());
+            args.push(loader);
+            args.push("--apply".into());
+            args.push("--yes".into());
+            args.push("--limit".into());
+            args.push("8".into());
+            let result = run_child(&tx, id, &title, args);
+            let _ = tx.send(BackendEvent::Finished { id, result });
+        });
+    if let Err(error) = spawned {
+        let _ = failure_tx.send(BackendEvent::Finished {
+            id,
+            result: Err(format!("Cannot start optimization worker: {error}")),
+        });
+    }
+}
+
 pub fn start_java_probe(tx: EventSender) {
     let failure_tx = tx.clone();
     let spawned = std::thread::Builder::new()
@@ -372,37 +479,45 @@ pub fn start_java_probe(tx: EventSender) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn start_search(
     tx: EventSender,
     request: u64,
+    kind: crate::discover::DiscoverKind,
     query: String,
     mc_version: Option<String>,
     loader: Option<String>,
+    page: u32,
+    sort: String,
+    category: Option<String>,
+    game_dir: std::path::PathBuf,
 ) {
     let failure_tx = tx.clone();
     let failure_query = query.clone();
+    let mark_version = mc_version.clone();
     let spawned = std::thread::Builder::new()
         .name("mc-tui-search".into())
         .spawn(move || {
-            let mut facets = vec![serde_json::json!(["project_type:mod"])];
-            if let Some(loader) = loader.filter(|value| !value.is_empty()) {
-                facets.push(serde_json::json!([format!(
-                    "categories:{}",
-                    loader.to_ascii_lowercase()
-                )]));
-            }
-            if let Some(version) = mc_version.filter(|value| !value.is_empty()) {
-                facets.push(serde_json::json!([format!("versions:{version}")]));
-            }
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                crate::modrinth::search_projects_result(
-                    &query,
-                    "relevance",
-                    20,
-                    0,
-                    Some(&serde_json::json!(facets)),
-                )
-            }))
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                || -> Result<serde_json::Value, String> {
+                    let mut value = crate::discover::search(
+                        kind,
+                        &query,
+                        &sort,
+                        page,
+                        crate::discover::PAGE_SIZE,
+                        mc_version.as_deref(),
+                        loader.as_deref(),
+                        category.as_deref(),
+                    )?;
+                    if kind == crate::discover::DiscoverKind::Mods {
+                        if let Some(version) = mark_version.as_deref() {
+                            crate::discover::mark_installed_mods(&mut value, &game_dir, version);
+                        }
+                    }
+                    Ok(value)
+                },
+            ))
             .unwrap_or_else(|_| Err("Search task panicked".into()));
             let _ = tx.send(BackendEvent::Search {
                 request,
@@ -628,6 +743,7 @@ pub fn start_mod_install(tx: EventSender, id: u64, job: ModInstallJob) {
             args.push(job.slug);
             args.push("-v".into());
             args.push(job.mc_version);
+            args.push("--yes".into());
             if let Some(version) = job.mod_version {
                 args.push("--mod-version".into());
                 args.push(version);

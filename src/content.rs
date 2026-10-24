@@ -10,12 +10,16 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::{Deserialize, Serialize};
+
 use crate::error::{AppError, AppResult};
 use crate::instance::dir_size;
 use crate::util;
 
 pub const SAVES_DIR: &str = "saves";
 pub const RESOURCEPACKS_DIR: &str = "resourcepacks";
+pub const SHADERPACKS_DIR: &str = "shaderpacks";
+const CONTENT_META: &str = "launcher_content.json";
 pub const OPTIONS_FILE: &str = "options.txt";
 const BACKUP_MANIFEST: &str = "backup.json";
 
@@ -49,6 +53,117 @@ pub struct ResourcePackEntry {
     pub pack_format: Option<u32>,
     pub description: String,
     pub valid: bool,
+}
+
+/// Which shader loaders a pack supports, derived from Modrinth loaders or the
+/// metadata recorded when the launcher installed it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ShaderSupport {
+    pub iris: bool,
+    pub optifine: bool,
+}
+
+impl ShaderSupport {
+    pub fn from_labels<'a>(labels: impl IntoIterator<Item = &'a str>) -> Self {
+        let mut support = Self::default();
+        for label in labels {
+            match label.to_ascii_lowercase().as_str() {
+                "iris" | "oculus" => support.iris = true,
+                "optifine" => support.optifine = true,
+                _ => {}
+            }
+        }
+        support
+    }
+
+    pub fn from_version(version: &serde_json::Value) -> Self {
+        let labels: Vec<&str> = version["loaders"]
+            .as_array()
+            .map(|values| values.iter().filter_map(|value| value.as_str()).collect())
+            .unwrap_or_default();
+        Self::from_labels(labels)
+    }
+
+    pub fn label(self) -> &'static str {
+        match (self.iris, self.optifine) {
+            (true, true) => "Iris + OptiFine",
+            (true, false) => "Iris",
+            (false, true) => "OptiFine",
+            _ => "unknown",
+        }
+    }
+
+    pub fn summary(self, chinese: bool) -> String {
+        match (self.iris, self.optifine, chinese) {
+            (true, true, true) => "Iris / OptiFine 均支持".into(),
+            (true, false, true) => "仅支持 Iris".into(),
+            (false, true, true) => "仅支持 OptiFine".into(),
+            (true, true, false) => "Iris + OptiFine".into(),
+            (true, false, false) => "Iris only".into(),
+            (false, true, false) => "OptiFine only".into(),
+            (_, _, true) => "未知".into(),
+            _ => "unknown".into(),
+        }
+    }
+
+    pub fn is_empty(self) -> bool {
+        !self.iris && !self.optifine
+    }
+}
+
+/// Shader loader availability in one instance.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ShaderLoaderStatus {
+    pub iris: bool,
+    pub optifine: bool,
+}
+
+impl ShaderLoaderStatus {
+    pub fn summary(self, chinese: bool) -> String {
+        match (self.iris, self.optifine, chinese) {
+            (true, true, true) => "Iris 与 OptiFine 均已安装".into(),
+            (true, false, true) => "已安装 Iris".into(),
+            (false, true, true) => "已安装 OptiFine".into(),
+            (true, true, false) => "Iris and OptiFine installed".into(),
+            (true, false, false) => "Iris installed".into(),
+            (false, true, false) => "OptiFine installed".into(),
+            (_, _, true) => "未安装光影加载器".into(),
+            _ => "no shader loader installed".into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ShaderEntry {
+    pub file: String,
+    pub is_dir: bool,
+    pub enabled: bool,
+    pub size: u64,
+    pub support: Option<ShaderSupport>,
+    pub title: Option<String>,
+    pub project: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShaderMeta {
+    #[serde(default)]
+    pub loaders: Vec<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub project: Option<String>,
+}
+
+impl ShaderMeta {
+    pub fn support(&self) -> ShaderSupport {
+        ShaderSupport::from_labels(self.loaders.iter().map(String::as_str))
+    }
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct ContentMeta {
+    #[serde(default)]
+    shaders: std::collections::BTreeMap<String, ShaderMeta>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -461,6 +576,274 @@ impl ContentManager {
         }
         Ok(size)
     }
+
+    pub fn shaderpacks_dir(&self, id: &str) -> AppResult<PathBuf> {
+        Ok(self.instance_dir(id)?.join(SHADERPACKS_DIR))
+    }
+
+    fn meta_path(&self, id: &str) -> AppResult<PathBuf> {
+        Ok(self.instance_dir(id)?.join(CONTENT_META))
+    }
+
+    fn read_meta(&self, id: &str) -> ContentMeta {
+        self.meta_path(id)
+            .ok()
+            .and_then(|path| fs::read(path).ok())
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    }
+
+    fn write_meta(&self, id: &str, meta: &ContentMeta) -> AppResult<()> {
+        let path = self.meta_path(id)?;
+        util::atomic_write(&path, &serde_json::to_vec_pretty(meta)?)?;
+        Ok(())
+    }
+
+    pub fn record_shader_meta(
+        &self,
+        id: &str,
+        file: &str,
+        support: ShaderSupport,
+        title: Option<&str>,
+        project: Option<&str>,
+    ) -> AppResult<()> {
+        let mut meta = self.read_meta(id);
+        let mut loaders = Vec::new();
+        if support.iris {
+            loaders.push("iris".to_string());
+        }
+        if support.optifine {
+            loaders.push("optifine".to_string());
+        }
+        meta.shaders.insert(
+            file.to_string(),
+            ShaderMeta {
+                loaders,
+                title: title.map(String::from),
+                project: project.map(String::from),
+            },
+        );
+        self.write_meta(id, &meta)
+    }
+
+    fn forget_shader_meta(&self, id: &str, file: &str) -> AppResult<()> {
+        let mut meta = self.read_meta(id);
+        if meta.shaders.remove(file).is_some() {
+            self.write_meta(id, &meta)?;
+        }
+        Ok(())
+    }
+
+    fn optifine_installed(&self, id: &str) -> bool {
+        let Ok(dir) = self.instance_dir(id) else {
+            return false;
+        };
+        if dir.join("optionsof.txt").is_file() {
+            return true;
+        }
+        if let Ok(entries) = fs::read_dir(dir.join("mods")) {
+            for entry in entries.flatten() {
+                if entry
+                    .file_name()
+                    .to_string_lossy()
+                    .to_ascii_lowercase()
+                    .contains("optifine")
+                {
+                    return true;
+                }
+            }
+        }
+        fs::read(dir.join(format!("{id}.json")))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .and_then(|value| value["id"].as_str().map(|value| value.to_ascii_lowercase()))
+            .is_some_and(|value| value.contains("optifine"))
+    }
+
+    pub fn shader_loader_status(&self, id: &str) -> ShaderLoaderStatus {
+        let mut status = ShaderLoaderStatus {
+            optifine: self.optifine_installed(id),
+            iris: false,
+        };
+        if let Ok(dir) = self.instance_dir(id) {
+            if let Ok(entries) = fs::read_dir(dir.join("mods")) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+                    if name.contains("iris") || name.contains("oculus") {
+                        status.iris = true;
+                    }
+                    if name.contains("optifine") {
+                        status.optifine = true;
+                    }
+                }
+            }
+        }
+        status
+    }
+
+    fn shader_options_files(&self, id: &str) -> AppResult<Vec<PathBuf>> {
+        let dir = self.instance_dir(id)?;
+        let mut files = vec![dir.join(OPTIONS_FILE)];
+        let optionsof = dir.join("optionsof.txt");
+        if optionsof.exists() || self.optifine_installed(id) {
+            files.push(optionsof);
+        }
+        Ok(files)
+    }
+
+    fn read_shader_pack(&self, id: &str) -> Option<String> {
+        for path in self.shader_options_files(id).ok()? {
+            if let Some(value) = scalar_value(&read_lines(&path), "shaderPack") {
+                if !value.is_empty() {
+                    return Some(value);
+                }
+            }
+        }
+        None
+    }
+
+    fn write_shader_pack(&self, id: &str, value: &str) -> AppResult<()> {
+        for path in self.shader_options_files(id)? {
+            let mut lines = read_lines_checked(&path)?.unwrap_or_default();
+            set_scalar(&mut lines, "shaderPack", value);
+            write_lines(&path, &lines)?;
+        }
+        Ok(())
+    }
+
+    pub fn list_shaders(&self, id: &str) -> Vec<ShaderEntry> {
+        let Ok(dir) = self.shaderpacks_dir(id) else {
+            return Vec::new();
+        };
+        let active = self.read_shader_pack(id);
+        let meta = self.read_meta(id);
+        let mut entries = Vec::new();
+        if let Ok(read_dir) = fs::read_dir(&dir) {
+            for entry in read_dir.flatten() {
+                let file = entry.file_name().to_string_lossy().to_string();
+                let path = entry.path();
+                let is_dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
+                if is_dir {
+                    if !path.join("shaders").is_dir() {
+                        continue;
+                    }
+                } else if !file.to_ascii_lowercase().ends_with(".zip") {
+                    continue;
+                }
+                let meta = meta.shaders.get(&file);
+                entries.push(ShaderEntry {
+                    enabled: active.as_deref() == Some(file.as_str()),
+                    size: if is_dir {
+                        dir_size(&path)
+                    } else {
+                        entry.metadata().map(|meta| meta.len()).unwrap_or(0)
+                    },
+                    support: meta.map(|meta| meta.support()),
+                    title: meta.and_then(|meta| meta.title.clone()),
+                    project: meta.and_then(|meta| meta.project.clone()),
+                    file,
+                    is_dir,
+                });
+            }
+        }
+        entries.sort_by(|a, b| {
+            b.enabled
+                .cmp(&a.enabled)
+                .then_with(|| a.file.to_lowercase().cmp(&b.file.to_lowercase()))
+        });
+        entries
+    }
+
+    pub fn disable_shader(&self, id: &str) -> AppResult<()> {
+        self.write_shader_pack(id, "OFF")
+    }
+
+    pub fn set_shader_enabled(&self, id: &str, file: &str, enabled: bool) -> AppResult<bool> {
+        util::validate_component(file)?;
+        let target = self.shaderpacks_dir(id)?.join(file);
+        if !target.exists() {
+            return Err(AppError::Generic(format!(
+                "Shader pack '{file}' does not exist in this instance"
+            )));
+        }
+        self.write_shader_pack(id, if enabled { file } else { "OFF" })?;
+        Ok(true)
+    }
+
+    pub fn import_shader(&self, id: &str, source: &Path) -> AppResult<String> {
+        let dir = self.shaderpacks_dir(id)?;
+        let is_dir = source.is_dir();
+        if !is_dir && !source.is_file() {
+            return Err(AppError::Generic(format!(
+                "Shader source does not exist: {}",
+                source.display()
+            )));
+        }
+        if !is_dir
+            && !source
+                .to_string_lossy()
+                .to_ascii_lowercase()
+                .ends_with(".zip")
+        {
+            return Err(AppError::Generic(
+                "Shader packs must be a .zip file or a folder".into(),
+            ));
+        }
+        let name = source
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .ok_or_else(|| AppError::Generic("Cannot determine the shader pack name".into()))?;
+        util::validate_component(&name)?;
+        if is_dir {
+            if !source.join("shaders").is_dir() {
+                return Err(AppError::Generic(
+                    "Folder has no shaders directory and is not a shader pack".into(),
+                ));
+            }
+        } else if !zip_has_shaders(source)? {
+            return Err(AppError::Generic(
+                "Zip has no shaders directory and is not a shader pack".into(),
+            ));
+        }
+        fs::create_dir_all(&dir)?;
+        let target = dir.join(&name);
+        if target.exists() {
+            return Err(AppError::Generic(format!(
+                "Shader pack '{name}' already exists"
+            )));
+        }
+        if is_dir {
+            copy_tree(source, &target)?;
+        } else {
+            fs::copy(source, &target)?;
+        }
+        Ok(name)
+    }
+
+    pub fn delete_shader(&self, id: &str, file: &str) -> AppResult<u64> {
+        util::validate_component(file)?;
+        let target = self.shaderpacks_dir(id)?.join(file);
+        if !target.exists() {
+            return Err(AppError::Generic(format!(
+                "Shader pack '{file}' does not exist in this instance"
+            )));
+        }
+        let size = if target.is_dir() {
+            dir_size(&target)
+        } else {
+            target.metadata().map(|meta| meta.len()).unwrap_or(0)
+        };
+        if self.read_shader_pack(id).as_deref() == Some(file) {
+            self.write_shader_pack(id, "OFF")?;
+        }
+        if target.is_dir() {
+            fs::remove_dir_all(&target)?;
+        } else {
+            fs::remove_file(&target)?;
+        }
+        self.forget_shader_meta(id, file)?;
+        Ok(size)
+    }
 }
 
 fn now_epoch() -> u64 {
@@ -627,6 +1010,24 @@ fn array_value(lines: &[String], key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn scalar_value(lines: &[String], key: &str) -> Option<String> {
+    let prefix = format!("{key}:");
+    lines
+        .iter()
+        .find_map(|line| line.strip_prefix(&prefix))
+        .map(|value| value.trim().to_string())
+}
+
+fn set_scalar(lines: &mut Vec<String>, key: &str, value: &str) {
+    let line = format!("{key}:{value}");
+    let prefix = format!("{key}:");
+    if let Some(index) = lines.iter().position(|line| line.starts_with(&prefix)) {
+        lines[index] = line;
+    } else {
+        lines.push(line);
+    }
+}
+
 fn set_array(lines: &mut Vec<String>, key: &str, values: &[String]) {
     let line = format!(
         "{key}:{}",
@@ -729,6 +1130,19 @@ fn zip_has_pack_meta(path: &Path) -> AppResult<bool> {
     for index in 0..archive.len() {
         if let Ok(entry) = archive.by_index(index) {
             if entry.name().eq_ignore_ascii_case("pack.mcmeta") {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn zip_has_shaders(path: &Path) -> AppResult<bool> {
+    let file = fs::File::open(path)?;
+    let mut archive = zip::ZipArchive::new(file).map_err(zip_error)?;
+    for index in 0..archive.len() {
+        if let Ok(entry) = archive.by_index(index) {
+            if entry.name().starts_with("shaders/") {
                 return Ok(true);
             }
         }
@@ -1288,5 +1702,140 @@ mod tests {
         assert!(array_value(&lines, "missing").is_empty());
         assert_eq!(sanitize_world_folder("  My:World  "), "My-World");
         assert_eq!(sanitize_world_folder(""), "world");
+    }
+
+    fn write_shader_zip(path: &Path) {
+        let file = fs::File::create(path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = file_options();
+        zip.start_file("shaders/shaders.properties", options)
+            .unwrap();
+        zip.write_all(b"profile.MEDIUM=\n").unwrap();
+        zip.finish().unwrap();
+    }
+
+    #[test]
+    fn shader_packs_track_options_txt_and_recorded_loaders() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let dir = instance(root, "1.21.4").join(SHADERPACKS_DIR);
+        fs::create_dir_all(&dir).unwrap();
+        write_shader_zip(&dir.join("TestShader.zip"));
+        fs::write(
+            instance(root, "1.21.4").join(OPTIONS_FILE),
+            "renderDistance:12\nshaderPack:TestShader.zip\n",
+        )
+        .unwrap();
+
+        let manager = ContentManager::new(root);
+        manager
+            .record_shader_meta(
+                "1.21.4",
+                "TestShader.zip",
+                ShaderSupport {
+                    iris: true,
+                    optifine: true,
+                },
+                Some("Test Shader"),
+                Some("test-shader"),
+            )
+            .unwrap();
+        let shaders = manager.list_shaders("1.21.4");
+        assert_eq!(shaders.len(), 1);
+        assert!(shaders[0].enabled);
+        assert_eq!(shaders[0].title.as_deref(), Some("Test Shader"));
+        assert_eq!(
+            shaders[0].support,
+            Some(ShaderSupport {
+                iris: true,
+                optifine: true
+            })
+        );
+        assert!(shaders[0].size > 0);
+
+        assert!(manager
+            .set_shader_enabled("1.21.4", "TestShader.zip", false)
+            .unwrap());
+        let options = fs::read_to_string(instance(root, "1.21.4").join(OPTIONS_FILE)).unwrap();
+        assert!(options.contains("shaderPack:OFF"));
+        assert!(options.contains("renderDistance:12"));
+        assert!(!manager.list_shaders("1.21.4")[0].enabled);
+
+        manager.disable_shader("1.21.4").unwrap();
+        assert!(manager
+            .set_shader_enabled("1.21.4", "TestShader.zip", true)
+            .unwrap());
+        assert!(manager.list_shaders("1.21.4")[0].enabled);
+
+        let freed = manager.delete_shader("1.21.4", "TestShader.zip").unwrap();
+        assert!(freed > 0);
+        assert!(!dir.join("TestShader.zip").exists());
+        assert!(manager.list_shaders("1.21.4").is_empty());
+        let options = fs::read_to_string(instance(root, "1.21.4").join(OPTIONS_FILE)).unwrap();
+        assert!(options.contains("shaderPack:OFF"));
+        assert!(manager.delete_shader("1.21.4", "TestShader.zip").is_err());
+        assert!(manager
+            .set_shader_enabled("1.21.4", "../escape", true)
+            .is_err());
+    }
+
+    #[test]
+    fn shader_loader_status_detects_iris_and_optifine() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let dir = instance(root, "1.21.4");
+        let manager = ContentManager::new(root);
+        assert!(!manager.shader_loader_status("1.21.4").iris);
+        assert!(!manager.shader_loader_status("1.21.4").optifine);
+
+        fs::create_dir_all(dir.join("mods")).unwrap();
+        fs::write(dir.join("mods").join("iris-fabric-1.8.8.jar"), b"jar").unwrap();
+        let status = manager.shader_loader_status("1.21.4");
+        assert!(status.iris);
+        assert!(!status.optifine);
+
+        fs::write(dir.join("optionsof.txt"), b"shaderPack:OFF\n").unwrap();
+        assert!(manager.shader_loader_status("1.21.4").optifine);
+        fs::write(dir.join("mods").join("OptiFine_1.21.4.jar"), b"jar").unwrap();
+        assert!(manager.shader_loader_status("1.21.4").optifine);
+    }
+
+    #[test]
+    fn shader_import_requires_a_shaders_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        instance(root, "1.21.4");
+        let manager = ContentManager::new(root);
+
+        let valid = root.join("valid-shader.zip");
+        write_shader_zip(&valid);
+        assert_eq!(
+            manager.import_shader("1.21.4", &valid).unwrap(),
+            "valid-shader.zip"
+        );
+        assert!(root
+            .join("versions/1.21.4/shaderpacks/valid-shader.zip")
+            .is_file());
+        assert!(manager.import_shader("1.21.4", &valid).is_err());
+
+        let invalid = root.join("invalid.zip");
+        let file = fs::File::create(&invalid).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        zip.start_file("readme.txt", file_options()).unwrap();
+        zip.write_all(b"x").unwrap();
+        zip.finish().unwrap();
+        assert!(manager.import_shader("1.21.4", &invalid).is_err());
+
+        let folder = root.join("Folder Shader");
+        fs::create_dir_all(folder.join("shaders")).unwrap();
+        fs::write(folder.join("shaders/shaders.properties"), b"profile.LOW=\n").unwrap();
+        assert_eq!(
+            manager.import_shader("1.21.4", &folder).unwrap(),
+            "Folder Shader"
+        );
+        assert!(manager
+            .list_shaders("1.21.4")
+            .iter()
+            .any(|shader| shader.file == "Folder Shader" && shader.is_dir));
     }
 }

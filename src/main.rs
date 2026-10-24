@@ -7,6 +7,7 @@ mod account;
 mod auth;
 mod content;
 mod diagnose;
+mod discover;
 mod error;
 mod fabric;
 mod forge;
@@ -30,7 +31,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::parser::ValueSource;
 use clap::{arg, value_parser, ArgAction, Command};
-use rayon::prelude::*;
 
 use crate::auth::MicrosoftAuth;
 use crate::content::{game_mode_label, ContentManager};
@@ -39,7 +39,7 @@ use crate::forge::ForgeManager;
 use crate::http::SourceMode;
 use crate::instance::InstanceManager;
 use crate::launcher::MinecraftLauncher;
-use crate::mod_manager::ModManager;
+use crate::mod_manager::{DependencyMode, ModManager};
 use crate::modrinth as mr;
 use crate::neoforge::NeoForgeManager;
 use crate::version::VersionManager;
@@ -233,6 +233,15 @@ fn build_cli() -> Command {
              hot-rs-launcher list-resourcepacks -v 1.21.4\n  \
              hot-rs-launcher enable-resourcepack MyPack.zip -v 1.21.4\n  \
              hot-rs-launcher import-resourcepack ./MyPack.zip -v 1.21.4\n  \
+             hot-rs-launcher search --browse -v 1.21.4    # Browse popular mods\n  \
+             hot-rs-launcher search --browse --category optimization -v 1.21.4\n  \
+             hot-rs-launcher search-resourcepacks -v 1.21.4\n  \
+             hot-rs-launcher download-resourcepack translations-for-sodium -v 1.21.4 --enable\n  \
+             hot-rs-launcher search-shaders -v 1.21.4     # Shows Iris/OptiFine support\n  \
+             hot-rs-launcher download-shader bsl-shaders -v 1.21.4 --enable\n  \
+             hot-rs-launcher list-shaders -v 1.21.4\n  \
+             hot-rs-launcher optimize-mods -v 1.21.4 --limit 8\n  \
+             hot-rs-launcher optimize-mods -v 1.21.4 --apply --yes\n  \
              hot-rs-launcher tui                         # Full-screen terminal UI",
         )
         // Global options
@@ -313,14 +322,37 @@ fn build_cli() -> Command {
         .arg(arg!(--"keep-mods" "Keep mods/ when removing an instance").action(ArgAction::SetTrue))
         .arg(arg!(--"with-mods" "Include mods/ in backups").action(ArgAction::SetTrue))
         .arg(
-            arg!(--"install-loader" "Install the modpack loader after importing")
+            arg!(--"install-loader" "Install the loader needed by an imported modpack or shader")
                 .action(ArgAction::SetTrue),
         )
         .arg(
             arg!(--json "Print machine-readable JSON for list commands").action(ArgAction::SetTrue),
         )
         .arg(
-            arg!(--yes "Confirm destructive content operations (delete-save, delete-resourcepack)")
+            arg!(--yes "Confirm destructive operations and auto-install required mod dependencies")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
+            arg!(--"no-deps" "Do not install or prompt for required mod dependencies")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
+            arg!(--page <N> "Search/browse page, 1-based")
+                .value_parser(value_parser!(u32).range(1..=1000))
+                .default_value("1"),
+        )
+        .arg(
+            arg!(--sort <SORT> "Search sort: relevance, downloads, newest, updated")
+                .value_parser(["relevance", "downloads", "newest", "updated"])
+                .default_value("relevance"),
+        )
+        .arg(
+            arg!(--category <CAT> "Modrinth category filter (e.g. optimization)")
+                .value_parser(parse_component),
+        )
+        .arg(arg!(--browse "Browse popular projects without a query").action(ArgAction::SetTrue))
+        .arg(
+            arg!(--enable "Enable a downloaded resource pack or shader pack")
                 .action(ArgAction::SetTrue),
         )
         // Positional: action
@@ -341,6 +373,11 @@ fn build_cli() -> Command {
                     "list-mods",
                     "search",
                     "search-more",
+                    "search-resourcepacks",
+                    "search-shaders",
+                    "download-resourcepack",
+                    "download-shader",
+                    "optimize-mods",
                     "install-fabric",
                     "install-forge",
                     "install-neoforge",
@@ -370,6 +407,11 @@ fn build_cli() -> Command {
                     "disable-resourcepack",
                     "import-resourcepack",
                     "delete-resourcepack",
+                    "list-shaders",
+                    "enable-shader",
+                    "disable-shader",
+                    "import-shader",
+                    "delete-shader",
                     "tui",
                     "ui",
                 ]),
@@ -477,6 +519,15 @@ fn main() {
     let install_loader = matches.get_flag("install-loader");
     let json_output = matches.get_flag("json");
     let assume_yes = matches.get_flag("yes");
+    let no_deps = matches.get_flag("no-deps");
+    let page = *matches.get_one::<u32>("page").unwrap();
+    let sort = matches
+        .get_one::<String>("sort")
+        .cloned()
+        .unwrap_or_else(|| "relevance".into());
+    let category = matches.get_one::<String>("category").cloned();
+    let browse = matches.get_flag("browse");
+    let enable_pack = matches.get_flag("enable");
 
     // Resolve source mode: manual > auto-detect
     let manual_mode = if official_flag && bmcl_flag {
@@ -536,7 +587,71 @@ fn main() {
         "list-loaders" => cmd_list_loaders(),
         "list-installed" => cmd_list_installed(&game_dir, &launcher),
         "list-mods" => cmd_list_mods(&game_dir, mc_version),
-        "search" => cmd_search(&game_dir, query, limit, mc_version, loader.as_deref()),
+        "search" => cmd_search(
+            &game_dir,
+            query,
+            limit,
+            mc_version,
+            loader.as_deref(),
+            page,
+            sort.clone(),
+            category.clone(),
+            browse,
+            json_output,
+        ),
+        "search-resourcepacks" | "search-shaders" => {
+            let kind = if action == "search-shaders" {
+                crate::discover::DiscoverKind::Shaders
+            } else {
+                crate::discover::DiscoverKind::ResourcePacks
+            };
+            cmd_search_kind(
+                &game_dir,
+                kind,
+                query,
+                limit,
+                mc_version,
+                None,
+                page,
+                sort.clone(),
+                None,
+                false,
+                json_output,
+            );
+        }
+        "download-resourcepack" => {
+            let slug = query.clone().unwrap_or_else(|| {
+                crate::die!(
+                    "Provide the Modrinth project slug.",
+                    "Example: hot-rs-launcher download-resourcepack stay-true -v 1.21.4"
+                )
+            });
+            cmd_download_resourcepack(&game_dir, mc_version.clone(), &slug, enable_pack);
+        }
+        "download-shader" => {
+            let slug = query.clone().unwrap_or_else(|| {
+                crate::die!(
+                    "Provide the Modrinth project slug.",
+                    "Example: hot-rs-launcher download-shader complementary-reimagined -v 1.21.4"
+                )
+            });
+            cmd_download_shader(
+                &game_dir,
+                mc_version.clone(),
+                &slug,
+                enable_pack,
+                install_loader,
+            );
+        }
+        "optimize-mods" => cmd_optimize_mods(
+            &game_dir,
+            mc_version.clone(),
+            loader.clone(),
+            limit,
+            apply_updates,
+            assume_yes,
+            json_output,
+        ),
         "search-more" => cmd_search_more(&game_dir, query),
         "install-fabric" => cmd_install_fabric(&game_dir, mc_version, loader_version.as_deref()),
         "install-forge" => cmd_install_forge(
@@ -557,6 +672,13 @@ fn main() {
             mc_version,
             loader.as_deref(),
             mod_version.as_deref(),
+            if no_deps {
+                DependencyMode::Skip
+            } else if assume_yes {
+                DependencyMode::Auto
+            } else {
+                DependencyMode::Ask
+            },
         ),
         "disable-mod" => cmd_disable_mod(&game_dir, query, mc_version),
         "enable-mod" => cmd_enable_mod(&game_dir, query, mc_version),
@@ -712,6 +834,43 @@ fn main() {
                 );
             }
             cmd_delete_resourcepack(&game_dir, mc_version.clone(), &file);
+        }
+        "list-shaders" => cmd_list_shaders(&game_dir, mc_version.clone(), json_output),
+        "enable-shader" => {
+            let file = query.clone().unwrap_or_else(|| {
+                crate::die!(
+                    "Provide the shader pack file name.",
+                    "Example: hot-rs-launcher enable-shader ComplementaryShaders.zip -v 1.21.4"
+                )
+            });
+            cmd_set_shader(&game_dir, mc_version.clone(), Some(&file), true);
+        }
+        "disable-shader" => {
+            cmd_set_shader(&game_dir, mc_version.clone(), None, false);
+        }
+        "import-shader" => {
+            let source = query.clone().unwrap_or_else(|| {
+                crate::die!(
+                    "Provide the shader pack zip or folder to import.",
+                    "Example: hot-rs-launcher import-shader ./Complementary.zip -v 1.21.4"
+                )
+            });
+            cmd_import_shader(&game_dir, mc_version.clone(), std::path::Path::new(&source));
+        }
+        "delete-shader" => {
+            let file = query.clone().unwrap_or_else(|| {
+                crate::die!(
+                    "Provide the shader pack file name to delete.",
+                    "Example: hot-rs-launcher delete-shader Complementary.zip -v 1.21.4 --yes"
+                )
+            });
+            if !assume_yes {
+                crate::die!(
+                    "Refusing to delete a shader pack without --yes.",
+                    "Re-run with --yes after checking the file name."
+                );
+            }
+            cmd_delete_shader(&game_dir, mc_version.clone(), &file);
         }
         "play" => {
             let options = crate::launcher::LaunchOptions {
@@ -963,93 +1122,500 @@ fn cmd_list_mods(game_dir: &std::path::Path, mc_version: Option<String>) {
     crate::info!("{} enabled, {} disabled", enabled_count, disabled_count);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_search(
     game_dir: &std::path::Path,
     query: Option<String>,
     limit: u32,
     mc_version: Option<String>,
     loader: Option<&str>,
+    page: u32,
+    sort: String,
+    category: Option<String>,
+    browse: bool,
+    json: bool,
 ) {
-    let query = query.unwrap_or_else(|| {
-        crate::die!("Please provide a search query.\n  Example: hot-rs-launcher search sodium");
+    cmd_search_kind(
+        game_dir,
+        crate::discover::DiscoverKind::Mods,
+        query,
+        limit,
+        mc_version,
+        loader,
+        page,
+        sort,
+        category,
+        browse,
+        json,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_search_kind(
+    game_dir: &std::path::Path,
+    kind: crate::discover::DiscoverKind,
+    query: Option<String>,
+    limit: u32,
+    mc_version: Option<String>,
+    loader: Option<&str>,
+    page: u32,
+    sort: String,
+    category: Option<String>,
+    browse: bool,
+    json: bool,
+) {
+    let instance = mc_version.or_else(|| {
+        ModManager::list_installed_versions(game_dir)
+            .last()
+            .cloned()
     });
-
-    crate::log::header(&format!("Searching for: {} (source: modrinth)", query));
-
-    let mm = ModManager::new(game_dir);
-    let hits = mm.search(&query, limit, mc_version.as_deref(), loader);
-
+    let query = query.unwrap_or_default();
+    let query = query.trim().to_string();
+    let browse = browse || query.is_empty();
+    let sort = if browse { "downloads" } else { sort.as_str() };
+    let mut value = crate::discover::search(
+        kind,
+        &query,
+        sort,
+        page.saturating_sub(1),
+        limit,
+        instance.as_deref(),
+        loader,
+        category.as_deref(),
+    )
+    .unwrap_or_else(|error| crate::die!(format!("Search failed: {error}")));
+    if kind == crate::discover::DiscoverKind::Mods {
+        if let Some(instance) = instance.as_deref() {
+            crate::discover::mark_installed_mods(&mut value, game_dir, instance);
+        }
+    }
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&value).unwrap_or_default()
+        );
+        return;
+    }
+    let hits = value["hits"].as_array().cloned().unwrap_or_default();
+    let total = value["total_hits"].as_u64().unwrap_or(hits.len() as u64);
+    let mode = if browse { "Browse" } else { "Search" };
+    let scope = instance
+        .as_deref()
+        .map(|instance| format!(" · Minecraft {instance}"))
+        .unwrap_or_default();
+    let loader_scope = loader
+        .map(|loader| format!(" · {loader}"))
+        .unwrap_or_default();
+    crate::log::header(&format!(
+        "{mode} {}{scope}{loader_scope}",
+        kind.title(false)
+    ));
     if hits.is_empty() {
         crate::warn_msg!("No results found.");
         return;
     }
-
-    // Parallel loader support queries
-    let support_map: std::collections::HashMap<
-        String,
-        std::collections::BTreeMap<String, (String, String)>,
-    > = hits
-        .par_iter()
-        .filter_map(|h| {
-            let pid = h["project_id"].as_str()?;
-            let support = mm.loader_support(pid);
-            Some((pid.to_string(), support))
-        })
-        .collect();
-
-    for (i, h) in hits.iter().enumerate() {
-        let title = h["title"]
+    for (index, hit) in hits.iter().enumerate() {
+        let title = hit["title"]
             .as_str()
-            .unwrap_or(h["slug"].as_str().unwrap_or("?"));
-        let desc = h["description"]
-            .as_str()
-            .unwrap_or("")
-            .chars()
-            .take(100)
-            .collect::<String>();
-        let author = h["author"].as_str().unwrap_or("?");
-        let downloads = h["downloads"].as_u64().unwrap_or(0);
-        let categories = h["categories"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            })
-            .unwrap_or_default();
-        let source = h["source"].as_str().unwrap_or("?");
-
-        println!("  [{}.] {}", i + 1, title);
+            .or_else(|| hit["slug"].as_str())
+            .unwrap_or("?");
+        let slug = hit["slug"].as_str().unwrap_or("?");
+        let author = hit["author"].as_str().unwrap_or("?");
+        let downloads = hit["downloads"].as_u64().unwrap_or(0);
+        let installed = hit["_installed"].as_bool().unwrap_or(false);
+        let installed_version = hit["_installed_version"].as_str().unwrap_or("");
+        let marker = if installed {
+            if installed_version.is_empty() {
+                "  [installed]".to_string()
+            } else {
+                format!("  [installed {installed_version}]")
+            }
+        } else {
+            String::new()
+        };
+        println!("  [{:>2}.] {}{}", index + 1, title, marker);
         println!(
-            "      slug: {}  |  source: {}",
-            h["slug"].as_str().unwrap_or("?"),
-            source
-        );
-        println!(
-            "      by: {}  |  downloads: {}",
-            author,
+            "       slug: {slug}  ·  by {author}  ·  {} downloads",
             format_num(downloads)
         );
-        println!("      categories: {}", categories);
-
-        if let Some(support) = support_map.get(h["project_id"].as_str().unwrap_or("")) {
-            if !support.is_empty() {
+        let labels: Vec<&str> = hit["categories"]
+            .as_array()
+            .map(|values| values.iter().filter_map(|value| value.as_str()).collect())
+            .unwrap_or_default();
+        if kind == crate::discover::DiscoverKind::Shaders {
+            let support = crate::content::ShaderSupport::from_labels(labels.iter().copied());
+            println!("       shader loaders: {}", support.summary(false));
+        }
+        if !labels.is_empty() {
+            println!("       categories: {}", labels.join(", "));
+        }
+        if let Some(description) = hit["description"].as_str() {
+            if !description.is_empty() {
                 println!(
-                    "      support: {}",
-                    ModManager::format_loader_support(support)
+                    "       {}",
+                    description.chars().take(110).collect::<String>()
                 );
             }
         }
-        if !desc.is_empty() {
-            println!("      {}...", desc);
-        }
         println!();
     }
+    crate::info!("Page {} · {} result(s) · total {}", page, hits.len(), total);
+    if (page as u64) * (limit as u64) < total {
+        crate::info!("Next page: --page {}", page + 1);
+    }
+    match kind {
+        crate::discover::DiscoverKind::Mods => crate::info!(
+            "Install with: hot-rs-launcher install-mod <slug> -v {} --yes",
+            instance.as_deref().unwrap_or("<version>")
+        ),
+        crate::discover::DiscoverKind::ResourcePacks => crate::info!(
+            "Install with: hot-rs-launcher download-resourcepack <slug> -v {}",
+            instance.as_deref().unwrap_or("<version>")
+        ),
+        crate::discover::DiscoverKind::Shaders => crate::info!(
+            "Install with: hot-rs-launcher download-shader <slug> -v {}",
+            instance.as_deref().unwrap_or("<version>")
+        ),
+    }
+}
 
-    crate::info!("Found {} result(s).", hits.len());
-    crate::info!("Install with: hot-rs-launcher install-mod <slug> -v <version>");
-    crate::info!("Details with: hot-rs-launcher search-more <slug>");
+fn cmd_download_resourcepack(
+    game_dir: &std::path::Path,
+    mc_version: Option<String>,
+    slug: &str,
+    enable: bool,
+) {
+    let instance = resolve_mc_version(mc_version, game_dir);
+    crate::log::header(&format!("Download resource pack · {}", instance));
+    let report = crate::discover::install_resourcepack(game_dir, &instance, slug, enable)
+        .unwrap_or_else(|error| crate::die!(format!("Install failed: {error}")));
+    crate::success!(
+        "Installed '{}' ({}) for Minecraft {}.",
+        report.title,
+        report.file,
+        instance
+    );
+    if report.enabled {
+        crate::info!("Enabled for the next launch.");
+    } else {
+        crate::info!(
+            "Enable with: hot-rs-launcher enable-resourcepack '{}' -v {}",
+            report.file,
+            instance
+        );
+    }
+}
+
+fn cmd_download_shader(
+    game_dir: &std::path::Path,
+    mc_version: Option<String>,
+    slug: &str,
+    enable: bool,
+    install_loader: bool,
+) {
+    let instance = resolve_mc_version(mc_version, game_dir);
+    crate::log::header(&format!("Download shader pack · {}", instance));
+    let report = crate::discover::install_shader(game_dir, &instance, slug, enable)
+        .unwrap_or_else(|error| crate::die!(format!("Install failed: {error}")));
+    crate::success!(
+        "Installed '{}' ({}) for Minecraft {}.",
+        report.title,
+        report.file,
+        instance
+    );
+    crate::info!("Shader loaders: {}", report.support.summary(false));
+
+    let manager = ContentManager::new(game_dir);
+    let status = manager.shader_loader_status(&instance);
+    let instance_loader = InstanceManager::new(game_dir)
+        .loaders(&instance)
+        .first()
+        .cloned();
+    if report.support.iris && !status.iris {
+        match instance_loader
+            .as_deref()
+            .and_then(crate::discover::shader_loader_mod)
+        {
+            Some((mod_slug, title)) => {
+                if install_loader {
+                    crate::info!("Installing {} for Iris support...", title);
+                    match ModManager::new(game_dir).install_with(
+                        mod_slug,
+                        &instance,
+                        instance_loader.as_deref(),
+                        None,
+                        DependencyMode::Auto,
+                    ) {
+                        Ok(_) => crate::success!("{} installed.", title),
+                        Err(error) => {
+                            crate::error_msg!("{} install failed: {}", title, error);
+                        }
+                    }
+                } else {
+                    crate::info!(
+                        "Install {} with: hot-rs-launcher install-mod {} -v {} --loader {} --yes",
+                        title,
+                        mod_slug,
+                        instance,
+                        instance_loader.as_deref().unwrap_or("fabric")
+                    );
+                }
+            }
+            None => {
+                crate::warn_msg!(
+                    "This shader supports Iris, but '{}' has no Fabric/NeoForge/Forge loader. Install a loader first.",
+                    instance
+                );
+            }
+        }
+    }
+    if report.support.optifine && !status.optifine {
+        crate::info!(
+            "OptiFine is also supported; install OptiFine manually from https://optifine.net/downloads (the launcher does not run its installer)."
+        );
+    }
+    if report.support.is_empty() {
+        crate::warn_msg!("Shader loader support is unknown; check the project page.");
+    }
+    if report.enabled {
+        crate::info!("Enabled for the next launch.");
+    } else {
+        crate::info!(
+            "Enable with: hot-rs-launcher enable-shader '{}' -v {}",
+            report.file,
+            instance
+        );
+    }
+}
+
+fn cmd_list_shaders(game_dir: &std::path::Path, mc_version: Option<String>, json: bool) {
+    let instance = resolve_mc_version_quiet(mc_version, game_dir, json);
+    let manager = ContentManager::new(game_dir);
+    let shaders = manager.list_shaders(&instance);
+    let status = manager.shader_loader_status(&instance);
+    if json {
+        let value = serde_json::json!({
+            "instance": instance,
+            "loaders": {"iris": status.iris, "optifine": status.optifine},
+            "shaders": shaders.iter().map(|shader| serde_json::json!({
+                "file": shader.file,
+                "enabled": shader.enabled,
+                "is_dir": shader.is_dir,
+                "size": shader.size,
+                "title": shader.title,
+                "project": shader.project,
+                "iris": shader.support.map(|support| support.iris).unwrap_or(false),
+                "optifine": shader.support.map(|support| support.optifine).unwrap_or(false),
+            })).collect::<Vec<_>>(),
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&value).unwrap_or_default()
+        );
+        return;
+    }
+    crate::log::header(&format!("Shader packs · {}", instance));
+    crate::info!("Shader loader: {}", status.summary(false));
+    if shaders.is_empty() {
+        crate::warn_msg!("No shader packs installed for '{}'.", instance);
+        crate::info!(
+            "Browse with: hot-rs-launcher search-shaders --browse -v {}",
+            instance
+        );
+        return;
+    }
+    for shader in &shaders {
+        let support = shader
+            .support
+            .map(|support| support.summary(false))
+            .unwrap_or_else(|| "unknown".into());
+        let title = shader.title.as_deref().unwrap_or(&shader.file);
+        println!(
+            "  {} {:<34} {:>9}  {:<20} {}",
+            if shader.enabled { "[on] " } else { "[off]" },
+            crate::tui::theme::truncate_chars(title, 34),
+            crate::tui::theme::format_bytes(shader.size),
+            support,
+            if shader.is_dir { "folder" } else { "zip" }
+        );
+    }
+    crate::info!(
+        "Enable with: hot-rs-launcher enable-shader '<file>' -v {}",
+        instance
+    );
+}
+
+fn cmd_set_shader(
+    game_dir: &std::path::Path,
+    mc_version: Option<String>,
+    file: Option<&str>,
+    enabled: bool,
+) {
+    let instance = resolve_mc_version(mc_version, game_dir);
+    let manager = ContentManager::new(game_dir);
+    if enabled {
+        let file = file.unwrap_or_else(|| crate::die!("Provide the shader pack file name."));
+        manager
+            .set_shader_enabled(&instance, file, true)
+            .unwrap_or_else(|error| crate::die!(format!("Shader update failed: {error}")));
+        crate::success!("Enabled shader pack '{}' for {}.", file, instance);
+    } else {
+        manager
+            .disable_shader(&instance)
+            .unwrap_or_else(|error| crate::die!(format!("Shader update failed: {error}")));
+        crate::success!("Disabled shader packs for {}.", instance);
+    }
+}
+
+fn cmd_import_shader(
+    game_dir: &std::path::Path,
+    mc_version: Option<String>,
+    source: &std::path::Path,
+) {
+    let instance = resolve_mc_version(mc_version, game_dir);
+    crate::log::header(&format!("Import shader pack · {}", instance));
+    crate::info!("Source: {}", source.display());
+    let manager = ContentManager::new(game_dir);
+    let name = manager
+        .import_shader(&instance, source)
+        .unwrap_or_else(|error| crate::die!(format!("Import failed: {error}")));
+    crate::success!("Imported shader pack '{}'.", name);
+    crate::info!(
+        "Enable it with: hot-rs-launcher enable-shader '{}' -v {}",
+        name,
+        instance
+    );
+}
+
+fn cmd_delete_shader(game_dir: &std::path::Path, mc_version: Option<String>, file: &str) {
+    let instance = resolve_mc_version(mc_version, game_dir);
+    crate::log::header(&format!("Delete shader pack · {}", instance));
+    let manager = ContentManager::new(game_dir);
+    let freed = manager
+        .delete_shader(&instance, file)
+        .unwrap_or_else(|error| crate::die!(format!("Delete failed: {error}")));
+    crate::success!(
+        "Deleted shader pack '{}' ({} freed).",
+        file,
+        crate::tui::theme::format_bytes(freed)
+    );
+}
+
+fn cmd_optimize_mods(
+    game_dir: &std::path::Path,
+    mc_version: Option<String>,
+    loader: Option<String>,
+    limit: u32,
+    apply: bool,
+    assume_yes: bool,
+    json: bool,
+) {
+    let instance = resolve_mc_version(mc_version, game_dir);
+    let loader = loader.or_else(|| {
+        InstanceManager::new(game_dir)
+            .loaders(&instance)
+            .first()
+            .cloned()
+    });
+    let Some(loader) = loader else {
+        crate::die!(format!(
+            "Install Fabric, Forge or NeoForge for '{}' before adding optimization mods.",
+            instance
+        ));
+    };
+    let hits =
+        crate::discover::recommended_optimizations(game_dir, &instance, Some(&loader), limit)
+            .unwrap_or_else(|error| crate::die!(format!("Optimization search failed: {error}")));
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&hits).unwrap_or_default()
+        );
+        return;
+    }
+    crate::log::header(&format!("Optimization Mods · {} · {}", instance, loader));
+    if hits.is_empty() {
+        crate::warn_msg!("No optimization mods found for this version and loader.");
+        return;
+    }
+    for (index, hit) in hits.iter().enumerate() {
+        let title = hit["title"]
+            .as_str()
+            .or_else(|| hit["slug"].as_str())
+            .unwrap_or("?");
+        let slug = hit["slug"].as_str().unwrap_or("?");
+        let downloads = hit["downloads"].as_u64().unwrap_or(0);
+        let installed = hit["_installed"].as_bool().unwrap_or(false);
+        let version = hit["_installed_version"].as_str().unwrap_or("");
+        let marker = if installed {
+            if version.is_empty() {
+                "  [installed]".to_string()
+            } else {
+                format!("  [installed {version}]")
+            }
+        } else {
+            String::new()
+        };
+        println!(
+            "  [{:>2}.] {:<34} {:<30} {:>12}{}",
+            index + 1,
+            title,
+            slug,
+            format_num(downloads),
+            marker
+        );
+    }
+    let missing = hits
+        .iter()
+        .filter(|hit| !hit["_installed"].as_bool().unwrap_or(false))
+        .count();
+    if apply {
+        if !assume_yes {
+            crate::die!(
+                "Refusing to install optimization mods without --yes.",
+                "Re-run with --yes after reviewing the list."
+            );
+        }
+        let mut installed_count = 0usize;
+        let mut failed = 0usize;
+        for hit in hits
+            .iter()
+            .filter(|hit| !hit["_installed"].as_bool().unwrap_or(false))
+        {
+            let slug = hit["slug"].as_str().unwrap_or("");
+            if slug.is_empty() {
+                continue;
+            }
+            let title = hit["title"].as_str().unwrap_or(slug);
+            match ModManager::new(game_dir).install_with(
+                slug,
+                &instance,
+                Some(&loader),
+                None,
+                DependencyMode::Auto,
+            ) {
+                Ok(_) => {
+                    installed_count += 1;
+                    crate::success!("Installed {}", title);
+                }
+                Err(error) => {
+                    failed += 1;
+                    crate::error_msg!("{}: {}", title, error);
+                }
+            }
+        }
+        crate::success!(
+            "{} optimization mod(s) installed, {} failed.",
+            installed_count,
+            failed
+        );
+    } else {
+        crate::info!(
+            "{} missing; install with: hot-rs-launcher optimize-mods -v {} --apply --yes",
+            missing,
+            instance
+        );
+    }
 }
 
 fn cmd_search_more(_game_dir: &std::path::Path, query: Option<String>) {
@@ -1312,6 +1878,7 @@ fn cmd_install_mod(
     mc_version: Option<String>,
     loader: Option<&str>,
     mod_version: Option<&str>,
+    dependencies: DependencyMode,
 ) {
     let slug = query.unwrap_or_else(|| {
         crate::die!(
@@ -1323,7 +1890,9 @@ fn cmd_install_mod(
     crate::log::header(&format!("Install Mod for MC {}", mc_version));
 
     let mm = ModManager::new(game_dir);
-    let (_paths, _version_data, project) = mm.install(&slug, &mc_version, loader, mod_version);
+    let (_paths, _version_data, project) = mm
+        .install_with(&slug, &mc_version, loader, mod_version, dependencies)
+        .unwrap_or_else(|error| crate::die!(error));
 
     let title = project["title"].as_str().unwrap_or(&slug);
     let source = project["source"].as_str().unwrap_or("modrinth");

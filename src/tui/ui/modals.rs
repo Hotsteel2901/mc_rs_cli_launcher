@@ -203,7 +203,17 @@ fn help_lines(app: &App) -> Vec<Line<'static>> {
         Line::from(vec![key("x"), desc(tr("uninstall after confirmation", "确认后卸载"))]),
         Line::from(vec![
             key("s / /"),
-            desc(tr("search Modrinth with version + loader facets", "按版本与加载器筛选搜索 Modrinth")),
+            desc(tr(
+                "browse or search Modrinth (browse opens by default)",
+                "浏览或搜索 Modrinth（默认浏览）",
+            )),
+        ]),
+        Line::from(vec![
+            key("O"),
+            desc(tr(
+                "install recommended optimization mods",
+                "安装推荐的优化模组",
+            )),
         ]),
         Line::from(vec![key("v"), desc(tr("switch the active Minecraft version", "切换活跃 Minecraft 版本"))]),
         Line::from(vec![
@@ -214,19 +224,28 @@ fn help_lines(app: &App) -> Vec<Line<'static>> {
             key("U"),
             desc(tr("download and apply all updates", "下载并应用全部更新")),
         ]),
-        Line::from(vec![
-            key("U"),
-            desc(tr("download and apply all updates", "下载并应用全部更新")),
-        ]),
         Line::from(""),
         section(tr("CONTENT", "内容")),
         Line::from(vec![
             key("t"),
-            desc(tr("switch between saves and resource packs", "在存档和资源包之间切换")),
+            desc(tr(
+                "switch saves / resource packs / shaders",
+                "在存档 / 资源包 / 光影包之间切换",
+            )),
+        ]),
+        Line::from(vec![
+            key("d"),
+            desc(tr(
+                "browse and download packs or shaders",
+                "浏览并下载资源包或光影包",
+            )),
         ]),
         Line::from(vec![
             key("space"),
-            desc(tr("enable / disable the selected resource pack", "启用/禁用所选资源包")),
+            desc(tr(
+                "enable / disable the selected resource or shader pack",
+                "启用/禁用所选资源包或光影包",
+            )),
         ]),
         Line::from(vec![
             key("b"),
@@ -234,17 +253,46 @@ fn help_lines(app: &App) -> Vec<Line<'static>> {
         ]),
         Line::from(vec![
             key("i"),
-            desc(tr("import a world zip or resource pack", "导入存档压缩包或资源包")),
+            desc(tr(
+                "import a world, resource pack or shader pack",
+                "导入存档、资源包或光影包",
+            )),
         ]),
         Line::from(vec![
             key("x"),
-            desc(tr("delete the selected world or pack", "删除所选存档或资源包")),
+            desc(tr("delete the selected item", "删除所选内容")),
         ]),
         Line::from(vec![
             key("o"),
-            desc(tr("open the saves / resourcepacks folder", "打开存档/资源包目录")),
+            desc(tr("open the saves / packs folder", "打开存档/资源包目录")),
         ]),
         Line::from(vec![key("v"), desc(tr("switch the active instance", "切换活跃实例"))]),
+        Line::from(""),
+        section(tr("DISCOVER", "浏览下载")),
+        Line::from(vec![
+            key("tab"),
+            desc(tr("switch between the search box and results", "在搜索框和结果之间切换")),
+        ]),
+        Line::from(vec![
+            key("enter"),
+            desc(tr("install the selected project", "安装所选项目")),
+        ]),
+        Line::from(vec![
+            key("[ / ]"),
+            desc(tr("previous / next page", "上一页 / 下一页")),
+        ]),
+        Line::from(vec![
+            key("b"),
+            desc(tr("reload the browse list", "重新加载浏览列表")),
+        ]),
+        Line::from(vec![
+            key("c"),
+            desc(tr("toggle the optimization category (mods)", "切换优化分类（模组）")),
+        ]),
+        Line::from(vec![
+            key("o"),
+            desc(tr("open the project page", "打开项目页面")),
+        ]),
         Line::from(""),
         section(tr("ACCOUNTS", "账号")),
         Line::from(vec![key("a"), desc(tr("add an offline profile", "添加离线档案"))]),

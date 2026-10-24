@@ -43,6 +43,45 @@ fn string_list(value: &serde_json::Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Identify installed mods by SHA-1 and return project id -> version number.
+/// Used to mark search results and to avoid reinstalling optimization mods.
+pub fn installed_projects(
+    game_dir: &Path,
+    mc_version: &str,
+) -> Result<HashMap<String, String>, String> {
+    let manager = ModManager::new(game_dir);
+    let mods_dir = manager.mods_dir(mc_version);
+    let mut hashes = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&mods_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !(name.ends_with(".jar") || name.ends_with(".jar.disabled")) {
+                continue;
+            }
+            if let Ok(hash) = crate::util::sha1_file(&entry.path()) {
+                hashes.push(hash);
+            }
+        }
+    }
+    if hashes.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let known = modrinth::lookup_files_by_sha1(&hashes)?;
+    let mut projects = HashMap::new();
+    for version in known.values() {
+        if let Some(project_id) = version["project_id"].as_str() {
+            projects.insert(
+                project_id.to_string(),
+                version["version_number"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+            );
+        }
+    }
+    Ok(projects)
+}
+
 /// Check all installed jars against the newest version available for the
 /// current Minecraft version and loader.
 pub fn check(

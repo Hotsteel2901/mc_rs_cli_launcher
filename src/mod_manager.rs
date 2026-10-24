@@ -4,6 +4,17 @@ use std::path::{Path, PathBuf};
 
 use crate::modrinth;
 
+/// How missing required mod dependencies are handled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DependencyMode {
+    /// Prompt on an interactive terminal (CLI default).
+    Ask,
+    /// Install required dependencies without prompting (TUI / --yes).
+    Auto,
+    /// Never install dependencies (--no-deps).
+    Skip,
+}
+
 pub struct ModManager {
     pub game_dir: PathBuf,
 }
@@ -56,49 +67,13 @@ impl ModManager {
         vers
     }
 
-    /// Search for mods on Modrinth.
-    pub fn search(
-        &self,
-        query: &str,
-        limit: u32,
-        game_version: Option<&str>,
-        loader: Option<&str>,
-    ) -> Vec<serde_json::Value> {
-        let mut facets: Vec<serde_json::Value> = vec![serde_json::json!(["project_type:mod"])];
-
-        if let Some(l) = loader {
-            facets.push(serde_json::json!([format!(
-                "categories:{}",
-                l.to_lowercase()
-            )]));
-        }
-        if let Some(gv) = game_version {
-            facets.push(serde_json::json!([format!("versions:{}", gv)]));
-        }
-
-        let result = modrinth::search_projects(
-            query,
-            "relevance",
-            limit,
-            0,
-            Some(&serde_json::json!(facets)),
-        );
-
-        let mut hits: Vec<serde_json::Value> =
-            result["hits"].as_array().cloned().unwrap_or_default();
-        for h in &mut hits {
-            h["source"] = serde_json::json!("modrinth");
-        }
-        hits
-    }
-
     /// Get loader support info for a project.
     pub fn loader_support(
         &self,
         project_id: &str,
-    ) -> std::collections::BTreeMap<String, (String, String)> {
-        let versions = modrinth::get_project_versions(project_id, None, None);
-        Self::summarize_loader_support(&versions)
+    ) -> Result<std::collections::BTreeMap<String, (String, String)>, String> {
+        let versions = modrinth::get_project_versions_result(project_id, None, None)?;
+        Ok(Self::summarize_loader_support(&versions))
     }
 
     /// Summarize loader support from version data.
@@ -240,19 +215,21 @@ impl ModManager {
         Some(detected[0].clone())
     }
 
-    /// Install a mod.
-    pub fn install(
+    /// Fallible install used by the TUI and batch optimization flow.
+    pub fn install_with(
         &self,
         slug: &str,
         mc_version: &str,
         loader: Option<&str>,
         version_id: Option<&str>,
-    ) -> (Vec<PathBuf>, serde_json::Value, serde_json::Value) {
+        dependencies: DependencyMode,
+    ) -> Result<(Vec<PathBuf>, serde_json::Value, serde_json::Value), String> {
         self.install_inner(
             slug,
             mc_version,
             loader,
             version_id,
+            dependencies,
             &mut std::collections::HashSet::new(),
         )
     }
@@ -263,27 +240,30 @@ impl ModManager {
         mc_version: &str,
         loader: Option<&str>,
         version_id: Option<&str>,
+        dependencies: DependencyMode,
         visiting: &mut std::collections::HashSet<String>,
-    ) -> (Vec<PathBuf>, serde_json::Value, serde_json::Value) {
+    ) -> Result<(Vec<PathBuf>, serde_json::Value, serde_json::Value), String> {
         crate::info!("Resolving mod: {}...", slug);
         let loader = self.pick_loader(mc_version, loader);
         if let Some(ref l) = loader {
             crate::info!("Using loader: {}", l);
         }
 
-        let project = modrinth::get_project(slug);
+        let project = modrinth::get_project_result(slug)
+            .map_err(|error| format!("Cannot resolve mod '{slug}': {error}"))?;
         let project_id = project["id"].as_str().unwrap_or(slug);
         if !visiting.insert(project_id.to_string()) {
-            crate::die!(format!(
+            return Err(format!(
                 "Cyclic mod dependency detected at {slug}; installation stopped."
             ));
         }
 
-        let versions = modrinth::get_project_versions(
+        let versions = modrinth::get_project_versions_result(
             project_id,
             loader.as_ref().map(|l| vec![l.clone()]).as_deref(),
             Some(&[mc_version.to_string()]),
-        );
+        )
+        .map_err(|error| format!("Cannot list versions for {slug}: {error}"))?;
 
         let proj_title = project["title"].as_str().unwrap_or(slug);
 
@@ -298,7 +278,7 @@ impl ModManager {
             );
             crate::error_msg!("No versions found for {}{}", proj_title, extra);
 
-            let support = self.loader_support(project_id);
+            let support = self.loader_support(project_id).unwrap_or_default();
             if !support.is_empty() {
                 println!("\n  Available support for '{}':", proj_title);
                 println!("    {}", Self::format_loader_support(&support));
@@ -307,7 +287,7 @@ impl ModManager {
             if loader.is_none() {
                 println!("  Hint: install a loader first, or specify --loader manually");
             }
-            std::process::exit(1);
+            return Err(format!("No versions found for {proj_title}{extra}"));
         }
 
         let mut versions_arr = versions.as_array().unwrap().clone();
@@ -317,9 +297,7 @@ impl ModManager {
                 .iter()
                 .find(|v| v["id"].as_str() == Some(vid))
                 .cloned()
-                .unwrap_or_else(|| {
-                    crate::die!(format!("Version '{}' not found for {}", vid, proj_title));
-                })
+                .ok_or_else(|| format!("Version '{vid}' not found for {proj_title}"))?
         } else {
             // Sort: loader match first, then by date
             versions_arr.sort_by(|a, b| {
@@ -399,7 +377,13 @@ impl ModManager {
         println!("    Loaders:       {}", loaders_str);
 
         // Check dependencies
-        self.check_dependencies(&target, mc_version, loader.as_deref(), visiting);
+        self.check_dependencies(
+            &target,
+            mc_version,
+            loader.as_deref(),
+            dependencies,
+            visiting,
+        )?;
 
         let dest_dir = self.mods_dir(mc_version);
         let l = if loader.is_some() {
@@ -408,7 +392,7 @@ impl ModManager {
             proj_title.to_string()
         };
         let paths = modrinth::download_version_files(&target, &dest_dir, &l)
-            .unwrap_or_else(|e| crate::die!(format!("Mod installation failed: {e}")));
+            .map_err(|error| format!("Mod installation failed: {error}"))?;
         let total_size: u64 = paths
             .iter()
             .filter_map(|p| p.metadata().ok().map(|m| m.len()))
@@ -421,7 +405,7 @@ impl ModManager {
         );
 
         visiting.remove(project_id);
-        (paths, target, project)
+        Ok((paths, target, project))
     }
 
     /// Check and display mod dependencies.
@@ -430,15 +414,16 @@ impl ModManager {
         version_data: &serde_json::Value,
         mc_version: &str,
         loader: Option<&str>,
+        dependencies: DependencyMode,
         visiting: &mut std::collections::HashSet<String>,
-    ) {
+    ) -> Result<(), String> {
         let deps: Vec<&serde_json::Value> = version_data["dependencies"]
             .as_array()
             .map(|arr| arr.iter().filter(|d| d["project_id"].is_string()).collect())
             .unwrap_or_default();
 
-        if deps.is_empty() {
-            return;
+        if deps.is_empty() || dependencies == DependencyMode::Skip {
+            return Ok(());
         }
 
         let dest_dir = self.mods_dir(mc_version);
@@ -463,15 +448,17 @@ impl ModManager {
             let dep_pid = dep["project_id"].as_str().unwrap_or("");
             let dep_type = dep["dependency_type"].as_str().unwrap_or("required");
 
-            let dep_proj = modrinth::get_project(dep_pid);
+            let dep_proj = modrinth::get_project_result(dep_pid)
+                .map_err(|error| format!("Cannot resolve dependency {dep_pid}: {error}"))?;
             let dep_title = dep_proj["title"].as_str().unwrap_or(dep_pid);
             let dep_slug = dep_proj["slug"].as_str().unwrap_or(dep_pid);
 
-            let dep_versions = modrinth::get_project_versions(
+            let dep_versions = modrinth::get_project_versions_result(
                 dep_pid,
                 loader.map(|l| vec![l.to_string()]).as_deref(),
                 Some(&[mc_version.to_string()]),
-            );
+            )
+            .map_err(|error| format!("Cannot list versions for dependency {dep_pid}: {error}"))?;
 
             let (dep_ver_num, dep_mc) = if let Some(arr) = dep_versions.as_array() {
                 if arr.is_empty() {
@@ -533,7 +520,7 @@ impl ModManager {
         }
 
         if required_missing.is_empty() && optional_list.is_empty() {
-            return;
+            return Ok(());
         }
 
         println!();
@@ -584,23 +571,43 @@ impl ModManager {
                 required_missing.len()
             );
 
-            // Auto-install required dependencies
-            print!("\n  Auto-install missing dependencies? [y/N]: ");
-            use std::io::{self, Write};
-            io::stdout().flush().ok();
-            let mut answer = String::new();
-            if io::stdin().read_line(&mut answer).is_ok() {
-                let answer = answer.trim().to_lowercase();
-                if answer == "y" || answer == "yes" {
-                    for (title, slug, _ver, _mc) in &required_missing {
-                        crate::info!("Installing dependency: {} ({})", title, slug);
-                        self.install_inner(slug, mc_version, loader, None, visiting);
-                        crate::success!("Installed: {}", title);
+            let install_required = match dependencies {
+                DependencyMode::Auto => true,
+                DependencyMode::Ask => {
+                    use std::io::IsTerminal;
+                    if std::io::stdin().is_terminal() {
+                        print!("\n  Auto-install missing dependencies? [y/N]: ");
+                        use std::io::{self, Write};
+                        io::stdout().flush().ok();
+                        let mut answer = String::new();
+                        io::stdin().read_line(&mut answer).is_ok()
+                            && matches!(answer.trim().to_lowercase().as_str(), "y" | "yes")
+                    } else {
+                        println!(
+                            "  Hint: re-run with --yes to install required dependencies automatically."
+                        );
+                        false
                     }
+                }
+                DependencyMode::Skip => false,
+            };
+            if install_required {
+                for (title, slug, _ver, _mc) in &required_missing {
+                    crate::info!("Installing dependency: {} ({})", title, slug);
+                    self.install_inner(
+                        slug,
+                        mc_version,
+                        loader,
+                        None,
+                        DependencyMode::Auto,
+                        visiting,
+                    )?;
+                    crate::success!("Installed: {}", title);
                 }
             }
         }
         println!();
+        Ok(())
     }
 
     /// List installed mods for a version.

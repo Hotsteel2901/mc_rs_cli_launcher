@@ -666,8 +666,8 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect, t: f64) {
                 ("↑↓", lang.pick("select", "选择")),
                 ("space", lang.pick("toggle", "启停")),
                 ("x", lang.pick("remove", "卸载")),
-                ("s", lang.pick("search", "搜索")),
-                ("v", lang.pick("version", "版本")),
+                ("s", lang.pick("browse", "浏览")),
+                ("O", lang.pick("optimize", "优化")),
             ],
             Screen::Content => match app.content_kind {
                 ContentKind::Saves => vec![
@@ -680,11 +680,19 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect, t: f64) {
                 ],
                 ContentKind::ResourcePacks => vec![
                     ("t", lang.pick("tab", "切换")),
+                    ("d", lang.pick("browse", "浏览")),
                     ("space", lang.pick("toggle", "启停")),
                     ("i", lang.pick("import", "导入")),
                     ("x", lang.pick("delete", "删除")),
                     ("o", lang.pick("folder", "目录")),
-                    ("v", lang.pick("version", "版本")),
+                ],
+                ContentKind::Shaders => vec![
+                    ("t", lang.pick("tab", "切换")),
+                    ("d", lang.pick("browse", "浏览")),
+                    ("space", lang.pick("toggle", "启停")),
+                    ("i", lang.pick("import", "导入")),
+                    ("x", lang.pick("delete", "删除")),
+                    ("o", lang.pick("folder", "目录")),
                 ],
             },
             Screen::Accounts => vec![
@@ -1435,10 +1443,11 @@ pub fn log_line(log: &LogLine, width: u16) -> Line<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::discover::DiscoverKind;
     use crate::progress::TransferEvent;
     use crate::tui::app::{
         Bootstrap, ConfirmAction, ContentKind, JobView, Modal, MouseAction, PickerItem, PickerKind,
-        PickerState, Screen, SearchFocus,
+        PickerState, Screen, SearchFocus, SearchState,
     };
     use crate::tui::input::TextInput;
     use crate::tui::jobs::LogLevel;
@@ -1485,9 +1494,23 @@ mod tests {
                 .unwrap();
             zip.finish().unwrap();
         }
+        std::fs::create_dir_all(version.join("shaderpacks")).unwrap();
+        {
+            use std::io::Write;
+            let file =
+                std::fs::File::create(version.join("shaderpacks").join("TestShader.zip")).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            zip.start_file(
+                "shaders/shaders.properties",
+                zip::write::FileOptions::default(),
+            )
+            .unwrap();
+            zip.write_all(b"profile.MEDIUM=\n").unwrap();
+            zip.finish().unwrap();
+        }
         std::fs::write(
             version.join("options.txt"),
-            b"renderDistance:12\nresourcePacks:[\"file/Pack.zip\",\"vanilla\"]\n",
+            b"renderDistance:12\nresourcePacks:[\"file/Pack.zip\",\"vanilla\"]\nshaderPack:TestShader.zip\n",
         )
         .unwrap();
         let fabric_profile = game
@@ -1629,6 +1652,125 @@ mod tests {
     }
 
     #[test]
+    fn discover_overlay_defaults_to_browse_and_shows_loader_badges() {
+        let (mut app, _dir) = app_with_data();
+        app.splash_until = None;
+        app.search = SearchState::default();
+        app.search.open = true;
+        app.search.kind = DiscoverKind::Shaders;
+        app.search.browse = true;
+        app.search.total_hits = 1;
+        app.search.results = crate::tui::app::parse_search_hits(&serde_json::json!({
+            "hits": [{
+                "slug": "bsl-shaders",
+                "title": "BSL Shaders",
+                "description": "Bright and colorful",
+                "author": "CaptTatsu",
+                "downloads": 42,
+                "categories": ["iris", "optifine"],
+                "project_type": "shader"
+            }]
+        }));
+        app.search.list_state.select(Some(0));
+        let text = render_at(&mut app, 110, 34);
+        assert!(text.contains("BROWSE"), "{text}");
+        assert!(text.contains("BSL Shaders"), "{text}");
+        assert!(
+            text.contains("Iris + OptiFine") || text.contains("shader loaders"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn discover_marks_installed_mods_and_optimization_category() {
+        let (mut app, _dir) = app_with_data();
+        app.splash_until = None;
+        app.search = SearchState::default();
+        app.search.open = true;
+        app.search.kind = DiscoverKind::Mods;
+        app.search.category = Some("optimization".into());
+        app.search.total_hits = 2;
+        app.search.results = crate::tui::app::parse_search_hits(&serde_json::json!({
+            "hits": [
+                {
+                    "slug": "sodium", "title": "Sodium", "description": "Fast",
+                    "author": "jellysquid3", "downloads": 10,
+                    "categories": ["fabric", "optimization"], "project_type": "mod",
+                    "_installed": true, "_installed_version": "0.6.0"
+                },
+                {
+                    "slug": "lithium", "title": "Lithium", "description": "Fast logic",
+                    "author": "jellysquid3", "downloads": 9,
+                    "categories": ["fabric", "optimization"], "project_type": "mod"
+                }
+            ]
+        }));
+        app.search.list_state.select(Some(0));
+        let text = render_at(&mut app, 110, 34);
+        assert!(text.contains("Sodium"), "{text}");
+        assert!(
+            text.contains("installed") || text.contains("已安装"),
+            "{text}"
+        );
+        assert!(
+            text.contains("category optimization") || text.contains("分类 optimization"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn discover_pages_categories_and_browse_reset() {
+        let (mut app, _dir) = app_with_data();
+        app.search = SearchState::default();
+        app.search.open = true;
+        app.search.kind = DiscoverKind::Mods;
+        app.search.focus = SearchFocus::Results;
+        app.search.results = crate::tui::app::parse_search_hits(&serde_json::json!({
+            "hits": [{
+                "slug": "sodium", "title": "Sodium", "description": "Fast",
+                "author": "jellysquid3", "downloads": 10,
+                "categories": ["fabric", "optimization"], "project_type": "mod"
+            }]
+        }));
+        app.search.list_state.select(Some(0));
+
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE));
+        assert_eq!(app.search.page, 1);
+        app.search.focus = SearchFocus::Results;
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Char('['), KeyModifiers::NONE));
+        assert_eq!(app.search.page, 0);
+
+        app.search.focus = SearchFocus::Results;
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        assert_eq!(app.search.category.as_deref(), Some("optimization"));
+        app.search.focus = SearchFocus::Results;
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        assert!(app.search.category.is_none());
+
+        app.search.input.set("sodium");
+        app.search.browse = false;
+        app.search.focus = SearchFocus::Results;
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
+        assert!(app.search.input.value().is_empty());
+        assert!(app.search.browse);
+    }
+
+    #[test]
+    fn mods_optimization_shortcut_opens_confirmation() {
+        let (mut app, _dir) = app_with_data();
+        app.splash_until = None;
+        app.screen = Screen::Mods;
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Char('O'), KeyModifiers::SHIFT));
+        assert!(matches!(
+            app.modal,
+            Some(Modal::Confirm {
+                action: ConfirmAction::InstallOptimizations,
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn settings_cursor_reaches_every_row() {
         let (mut app, _dir) = app_with_data();
         app.splash_until = None;
@@ -1666,6 +1808,18 @@ mod tests {
         assert!(app.resourcepacks[0].enabled);
 
         let _ = app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
+        assert_eq!(app.content_kind, ContentKind::Shaders);
+        assert_eq!(app.shaders.len(), 1);
+        assert!(app.shaders[0].enabled);
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert!(!app.shaders[0].enabled);
+        let options =
+            std::fs::read_to_string(app.game_dir.join("versions/1.21.4/options.txt")).unwrap();
+        assert!(options.contains("shaderPack:OFF"));
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert!(app.shaders[0].enabled);
+
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
         assert_eq!(app.content_kind, ContentKind::Saves);
         let _ = app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
         assert!(matches!(
@@ -1701,6 +1855,9 @@ mod tests {
         );
         let text = render_at(&mut app, 80, 24);
         assert!(text.contains("Pack.zip"), "{text}");
+        app.content_kind = ContentKind::Shaders;
+        let text = render_at(&mut app, 110, 34);
+        assert!(text.contains("TestShader.zip"), "{text}");
         let text = render_at(&mut app, 60, 20);
         assert!(!text.trim().is_empty(), "{text}");
     }
@@ -2087,6 +2244,8 @@ mod tests {
         app.search.open = true;
         app.search.focus = SearchFocus::Results;
         app.search.input.set(long.clone());
+        app.search.kind = crate::discover::DiscoverKind::Shaders;
+        app.search.total_hits = u64::MAX;
         app.search.results = vec![crate::tui::app::SearchHit {
             title: long.clone(),
             slug: "extremely-long-slug".into(),
@@ -2094,6 +2253,9 @@ mod tests {
             author: long.clone(),
             downloads: u64::MAX,
             categories: long.repeat(3),
+            loaders: vec!["iris".into(), "optifine".into()],
+            installed: false,
+            installed_version: None,
         }];
         app.search.list_state.select(Some(0));
 

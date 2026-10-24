@@ -13,6 +13,8 @@ use ratatui::widgets::ListState;
 
 use crate::account::AccountManager;
 use crate::auth::MicrosoftAuth;
+use crate::content::{ShaderEntry, ShaderSupport};
+use crate::discover::DiscoverKind;
 use crate::http::{self, SourceMode};
 use crate::instance::InstanceManager;
 use crate::launcher::MinecraftLauncher;
@@ -96,15 +98,17 @@ impl Screen {
 pub enum ContentKind {
     Saves,
     ResourcePacks,
+    Shaders,
 }
 
 impl ContentKind {
-    pub const ALL: [ContentKind; 2] = [Self::Saves, Self::ResourcePacks];
+    pub const ALL: [ContentKind; 3] = [Self::Saves, Self::ResourcePacks, Self::Shaders];
 
     pub fn title(self, lang: Lang) -> &'static str {
         match self {
             Self::Saves => lang.pick("Saves", "存档"),
             Self::ResourcePacks => lang.pick("Resource packs", "资源包"),
+            Self::Shaders => lang.pick("Shaders", "光影包"),
         }
     }
 
@@ -114,6 +118,10 @@ impl ContentKind {
 
     pub fn next(self) -> Self {
         Self::ALL[(self.index() + 1) % Self::ALL.len()]
+    }
+
+    pub fn previous(self) -> Self {
+        Self::ALL[(self.index() + Self::ALL.len() - 1) % Self::ALL.len()]
     }
 }
 
@@ -195,6 +203,7 @@ pub enum InputAction {
     ExportModpack,
     ImportSave,
     ImportResourcePack,
+    ImportShader,
 }
 
 #[derive(Clone, Debug)]
@@ -205,12 +214,27 @@ pub enum ConfirmAction {
     ClearLogs,
     DownloadVersion(String),
     InstallLoader(String),
-    InstallMod { slug: String, title: String },
+    InstallMod {
+        slug: String,
+        title: String,
+    },
     ResetSettings,
     RemoveVersion(String),
     ApplyUpdates,
     DeleteSave(String),
     DeleteResourcePack(String),
+    DeleteShader(String),
+    InstallResourcePack {
+        slug: String,
+        title: String,
+    },
+    InstallShader {
+        slug: String,
+        title: String,
+        support: ShaderSupport,
+    },
+    InstallOptimizations,
+    Dismiss,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -383,11 +407,14 @@ pub struct SearchHit {
     pub author: String,
     pub downloads: u64,
     pub categories: String,
+    pub loaders: Vec<String>,
+    pub installed: bool,
+    pub installed_version: Option<String>,
 }
 
-#[derive(Default)]
 pub struct SearchState {
     pub open: bool,
+    pub kind: DiscoverKind,
     pub input: TextInput,
     pub focus: SearchFocus,
     pub results: Vec<SearchHit>,
@@ -396,6 +423,33 @@ pub struct SearchState {
     pub loading: bool,
     pub error: Option<String>,
     pub request: u64,
+    pub page: u32,
+    pub sort: String,
+    pub category: Option<String>,
+    pub browse: bool,
+    pub total_hits: u64,
+}
+
+impl Default for SearchState {
+    fn default() -> Self {
+        Self {
+            open: false,
+            kind: DiscoverKind::Mods,
+            input: TextInput::new(""),
+            focus: SearchFocus::Input,
+            results: Vec::new(),
+            selected: 0,
+            list_state: ListState::default(),
+            loading: false,
+            error: None,
+            request: 0,
+            page: 0,
+            sort: "relevance".into(),
+            category: None,
+            browse: true,
+            total_hits: 0,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -624,6 +678,10 @@ pub struct App {
     pub resourcepacks: Vec<crate::content::ResourcePackEntry>,
     pub pack_sel: usize,
     pub pack_state: ListState,
+    pub shaders: Vec<ShaderEntry>,
+    pub shader_sel: usize,
+    pub shader_state: ListState,
+    pending_shader_loader: Option<(String, ShaderSupport)>,
     pub accounts: Vec<AccountRow>,
     pub account_sel: usize,
     pub account_state: ListState,
@@ -721,6 +779,10 @@ impl App {
             resourcepacks: Vec::new(),
             pack_sel: 0,
             pack_state: ListState::default(),
+            shaders: Vec::new(),
+            shader_sel: 0,
+            shader_state: ListState::default(),
+            pending_shader_loader: None,
             accounts: Vec::new(),
             account_sel: 0,
             account_state: ListState::default(),
@@ -1015,6 +1077,10 @@ impl App {
             .as_deref()
             .map(|id| manager.list_resourcepacks(id))
             .unwrap_or_default();
+        self.shaders = version
+            .as_deref()
+            .map(|id| manager.list_shaders(id))
+            .unwrap_or_default();
 
         self.save_sel = self.save_sel.min(self.saves.len().saturating_sub(1));
         self.save_state = ListState::default();
@@ -1028,6 +1094,11 @@ impl App {
         if !self.resourcepacks.is_empty() {
             self.pack_state.select(Some(self.pack_sel));
         }
+        self.shader_sel = self.shader_sel.min(self.shaders.len().saturating_sub(1));
+        self.shader_state = ListState::default();
+        if !self.shaders.is_empty() {
+            self.shader_state.select(Some(self.shader_sel));
+        }
     }
 
     pub fn selected_save(&self) -> Option<&crate::content::SaveEntry> {
@@ -1036,6 +1107,10 @@ impl App {
 
     pub fn selected_resourcepack(&self) -> Option<&crate::content::ResourcePackEntry> {
         self.resourcepacks.get(self.pack_sel)
+    }
+
+    pub fn selected_shader(&self) -> Option<&ShaderEntry> {
+        self.shaders.get(self.shader_sel)
     }
 
     pub fn refresh_accounts(&mut self) {
@@ -1763,6 +1838,17 @@ impl App {
                         self.pack_state.select(Some(index));
                     }
                 }
+                ContentKind::Shaders => {
+                    if index >= self.shaders.len() {
+                        return AppCommand::None;
+                    }
+                    if double_click && self.shader_sel == index {
+                        self.toggle_selected_shader();
+                    } else {
+                        self.shader_sel = index;
+                        self.shader_state.select(Some(index));
+                    }
+                }
             },
             MouseAction::AccountsRow(index) => {
                 if index >= self.accounts.len() {
@@ -2145,6 +2231,10 @@ impl App {
                 self.confirm_apply_updates();
                 AppCommand::None
             }
+            KeyCode::Char('O') => {
+                self.confirm_optimize_mods();
+                AppCommand::None
+            }
             _ => AppCommand::None,
         }
     }
@@ -2155,12 +2245,25 @@ impl App {
             KeyCode::Down => self.move_content_selection(1),
             KeyCode::PageUp => self.move_content_selection(-8),
             KeyCode::PageDown => self.move_content_selection(8),
-            KeyCode::Char('t') | KeyCode::Char('[') | KeyCode::Char(']') => {
+            KeyCode::Char('t') | KeyCode::Char(']') => {
                 self.content_kind = self.content_kind.next();
+            }
+            KeyCode::Char('[') => {
+                self.content_kind = self.content_kind.previous();
             }
             KeyCode::Char(' ') | KeyCode::Enter => match self.content_kind {
                 ContentKind::Saves => self.backup_selected_save(),
                 ContentKind::ResourcePacks => self.toggle_selected_resourcepack(),
+                ContentKind::Shaders => self.toggle_selected_shader(),
+            },
+            KeyCode::Char('d') => match self.content_kind {
+                ContentKind::Saves => {}
+                ContentKind::ResourcePacks => {
+                    self.open_discover(DiscoverKind::ResourcePacks);
+                }
+                ContentKind::Shaders => {
+                    self.open_discover(DiscoverKind::Shaders);
+                }
             },
             KeyCode::Char('b') => {
                 if self.content_kind == ContentKind::Saves {
@@ -2199,6 +2302,14 @@ impl App {
                         .clamp(0, self.resourcepacks.len() as isize - 1)
                         as usize;
                     self.pack_state.select(Some(self.pack_sel));
+                }
+            }
+            ContentKind::Shaders => {
+                if !self.shaders.is_empty() {
+                    self.shader_sel = (self.shader_sel as isize + delta)
+                        .clamp(0, self.shaders.len() as isize - 1)
+                        as usize;
+                    self.shader_state.select(Some(self.shader_sel));
                 }
             }
         }
@@ -2259,6 +2370,49 @@ impl App {
         }
     }
 
+    fn toggle_selected_shader(&mut self) {
+        let lang = self.lang();
+        let Some(shader) = self.selected_shader() else {
+            self.toast(
+                LogLevel::Warn,
+                lang.pick("No shader pack selected", "未选择光影包"),
+            );
+            return;
+        };
+        let file = shader.file.clone();
+        let enabled = !shader.enabled;
+        let Some(version) = self.settings.active_version.clone() else {
+            return;
+        };
+        let manager = crate::content::ContentManager::new(&self.game_dir);
+        let result = if enabled {
+            manager
+                .set_shader_enabled(&version, &file, true)
+                .map(|_| ())
+        } else {
+            manager.disable_shader(&version)
+        };
+        match result {
+            Ok(()) => {
+                self.refresh_content();
+                if let Some(index) = self.shaders.iter().position(|shader| shader.file == file) {
+                    self.shader_sel = index;
+                    self.shader_state.select(Some(index));
+                }
+                let message = if lang == Lang::Chinese {
+                    format!("{}光影包 {file}", if enabled { "已启用" } else { "已禁用" })
+                } else {
+                    format!(
+                        "{} shader pack {file}",
+                        if enabled { "Enabled" } else { "Disabled" }
+                    )
+                };
+                self.log_and_toast(LogLevel::Ok, message);
+            }
+            Err(error) => self.log_and_toast(LogLevel::Error, error.to_string()),
+        }
+    }
+
     fn open_content_import(&mut self) {
         let lang = self.lang();
         let (title, hint, action) = match self.content_kind {
@@ -2279,6 +2433,15 @@ impl App {
                 )
                 .to_string(),
                 InputAction::ImportResourcePack,
+            ),
+            ContentKind::Shaders => (
+                lang.pick("Import shader pack", "导入光影包").to_string(),
+                lang.pick(
+                    "Path to a shader .zip or folder with a shaders directory",
+                    "光影包 .zip 或包含 shaders 目录的文件夹路径",
+                )
+                .to_string(),
+                InputAction::ImportShader,
             ),
         };
         self.modal = Some(Modal::Input {
@@ -2349,6 +2512,33 @@ impl App {
                     danger: true,
                 });
             }
+            ContentKind::Shaders => {
+                let Some(shader) = self.selected_shader() else {
+                    self.toast(
+                        LogLevel::Warn,
+                        lang.pick("No shader pack selected", "未选择光影包"),
+                    );
+                    return;
+                };
+                let file = shader.file.clone();
+                self.modal = Some(Modal::Confirm {
+                    title: lang.pick("Delete shader pack", "删除光影包").into(),
+                    lines: vec![
+                        if lang == Lang::Chinese {
+                            format!("从实例中删除 {file}？")
+                        } else {
+                            format!("Remove {file} from this instance?")
+                        },
+                        lang.pick(
+                            "It is disabled in options.txt as well.",
+                            "同时会从 options.txt 中禁用。",
+                        )
+                        .into(),
+                    ],
+                    action: ConfirmAction::DeleteShader(file),
+                    danger: true,
+                });
+            }
         }
     }
 
@@ -2368,6 +2558,7 @@ impl App {
         let dir = match self.content_kind {
             ContentKind::Saves => manager.saves_dir(&version),
             ContentKind::ResourcePacks => manager.resourcepacks_dir(&version),
+            ContentKind::Shaders => manager.shaderpacks_dir(&version),
         };
         match dir {
             Ok(path) => {
@@ -2505,6 +2696,277 @@ impl App {
             version,
             source,
         );
+    }
+
+    fn begin_import_shader(&mut self, source: std::path::PathBuf) {
+        let lang = self.lang();
+        if self.job.as_ref().is_some_and(JobView::is_running) {
+            self.toast(
+                LogLevel::Warn,
+                lang.pick("Wait for the current task to finish", "请等待当前任务完成"),
+            );
+            return;
+        }
+        let Some(version) = self.settings.active_version.clone() else {
+            self.toast(
+                LogLevel::Warn,
+                lang.pick(
+                    "Select an installed version first",
+                    "请先选择一个已安装版本",
+                ),
+            );
+            return;
+        };
+        let label = source
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| "shader.zip".into());
+        let id = self.next_job_id;
+        self.next_job_id += 1;
+        self.pending_activate = None;
+        self.pending_loader = None;
+        self.pending_update_apply = false;
+        self.show_job_panel = true;
+        self.job = Some(JobView::new(
+            id,
+            if lang == Lang::Chinese {
+                format!("导入光影包 {label}")
+            } else {
+                format!("Import shader pack {label}")
+            },
+        ));
+        progress::reset_cancel();
+        progress::set_job(id);
+        jobs::start_import_shader(self.tx.clone(), id, self.game_dir.clone(), version, source);
+    }
+
+    fn begin_install_resourcepack(&mut self, slug: String, title: String) {
+        let lang = self.lang();
+        if self.job.as_ref().is_some_and(JobView::is_running) {
+            self.toast(
+                LogLevel::Warn,
+                lang.pick("Wait for the current task to finish", "请等待当前任务完成"),
+            );
+            return;
+        }
+        let Some(version) = self.settings.active_version.clone() else {
+            return;
+        };
+        let id = self.next_job_id;
+        self.next_job_id += 1;
+        self.pending_activate = None;
+        self.pending_loader = None;
+        self.pending_update_apply = false;
+        self.pending_shader_loader = None;
+        self.show_job_panel = true;
+        self.job = Some(JobView::new(
+            id,
+            if lang == Lang::Chinese {
+                format!("安装资源包 {title}")
+            } else {
+                format!("Install resource pack {title}")
+            },
+        ));
+        progress::reset_cancel();
+        progress::set_job(id);
+        jobs::start_install_resourcepack(
+            self.tx.clone(),
+            id,
+            self.game_dir.clone(),
+            version,
+            slug,
+            title,
+        );
+    }
+
+    fn begin_install_shader(&mut self, slug: String, title: String, support: ShaderSupport) {
+        let lang = self.lang();
+        if self.job.as_ref().is_some_and(JobView::is_running) {
+            self.toast(
+                LogLevel::Warn,
+                lang.pick("Wait for the current task to finish", "请等待当前任务完成"),
+            );
+            return;
+        }
+        let Some(version) = self.settings.active_version.clone() else {
+            return;
+        };
+        let id = self.next_job_id;
+        self.next_job_id += 1;
+        self.pending_activate = None;
+        self.pending_loader = None;
+        self.pending_update_apply = false;
+        self.pending_shader_loader = Some((title.clone(), support));
+        self.show_job_panel = true;
+        self.job = Some(JobView::new(
+            id,
+            if lang == Lang::Chinese {
+                format!("安装光影包 {title}")
+            } else {
+                format!("Install shader pack {title}")
+            },
+        ));
+        progress::reset_cancel();
+        progress::set_job(id);
+        jobs::start_install_shader(
+            self.tx.clone(),
+            id,
+            self.game_dir.clone(),
+            version,
+            slug,
+            title,
+        );
+    }
+
+    fn begin_optimize_mods(&mut self) {
+        let lang = self.lang();
+        if self.job.as_ref().is_some_and(JobView::is_running) {
+            self.toast(
+                LogLevel::Warn,
+                lang.pick("Wait for the current task to finish", "请等待当前任务完成"),
+            );
+            return;
+        }
+        let Some(version) = self.settings.active_version.clone() else {
+            return;
+        };
+        let loader = self.active_loader_id().or_else(|| {
+            InstanceManager::new(&self.game_dir)
+                .loaders(&version)
+                .first()
+                .cloned()
+        });
+        let Some(loader) = loader else {
+            self.toast(
+                LogLevel::Warn,
+                lang.pick(
+                    "Install Fabric, NeoForge or Forge before adding optimization mods",
+                    "请先安装 Fabric、NeoForge 或 Forge 再添加优化模组",
+                ),
+            );
+            return;
+        };
+        let id = self.next_job_id;
+        self.next_job_id += 1;
+        self.pending_activate = None;
+        self.pending_loader = None;
+        self.pending_update_apply = false;
+        self.pending_shader_loader = None;
+        self.show_job_panel = true;
+        self.job = Some(JobView::new(
+            id,
+            if lang == Lang::Chinese {
+                format!("安装优化模组 · {version}")
+            } else {
+                format!("Install optimization mods · {version}")
+            },
+        ));
+        progress::reset_cancel();
+        progress::set_job(id);
+        jobs::start_optimize_mods(
+            self.tx.clone(),
+            id,
+            self.game_dir.clone(),
+            self.settings.clone(),
+            version,
+            loader,
+        );
+    }
+
+    fn prompt_shader_loader(&mut self, title: String, support: ShaderSupport) {
+        let lang = self.lang();
+        let Some(version) = self.settings.active_version.clone() else {
+            return;
+        };
+        let status =
+            crate::content::ContentManager::new(&self.game_dir).shader_loader_status(&version);
+        let loader = self.active_loader_id().or_else(|| {
+            InstanceManager::new(&self.game_dir)
+                .loaders(&version)
+                .first()
+                .cloned()
+        });
+        if support.iris && !status.iris && !(support.optifine && status.optifine) {
+            match loader
+                .as_deref()
+                .and_then(crate::discover::shader_loader_mod)
+            {
+                Some((mod_slug, mod_title)) => {
+                    let mut lines = vec![
+                        if lang == Lang::Chinese {
+                            format!("{} 支持 {}", title, support.summary(true))
+                        } else {
+                            format!("{} supports {}.", title, support.summary(false))
+                        },
+                        if lang == Lang::Chinese {
+                            format!("当前实例尚未安装 Iris（{}）。", version)
+                        } else {
+                            format!("Iris is not installed for {}.", version)
+                        },
+                        lang.pick(
+                            "Install Iris now? Required dependencies are installed automatically.",
+                            "现在安装 Iris？必需依赖会自动安装。",
+                        )
+                        .into(),
+                    ];
+                    if support.optifine && !status.optifine {
+                        lines.push(
+                            lang.pick(
+                                "OptiFine is also supported; install it manually if you prefer it.",
+                                "也支持 OptiFine；如果偏好 OptiFine 可手动安装。",
+                            )
+                            .into(),
+                        );
+                    }
+                    self.modal = Some(Modal::Confirm {
+                        title: lang.pick("Install shader loader", "安装光影加载器").into(),
+                        lines,
+                        action: ConfirmAction::InstallMod {
+                            slug: mod_slug.to_string(),
+                            title: mod_title.to_string(),
+                        },
+                        danger: false,
+                    });
+                }
+                None => self.log_and_toast(
+                    LogLevel::Warn,
+                    lang.pick(
+                        "Install Fabric, NeoForge or Forge first to use Iris.",
+                        "请先安装 Fabric、NeoForge 或 Forge 再使用 Iris。",
+                    ),
+                ),
+            }
+            return;
+        }
+        if !support.iris && support.optifine && !status.optifine {
+            self.modal = Some(Modal::Confirm {
+                title: lang.pick("OptiFine required", "需要 OptiFine").into(),
+                lines: vec![
+                    if lang == Lang::Chinese {
+                        format!("{} 仅支持 OptiFine。", title)
+                    } else {
+                        format!("{} supports OptiFine only.", title)
+                    },
+                    lang.pick(
+                        "Download and install OptiFine manually from https://optifine.net/downloads; the launcher does not run its installer.",
+                        "请从 https://optifine.net/downloads 手动下载并安装 OptiFine；启动器不会运行它的安装器。",
+                    )
+                    .into(),
+                ],
+                action: ConfirmAction::Dismiss,
+                danger: false,
+            });
+            return;
+        }
+        if support.is_empty() {
+            self.log_and_toast(
+                LogLevel::Warn,
+                lang.pick(
+                    "Shader loader support is unknown; check the project page.",
+                    "光影加载器支持未知；请查看项目页面。",
+                ),
+            );
+        }
     }
 
     fn handle_accounts_key(&mut self, key: KeyEvent) -> AppCommand {
@@ -2745,11 +3207,20 @@ impl App {
                 KeyCode::Enter => self.confirm_search_install(),
                 KeyCode::Char('o') => {
                     if let Some(hit) = self.search.results.get(self.search.selected) {
-                        open_modrinth(&hit.slug);
+                        let path = match self.search.kind {
+                            DiscoverKind::Mods => "mod",
+                            DiscoverKind::ResourcePacks => "resourcepack",
+                            DiscoverKind::Shaders => "shader",
+                        };
+                        open_url(&format!("https://modrinth.com/{path}/{}", hit.slug));
                     }
                 }
-                KeyCode::Char('i') => self.submit_search(),
-                KeyCode::Char('/') => self.search.focus = SearchFocus::Input,
+                KeyCode::Char('[') => self.page_search(-1),
+                KeyCode::Char(']') => self.page_search(1),
+                KeyCode::Char('b') => self.browse_search(),
+                KeyCode::Char('c') => self.cycle_search_category(),
+                KeyCode::Char('r') => self.request_discover(),
+                KeyCode::Char('i') | KeyCode::Char('/') => self.search.focus = SearchFocus::Input,
                 _ => {}
             },
         }
@@ -3100,6 +3571,50 @@ impl App {
                 }
                 AppCommand::None
             }
+            ConfirmAction::DeleteShader(file) => {
+                let lang = self.lang();
+                let Some(version) = self.settings.active_version.clone() else {
+                    return AppCommand::None;
+                };
+                match crate::content::ContentManager::new(&self.game_dir)
+                    .delete_shader(&version, &file)
+                {
+                    Ok(freed) => {
+                        self.refresh_content();
+                        let message = if lang == Lang::Chinese {
+                            format!("已删除光影包 {file}，释放 {}", theme::format_bytes(freed))
+                        } else {
+                            format!(
+                                "Deleted shader pack {file} ({} freed)",
+                                theme::format_bytes(freed)
+                            )
+                        };
+                        self.log_and_toast(LogLevel::Ok, message);
+                    }
+                    Err(error) => {
+                        let prefix = lang.pick("Delete failed", "删除失败");
+                        self.log_and_toast(LogLevel::Error, format!("{prefix}: {error}"));
+                    }
+                }
+                AppCommand::None
+            }
+            ConfirmAction::InstallResourcePack { slug, title } => {
+                self.begin_install_resourcepack(slug, title);
+                AppCommand::None
+            }
+            ConfirmAction::InstallShader {
+                slug,
+                title,
+                support,
+            } => {
+                self.begin_install_shader(slug, title, support);
+                AppCommand::None
+            }
+            ConfirmAction::InstallOptimizations => {
+                self.begin_optimize_mods();
+                AppCommand::None
+            }
+            ConfirmAction::Dismiss => AppCommand::None,
         }
     }
 
@@ -3255,6 +3770,26 @@ impl App {
                     });
                 }
                 self.begin_import_resourcepack(path);
+                Ok(())
+            }
+            InputAction::ImportShader => {
+                let lang = self.lang();
+                let raw = value.trim();
+                if raw.is_empty() {
+                    return Err(lang
+                        .pick("Shader pack path is empty", "光影包路径为空")
+                        .to_string());
+                }
+                let path = crate::util::absolute_path(std::path::Path::new(raw))
+                    .map_err(|error| error.to_string())?;
+                if !path.exists() {
+                    return Err(if lang == Lang::Chinese {
+                        format!("找不到光影包：{}", path.display())
+                    } else {
+                        format!("Shader pack not found: {}", path.display())
+                    });
+                }
+                self.begin_import_shader(path);
                 Ok(())
             }
             InputAction::ExportModpack => {
@@ -4221,6 +4756,11 @@ impl App {
     }
 
     pub fn open_search(&mut self) {
+        self.open_discover(DiscoverKind::Mods);
+    }
+
+    /// Open the discover overlay in browse mode for mods, packs or shaders.
+    pub fn open_discover(&mut self, kind: DiscoverKind) {
         if self.settings.active_version.is_none() {
             self.toast(
                 LogLevel::Warn,
@@ -4231,34 +4771,90 @@ impl App {
             );
             return;
         }
+        self.search = SearchState::default();
         self.search.open = true;
+        self.search.kind = kind;
+        self.search.browse = true;
+        self.search.sort = "downloads".into();
         self.search.focus = SearchFocus::Input;
+        self.request_discover();
+    }
+
+    fn request_discover(&mut self) {
+        let Some(version) = self.settings.active_version.clone() else {
+            self.toast(
+                LogLevel::Warn,
+                self.lang().pick(
+                    "Select an installed version first",
+                    "请先选择一个已安装版本",
+                ),
+            );
+            return;
+        };
+        self.search.request = self.next_request_id;
+        self.next_request_id += 1;
+        self.search.loading = true;
         self.search.error = None;
+        self.search.focus = SearchFocus::Input;
+        let query = if self.search.browse {
+            String::new()
+        } else {
+            self.search.input.value().trim().to_string()
+        };
+        jobs::start_search(
+            self.tx.clone(),
+            self.search.request,
+            self.search.kind,
+            query,
+            Some(version),
+            self.active_loader_id(),
+            self.search.page,
+            self.search.sort.clone(),
+            self.search.category.clone(),
+            self.game_dir.clone(),
+        );
     }
 
     fn submit_search(&mut self) {
         let query = self.search.input.value().trim().to_string();
-        if query.is_empty() {
-            self.toast(
-                LogLevel::Warn,
-                self.lang()
-                    .pick("Type a mod name to search", "请输入要搜索的模组名"),
-            );
+        self.search.browse = query.is_empty();
+        self.search.page = 0;
+        self.search.sort = if self.search.browse {
+            "downloads".into()
+        } else {
+            "relevance".into()
+        };
+        self.request_discover();
+    }
+
+    fn browse_search(&mut self) {
+        self.search.input.clear();
+        self.search.browse = true;
+        self.search.page = 0;
+        self.search.sort = "downloads".into();
+        self.request_discover();
+    }
+
+    fn page_search(&mut self, delta: i32) {
+        let next = (self.search.page as i32 + delta).max(0) as u32;
+        if next == self.search.page {
             return;
         }
-        self.search.request = self.next_request_id;
-        self.next_request_id += 1;
-        let request = self.search.request;
-        self.search.loading = true;
-        self.search.error = None;
-        self.search.focus = SearchFocus::Input;
-        jobs::start_search(
-            self.tx.clone(),
-            request,
-            query,
-            self.settings.active_version.clone(),
-            self.active_loader_id(),
-        );
+        self.search.page = next;
+        self.request_discover();
+    }
+
+    fn cycle_search_category(&mut self) {
+        if self.search.kind != DiscoverKind::Mods {
+            return;
+        }
+        self.search.category = if self.search.category.is_some() {
+            None
+        } else {
+            Some("optimization".into())
+        };
+        self.search.page = 0;
+        self.request_discover();
     }
 
     fn confirm_search_install(&mut self) {
@@ -4275,47 +4871,230 @@ impl App {
             .active_version
             .clone()
             .unwrap_or_else(|| "?".into());
+        let kind = self.search.kind;
         self.search.open = false;
         let lang = self.lang();
-        let loader_line = self
-            .active_loader()
-            .map(|loader| {
+        if kind == DiscoverKind::Mods && hit.installed {
+            let suffix = hit
+                .installed_version
+                .as_deref()
+                .map(|version| format!(" ({version})"))
+                .unwrap_or_default();
+            self.log_and_toast(
+                LogLevel::Info,
                 if lang == Lang::Chinese {
-                    format!("加载器：{loader}")
+                    format!(
+                        "{} 已安装{}；用 update-mods --apply 更新。",
+                        hit.title, suffix
+                    )
                 } else {
-                    format!("Loader: {loader}")
+                    format!(
+                        "{} is already installed{}; use update-mods --apply to update.",
+                        hit.title, suffix
+                    )
+                },
+            );
+            return;
+        }
+        match kind {
+            DiscoverKind::Mods => {
+                let loader_line = self
+                    .active_loader()
+                    .map(|loader| {
+                        if lang == Lang::Chinese {
+                            format!("加载器：{loader}")
+                        } else {
+                            format!("Loader: {loader}")
+                        }
+                    })
+                    .unwrap_or_else(|| {
+                        lang.pick(
+                            "No mod loader detected; vanilla may ignore mods.",
+                            "未检测到模组加载器；原版可能忽略模组。",
+                        )
+                        .into()
+                    });
+                self.modal = Some(Modal::Confirm {
+                    title: if lang == Lang::Chinese {
+                        format!("安装 {}", hit.title)
+                    } else {
+                        format!("Install {}", hit.title)
+                    },
+                    lines: vec![
+                        if lang == Lang::Chinese {
+                            format!("为 Minecraft {version} 安装 {}？", hit.title)
+                        } else {
+                            format!("Install {} for Minecraft {version}?", hit.title)
+                        },
+                        loader_line,
+                        lang.pick(
+                            "Required dependencies are installed automatically.",
+                            "必需的依赖会自动安装。",
+                        )
+                        .into(),
+                    ],
+                    action: ConfirmAction::InstallMod {
+                        slug: hit.slug,
+                        title: hit.title,
+                    },
+                    danger: false,
+                });
+            }
+            DiscoverKind::ResourcePacks => {
+                self.modal = Some(Modal::Confirm {
+                    title: if lang == Lang::Chinese {
+                        format!("安装资源包 {}", hit.title)
+                    } else {
+                        format!("Install resource pack {}", hit.title)
+                    },
+                    lines: vec![
+                        if lang == Lang::Chinese {
+                            format!("为 Minecraft {version} 下载 {}？", hit.title)
+                        } else {
+                            format!("Download {} for Minecraft {version}?", hit.title)
+                        },
+                        lang.pick(
+                            "It is saved to resourcepacks/ and enabled for the next launch.",
+                            "将保存到 resourcepacks/ 并在下次启动时启用。",
+                        )
+                        .into(),
+                    ],
+                    action: ConfirmAction::InstallResourcePack {
+                        slug: hit.slug,
+                        title: hit.title,
+                    },
+                    danger: false,
+                });
+            }
+            DiscoverKind::Shaders => {
+                let support = ShaderSupport::from_labels(hit.loaders.iter().map(String::as_str));
+                let status = crate::content::ContentManager::new(&self.game_dir)
+                    .shader_loader_status(&version);
+                let mut lines = vec![
+                    if lang == Lang::Chinese {
+                        format!("为 Minecraft {version} 下载 {}？", hit.title)
+                    } else {
+                        format!("Download {} for Minecraft {version}?", hit.title)
+                    },
+                    if lang == Lang::Chinese {
+                        format!("光影加载器支持：{}", support.summary(true))
+                    } else {
+                        format!("Shader loaders: {}", support.summary(false))
+                    },
+                    if lang == Lang::Chinese {
+                        format!(
+                            "Iris：{} · OptiFine：{}",
+                            if status.iris {
+                                "已安装"
+                            } else {
+                                "未安装"
+                            },
+                            if status.optifine {
+                                "已安装"
+                            } else {
+                                "未安装"
+                            }
+                        )
+                    } else {
+                        format!(
+                            "Iris: {} · OptiFine: {}",
+                            if status.iris { "installed" } else { "missing" },
+                            if status.optifine {
+                                "installed"
+                            } else {
+                                "missing"
+                            }
+                        )
+                    },
+                    lang.pick(
+                        "It is saved to shaderpacks/ and enabled for the next launch.",
+                        "将保存到 shaderpacks/ 并在下次启动时启用。",
+                    )
+                    .into(),
+                ];
+                if support.iris && !status.iris {
+                    lines.push(
+                        lang.pick(
+                            "You will be offered to install Iris after the download.",
+                            "下载后会提示安装 Iris。",
+                        )
+                        .into(),
+                    );
                 }
-            })
-            .unwrap_or_else(|| {
+                if !support.iris && support.optifine && !status.optifine {
+                    lines.push(
+                        lang.pick(
+                            "OptiFine is required; install it manually from optifine.net.",
+                            "需要 OptiFine；请从 optifine.net 手动安装。",
+                        )
+                        .into(),
+                    );
+                }
+                self.modal = Some(Modal::Confirm {
+                    title: if lang == Lang::Chinese {
+                        format!("安装光影包 {}", hit.title)
+                    } else {
+                        format!("Install shader pack {}", hit.title)
+                    },
+                    lines,
+                    action: ConfirmAction::InstallShader {
+                        slug: hit.slug,
+                        title: hit.title,
+                        support,
+                    },
+                    danger: false,
+                });
+            }
+        }
+    }
+
+    fn confirm_optimize_mods(&mut self) {
+        let lang = self.lang();
+        let Some(version) = self.settings.active_version.clone() else {
+            self.toast(
+                LogLevel::Warn,
                 lang.pick(
-                    "No mod loader detected; vanilla may ignore mods.",
-                    "未检测到模组加载器；原版可能忽略模组。",
-                )
-                .into()
-            });
+                    "Select an installed version first",
+                    "请先选择一个已安装版本",
+                ),
+            );
+            return;
+        };
+        let loader = self.active_loader_id().or_else(|| {
+            InstanceManager::new(&self.game_dir)
+                .loaders(&version)
+                .first()
+                .cloned()
+        });
+        let Some(loader) = loader else {
+            self.toast(
+                LogLevel::Warn,
+                lang.pick(
+                    "Install Fabric, NeoForge or Forge before adding optimization mods",
+                    "请先安装 Fabric、NeoForge 或 Forge 再添加优化模组",
+                ),
+            );
+            return;
+        };
         self.modal = Some(Modal::Confirm {
-            title: if lang == Lang::Chinese {
-                format!("安装 {}", hit.title)
-            } else {
-                format!("Install {}", hit.title)
-            },
+            title: lang
+                .pick("Install optimization mods", "安装优化模组")
+                .into(),
             lines: vec![
                 if lang == Lang::Chinese {
-                    format!("为 Minecraft {version} 安装 {}？", hit.title)
+                    format!("为 Minecraft {version}（{loader}）安装推荐的优化模组？")
                 } else {
-                    format!("Install {} for Minecraft {version}?", hit.title)
+                    format!(
+                        "Install the recommended optimization mods for {version} ({loader})?"
+                    )
                 },
-                loader_line,
                 lang.pick(
-                    "Required dependencies are not installed automatically in the TUI.",
-                    "TUI 不会自动安装必需依赖。",
+                    "Already installed mods are skipped; required dependencies are installed automatically.",
+                    "已安装的模组会跳过；必需依赖会自动安装。",
                 )
                 .into(),
             ],
-            action: ConfirmAction::InstallMod {
-                slug: hit.slug,
-                title: hit.title,
-            },
+            action: ConfirmAction::InstallOptimizations,
             danger: false,
         });
     }
@@ -4430,6 +5209,7 @@ impl App {
                 self.search.loading = false;
                 match result {
                     Ok(value) => {
+                        self.search.total_hits = value["total_hits"].as_u64().unwrap_or(0);
                         self.search.results = parse_search_hits(&value);
                         self.search.selected = 0;
                         self.search.list_state = ListState::default();
@@ -4437,22 +5217,39 @@ impl App {
                             self.search.list_state.select(Some(0));
                             self.search.focus = SearchFocus::Results;
                         }
-                        self.add_log(
-                            LogLevel::Info,
-                            if self.lang() == Lang::Chinese {
+                        let kind = self.search.kind;
+                        let message = if self.lang() == Lang::Chinese {
+                            if query.is_empty() {
                                 format!(
-                                    "Modrinth：{} 个结果，关键词 \"{}\"",
-                                    self.search.results.len(),
-                                    query
+                                    "Modrinth {}：第 {} 页，{} 个结果",
+                                    kind.title(true),
+                                    self.search.page + 1,
+                                    self.search.results.len()
                                 )
                             } else {
                                 format!(
-                                    "Modrinth: {} result(s) for \"{}\"",
+                                    "Modrinth {}：{} 个结果，关键词 \"{}\"",
+                                    kind.title(true),
                                     self.search.results.len(),
                                     query
                                 )
-                            },
-                        );
+                            }
+                        } else if query.is_empty() {
+                            format!(
+                                "Modrinth {}: page {}, {} result(s)",
+                                kind.title(false),
+                                self.search.page + 1,
+                                self.search.results.len()
+                            )
+                        } else {
+                            format!(
+                                "Modrinth {}: {} result(s) for \"{}\"",
+                                kind.title(false),
+                                self.search.results.len(),
+                                query
+                            )
+                        };
+                        self.add_log(LogLevel::Info, message);
                     }
                     Err(error) => {
                         let error = theme::one_line(&error, 400);
@@ -4609,6 +5406,9 @@ impl App {
                     self.refresh_mods();
                 }
                 self.refresh_local();
+                if let Some((title, support)) = self.pending_shader_loader.take() {
+                    self.prompt_shader_loader(title, support);
+                }
                 if let Some(version) = activated {
                     if let Some(index) = self.versions.iter().position(|row| row.id == version) {
                         self.version_sel = index;
@@ -4622,6 +5422,7 @@ impl App {
                     self.pending_activate = None;
                     self.pending_loader = None;
                     self.pending_update_apply = false;
+                    self.pending_shader_loader = None;
                     self.log_and_toast(
                         LogLevel::Warn,
                         self.lang().pick("Task cancelled", "任务已取消"),
@@ -4632,6 +5433,7 @@ impl App {
                 self.pending_activate = None;
                 self.pending_loader = None;
                 self.pending_update_apply = false;
+                self.pending_shader_loader = None;
                 if let Some(job) = self.job.as_mut() {
                     job.finished = Some(Err(error.clone()));
                     job.finished_at = Some(Instant::now());
@@ -5002,15 +5804,6 @@ fn open_path(path: &std::path::Path) {
     }
 }
 
-fn open_modrinth(slug: &str) {
-    let url = format!("https://modrinth.com/mod/{slug}");
-    let _ = std::thread::Builder::new()
-        .name("mc-tui-browser".into())
-        .spawn(move || {
-            let _ = webbrowser::open(&url);
-        });
-}
-
 fn wait_for_enter(lang: Lang) {
     if lang == Lang::Chinese {
         print!("\n  按回车返回启动器... ");
@@ -5031,22 +5824,37 @@ pub fn parse_search_hits(value: &serde_json::Value) -> Vec<SearchHit> {
                 .filter_map(|hit| {
                     let slug = hit["slug"].as_str()?.to_string();
                     let title = hit["title"].as_str().unwrap_or(slug.as_str()).to_string();
+                    let labels: Vec<&str> = hit["categories"]
+                        .as_array()
+                        .map(|values| values.iter().filter_map(|value| value.as_str()).collect())
+                        .unwrap_or_default();
+                    let loaders = labels
+                        .iter()
+                        .filter(|label| {
+                            matches!(
+                                label.to_ascii_lowercase().as_str(),
+                                "iris"
+                                    | "optifine"
+                                    | "fabric"
+                                    | "forge"
+                                    | "neoforge"
+                                    | "quilt"
+                                    | "canvas"
+                                    | "vanilla"
+                            )
+                        })
+                        .map(|label| label.to_string())
+                        .collect();
                     Some(SearchHit {
                         title,
                         slug,
                         description: hit["description"].as_str().unwrap_or("").to_string(),
                         author: hit["author"].as_str().unwrap_or("unknown").to_string(),
                         downloads: hit["downloads"].as_u64().unwrap_or(0),
-                        categories: hit["categories"]
-                            .as_array()
-                            .map(|values| {
-                                values
-                                    .iter()
-                                    .filter_map(|value| value.as_str())
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            })
-                            .unwrap_or_default(),
+                        categories: labels.join(", "),
+                        loaders,
+                        installed: hit["_installed"].as_bool().unwrap_or(false),
+                        installed_version: hit["_installed_version"].as_str().map(String::from),
                     })
                 })
                 .collect()
@@ -5341,6 +6149,71 @@ mod tests {
         assert_eq!(cycle_preset(&[0, 10, 20], 20, 1), 0);
         assert_eq!(cycle_preset(&[0, 10, 20], 0, -1), 20);
         assert_eq!(cycle_preset(&[0, 10], 99, 1), 10);
+    }
+
+    #[test]
+    fn shader_install_prompts_for_iris_or_optifine() {
+        let dir = tempfile::tempdir().unwrap();
+        let version = dir.path().join("versions").join("1.21.4");
+        std::fs::create_dir_all(&version).unwrap();
+        std::fs::write(
+            version.join("1.21.4.json"),
+            br#"{"id":"1.21.4","type":"release","mainClass":"Main","libraries":[],"downloads":{"client":{"url":"https://example.org/x"}}}"#,
+        )
+        .unwrap();
+        let profile = dir
+            .path()
+            .join("libraries")
+            .join("fabric")
+            .join("fabric-profile-1.21.4.json");
+        std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+        std::fs::write(profile, b"{}").unwrap();
+        let (tx, _rx) = jobs::channel();
+        let mut app = App::new(
+            launcher(dir.path()),
+            tx,
+            Bootstrap {
+                no_splash: true,
+                ..Bootstrap::default()
+            },
+        );
+        app.settings.active_version = Some("1.21.4".into());
+        app.refresh_local();
+
+        app.pending_shader_loader = Some((
+            "BSL Shaders".into(),
+            ShaderSupport {
+                iris: true,
+                optifine: false,
+            },
+        ));
+        app.job = Some(JobView::new(9, "install shader"));
+        app.finish_job(9, Ok("Installed shader".into()));
+        assert!(matches!(
+            &app.modal,
+            Some(Modal::Confirm {
+                action: ConfirmAction::InstallMod { slug, .. },
+                ..
+            }) if slug == "iris"
+        ));
+
+        app.modal = None;
+        app.pending_shader_loader = Some((
+            "OptiFine Only".into(),
+            ShaderSupport {
+                iris: false,
+                optifine: true,
+            },
+        ));
+        app.job = Some(JobView::new(10, "install shader"));
+        app.finish_job(10, Ok("Installed shader".into()));
+        assert!(matches!(
+            &app.modal,
+            Some(Modal::Confirm {
+                action: ConfirmAction::Dismiss,
+                ..
+            })
+        ));
     }
 
     #[test]

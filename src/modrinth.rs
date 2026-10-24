@@ -60,17 +60,6 @@ pub fn list_loaders() -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Search for projects on Modrinth.
-pub fn search_projects(
-    query: &str,
-    index: &str,
-    limit: u32,
-    offset: u32,
-    facets: Option<&serde_json::Value>,
-) -> serde_json::Value {
-    search_projects_result(query, index, limit, offset, facets).unwrap_or_else(|e| crate::die!(e))
-}
-
 pub fn search_projects_result(
     query: &str,
     index: &str,
