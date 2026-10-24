@@ -28,6 +28,10 @@ pub struct Settings {
     pub source: String,
     pub reduced_motion: bool,
     pub splash: bool,
+    /// Extra JVM arguments, split like a shell command line at launch.
+    pub jvm_args: String,
+    /// "auto", "g1", "zgc", "parallel", "serial" or "none".
+    pub gc: String,
     pub active_version: Option<String>,
 }
 
@@ -44,6 +48,8 @@ impl Default for Settings {
             source: "auto".into(),
             reduced_motion: false,
             splash: true,
+            jvm_args: String::new(),
+            gc: "auto".into(),
             active_version: None,
         }
     }
@@ -120,6 +126,24 @@ impl Settings {
             "bmcl" | "bmclapi" | "mirror" => "bmcl".into(),
             _ => "auto".into(),
         };
+        self.jvm_args = self
+            .jvm_args
+            .chars()
+            .filter(|ch| !ch.is_control())
+            .collect::<String>()
+            .trim()
+            .chars()
+            .take(1024)
+            .collect();
+        self.gc = match self.gc.trim().to_ascii_lowercase().as_str() {
+            "g1" | "aikar" => "g1",
+            "zgc" => "zgc",
+            "parallel" => "parallel",
+            "serial" | "serialgc" => "serial",
+            "none" | "off" => "none",
+            _ => "auto",
+        }
+        .into();
         if self
             .active_version
             .as_deref()
@@ -127,6 +151,14 @@ impl Settings {
         {
             self.active_version = None;
         }
+    }
+
+    pub fn gc_preset(&self) -> crate::launcher::GcPreset {
+        crate::launcher::GcPreset::parse(&self.gc).unwrap_or_default()
+    }
+
+    pub fn jvm_arguments(&self) -> Vec<String> {
+        crate::split_args(&self.jvm_args).unwrap_or_default()
     }
 
     pub fn source_mode(&self) -> SourceMode {

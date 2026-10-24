@@ -60,6 +60,10 @@ pub enum BackendEvent {
         path: Option<String>,
         major: Option<u32>,
     },
+    ModUpdates {
+        request: u64,
+        result: Result<Vec<crate::update::ModUpdate>, String>,
+    },
 }
 
 pub type EventSender = Sender<BackendEvent>;
@@ -165,6 +169,123 @@ where
             result: Err(format!("Cannot start background task: {error}")),
         });
     }
+}
+
+/// Check all installed jars against Modrinth without blocking the UI.
+pub fn start_update_check(
+    tx: EventSender,
+    request: u64,
+    game_dir: std::path::PathBuf,
+    mc_version: String,
+    loader: Option<String>,
+) {
+    let failure_tx = tx.clone();
+    let spawned = std::thread::Builder::new()
+        .name("mc-tui-updates".into())
+        .spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crate::update::check(&game_dir, &mc_version, loader.as_deref(), true)
+                    .map(|check| check.updates)
+            }))
+            .unwrap_or_else(|_| Err("Update check task panicked".into()));
+            let _ = tx.send(BackendEvent::ModUpdates { request, result });
+        });
+    if let Err(error) = spawned {
+        let _ = failure_tx.send(BackendEvent::ModUpdates {
+            request,
+            result: Err(format!("Cannot start update check: {error}")),
+        });
+    }
+}
+
+/// Download and replace a batch of mods, reporting per-mod results.
+pub fn start_apply_updates(
+    tx: EventSender,
+    id: u64,
+    game_dir: std::path::PathBuf,
+    mc_version: String,
+    updates: Vec<crate::update::ModUpdate>,
+) {
+    let total = updates.len();
+    spawn_job(tx, id, format!("Update {total} mod(s)"), move |tx, id| {
+        progress::reset_cancel();
+        let mut done = 0usize;
+        let mut failures: Vec<String> = Vec::new();
+        for (index, update) in updates.iter().enumerate() {
+            if progress::is_cancelled() {
+                return Err("Cancelled".into());
+            }
+            phase(
+                tx,
+                id,
+                index + 1,
+                total.max(1),
+                format!("Updating {}", update.project),
+            );
+            match crate::update::apply(&game_dir, &mc_version, update) {
+                Ok(path) => {
+                    done += 1;
+                    send_log(
+                        tx,
+                        id,
+                        LogLevel::Info,
+                        format!(
+                            "{} -> {}",
+                            update.project,
+                            path.file_name()
+                                .map(|name| name.to_string_lossy().to_string())
+                                .unwrap_or_default()
+                        ),
+                    );
+                }
+                Err(error) => {
+                    failures.push(format!("{}: {error}", update.project));
+                    send_log(
+                        tx,
+                        id,
+                        LogLevel::Warn,
+                        format!("{} failed: {error}", update.project),
+                    );
+                }
+            }
+        }
+        if !failures.is_empty() {
+            return Err(format!(
+                "Updated {done}/{total}; failed: {}",
+                failures.join("; ")
+            ));
+        }
+        Ok(format!("Updated {done} mod(s)"))
+    });
+}
+
+/// Export an instance as a .mrpack (Modrinth lookups happen in the worker).
+pub fn start_export_modpack(
+    tx: EventSender,
+    id: u64,
+    game_dir: std::path::PathBuf,
+    instance: String,
+    path: std::path::PathBuf,
+) {
+    spawn_job(tx, id, format!("Export {instance}"), move |tx, id| {
+        progress::reset_cancel();
+        phase(tx, id, 1, 2, "Hash installed mods");
+        let manager = crate::instance::InstanceManager::new(&game_dir);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("Cannot create {}: {error}", parent.display()))?;
+        }
+        let report = manager
+            .export_modpack(&instance, None, &path)
+            .map_err(|error| error.to_string())?;
+        phase(tx, id, 2, 2, "Write .mrpack");
+        Ok(format!(
+            "Modpack exported to {} ({} download(s), {} override(s))",
+            report.path.display(),
+            report.files,
+            report.overrides
+        ))
+    });
 }
 
 pub fn start_java_probe(tx: EventSender) {

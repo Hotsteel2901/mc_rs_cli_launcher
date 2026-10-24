@@ -182,6 +182,18 @@ fn help_lines(app: &App) -> Vec<Line<'static>> {
             desc(tr("select or install a loader for the active version", "为活跃版本选择或安装加载器")),
         ]),
         Line::from(vec![key("n"), desc(tr("download another version", "下载其他版本"))]),
+        Line::from(vec![
+            key("d"),
+            desc(tr("delete the selected instance", "删除所选实例")),
+        ]),
+        Line::from(vec![
+            key("R / c"),
+            desc(tr("rename / copy the selected instance", "重命名 / 复制所选实例")),
+        ]),
+        Line::from(vec![
+            key("e"),
+            desc(tr("export the instance as a Modrinth .mrpack", "把实例导出为 Modrinth .mrpack")),
+        ]),
         Line::from(""),
         section(tr("MODS", "模组")),
         Line::from(vec![
@@ -194,6 +206,14 @@ fn help_lines(app: &App) -> Vec<Line<'static>> {
             desc(tr("search Modrinth with version + loader facets", "按版本与加载器筛选搜索 Modrinth")),
         ]),
         Line::from(vec![key("v"), desc(tr("switch the active Minecraft version", "切换活跃 Minecraft 版本"))]),
+        Line::from(vec![
+            key("u"),
+            desc(tr("check Modrinth for mod updates", "检查 Modrinth 模组更新")),
+        ]),
+        Line::from(vec![
+            key("U"),
+            desc(tr("download and apply all updates", "下载并应用全部更新")),
+        ]),
         Line::from(""),
         section(tr("ACCOUNTS", "账号")),
         Line::from(vec![key("a"), desc(tr("add an offline profile", "添加离线档案"))]),
@@ -207,7 +227,13 @@ fn help_lines(app: &App) -> Vec<Line<'static>> {
         section(tr("SETTINGS", "设置")),
         Line::from(vec![key("↑ / ↓"), desc(tr("choose a preference", "选择偏好项"))]),
         Line::from(vec![key("← / →"), desc(tr("adjust it", "调整数值"))]),
-        Line::from(vec![key("enter"), desc(tr("edit Java path / toggle options", "编辑 Java 路径/切换开关"))]),
+        Line::from(vec![
+            key("enter"),
+            desc(tr(
+                "pick a Java runtime, edit JVM args, toggle options",
+                "选择 Java 运行时、编辑 JVM 参数、切换开关",
+            )),
+        ]),
         Line::from(vec![key("R"), desc(tr("restore defaults", "恢复默认值"))]),
         Line::from(""),
         section(tr("FILES", "文件")),

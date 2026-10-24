@@ -14,6 +14,7 @@ use ratatui::widgets::ListState;
 use crate::account::AccountManager;
 use crate::auth::MicrosoftAuth;
 use crate::http::{self, SourceMode};
+use crate::instance::InstanceManager;
 use crate::launcher::MinecraftLauncher;
 use crate::mod_manager::ModManager;
 use crate::progress::{self, TransferEvent};
@@ -96,6 +97,10 @@ pub struct VersionRow {
     pub id: String,
     pub kind: String,
     pub jar_size: u64,
+    pub total_size: u64,
+    /// Minecraft version this instance is based on (differs for modpacks).
+    pub base: String,
+    pub java_major: Option<u32>,
     pub loaders: Vec<String>,
     pub mods_enabled: usize,
     pub mods_disabled: usize,
@@ -110,6 +115,8 @@ pub struct ModRow {
     pub file: String,
     pub enabled: bool,
     pub size: u64,
+    /// Newest Modrinth version, when an update was detected.
+    pub update: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -143,12 +150,17 @@ pub enum PickerKind {
     RemoteVersions,
     Loaders,
     InstalledVersions,
+    JavaRuntimes,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InputAction {
     OfflineName,
     JavaPath,
+    JvmArgs,
+    RenameVersion,
+    CopyVersion,
+    ExportModpack,
 }
 
 #[derive(Clone, Debug)]
@@ -161,6 +173,8 @@ pub enum ConfirmAction {
     InstallLoader(String),
     InstallMod { slug: String, title: String },
     ResetSettings,
+    RemoveVersion(String),
+    ApplyUpdates,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -582,6 +596,17 @@ pub struct App {
     pub java_path: Option<String>,
     pub java_major: Option<u32>,
     pub java_probing: bool,
+    /// Mod updates found by the last check, keyed by on-disk filename.
+    pub mod_updates: Vec<crate::update::ModUpdate>,
+    pub updates_request: u64,
+    pub updates_loading: bool,
+    pending_update_apply: bool,
+    /// Context for the rename/copy/export input dialogs.
+    rename_source: Option<String>,
+    copy_source: Option<String>,
+    export_source: Option<String>,
+    /// Crash analysis produced by the last failed launch, replayed in Activity.
+    pending_diagnosis: Option<crate::diagnose::Diagnosis>,
     pub next_job_id: u64,
     pub next_request_id: u64,
     pub manifest_request: u64,
@@ -659,6 +684,14 @@ impl App {
             java_path: None,
             java_major: None,
             java_probing: true,
+            mod_updates: Vec::new(),
+            updates_request: 0,
+            updates_loading: false,
+            pending_update_apply: false,
+            rename_source: None,
+            copy_source: None,
+            export_source: None,
+            pending_diagnosis: None,
             next_job_id: 1,
             next_request_id: 1,
             manifest_request: 0,
@@ -765,33 +798,36 @@ impl App {
                 ("neoforge", "NeoForge"),
                 ("forge", "Forge"),
             ] {
-                if self
-                    .game_dir
-                    .join("libraries")
-                    .join(loader)
-                    .join(format!("{loader}-profile-{id}.json"))
-                    .exists()
-                {
+                if crate::instance::loader_profile_path(&self.game_dir, loader, &id).is_some() {
                     loaders.push(label.to_string());
                 }
             }
             let mods = ModManager::new(&self.game_dir).list_mods(&id);
             let mods_enabled = mods.iter().filter(|(_, enabled, _)| *enabled).count();
             let mods_disabled = mods.len() - mods_enabled;
-            let kind = std::fs::read(version_dir.join(format!("{id}.json")))
+            let metadata = std::fs::read(version_dir.join(format!("{id}.json")))
                 .ok()
-                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+            let kind = metadata
+                .as_ref()
                 .and_then(|value| value["type"].as_str().map(String::from))
                 .map(|value| theme::one_line(&value, 24))
                 .unwrap_or_else(|| "release".into());
+            let java_major = metadata
+                .as_ref()
+                .and_then(|value| value["javaVersion"]["majorVersion"].as_u64())
+                .map(|value| value as u32);
             let age = std::fs::metadata(&version_dir)
                 .and_then(|meta| meta.modified())
                 .ok()
                 .and_then(|modified| SystemTime::now().duration_since(modified).ok());
             rows.push(VersionRow {
-                id,
+                id: id.clone(),
                 kind,
                 jar_size,
+                total_size: crate::instance::dir_size(&version_dir),
+                base: crate::instance::instance_base(&self.game_dir, &id),
+                java_major,
                 loaders,
                 mods_enabled,
                 mods_disabled,
@@ -881,8 +917,23 @@ impl App {
                     file,
                     enabled,
                     size,
+                    update: None,
                 });
             }
+        }
+        for row in self.mods.iter_mut() {
+            row.update = self
+                .mod_updates
+                .iter()
+                .find(|update| {
+                    update
+                        .file
+                        .file_name()
+                        .map(|name| name.to_string_lossy().to_string())
+                        .as_deref()
+                        == Some(row.file.as_str())
+                })
+                .map(|update| update.latest.clone());
         }
         self.mods.sort_by(|a, b| {
             b.enabled
@@ -1082,11 +1133,24 @@ impl App {
                 http::set_source_mode(self.settings.source_mode());
             }
             6 => {
-                self.open_java_input();
+                self.open_java_picker();
                 return;
             }
-            7 => self.settings.reduced_motion = !self.settings.reduced_motion,
-            8 => self.settings.splash = !self.settings.splash,
+            7 => {
+                self.open_jvm_input();
+                return;
+            }
+            8 => {
+                const PRESETS: [&str; 6] = ["auto", "g1", "zgc", "parallel", "serial", "none"];
+                let index = PRESETS
+                    .iter()
+                    .position(|preset| *preset == self.settings.gc)
+                    .unwrap_or(0);
+                let next = (index as i32 + direction).rem_euclid(PRESETS.len() as i32) as usize;
+                self.settings.gc = PRESETS[next].into();
+            }
+            9 => self.settings.reduced_motion = !self.settings.reduced_motion,
+            10 => self.settings.splash = !self.settings.splash,
             _ => {}
         }
         self.settings.normalize();
@@ -1102,8 +1166,10 @@ impl App {
                 let message = lang.pick("Language: English", "语言：中文");
                 self.toast(LogLevel::Info, message);
             }
-            6 => self.open_java_input(),
-            7 => {
+            6 => self.open_java_picker(),
+            7 => self.open_jvm_input(),
+            8 => self.settings_adjust(1),
+            9 => {
                 self.settings.reduced_motion = !self.settings.reduced_motion;
                 if self.settings.reduced_motion {
                     self.particles.clear();
@@ -1111,7 +1177,7 @@ impl App {
                 self.settings_autosave_blocked = false;
                 self.save_settings_silent();
             }
-            8 => {
+            10 => {
                 self.settings.splash = !self.settings.splash;
                 self.settings_autosave_blocked = false;
                 self.save_settings_silent();
@@ -1134,7 +1200,7 @@ impl App {
         );
     }
 
-    pub fn settings_labels(lang: Lang) -> [&'static str; 9] {
+    pub fn settings_labels(lang: Lang) -> [&'static str; 11] {
         [
             lang.pick("Language", "界面语言"),
             lang.pick("Memory", "内存"),
@@ -1142,7 +1208,9 @@ impl App {
             lang.pick("Window height", "窗口高度"),
             lang.pick("Download threads", "下载线程"),
             lang.pick("Download source", "下载源"),
-            lang.pick("Java executable", "Java 路径"),
+            lang.pick("Java runtime", "Java 运行时"),
+            lang.pick("JVM arguments", "JVM 参数"),
+            lang.pick("Garbage collector", "垃圾回收器"),
             lang.pick("Reduced motion", "减少动效"),
             lang.pick("Intro splash", "开场动画"),
         ]
@@ -1841,6 +1909,45 @@ impl App {
                 self.open_search();
                 AppCommand::None
             }
+            KeyCode::Char('d') => {
+                if let Some(version) = self.selected_version().map(|row| row.id.clone()) {
+                    let lang = self.lang();
+                    self.modal = Some(Modal::Confirm {
+                        title: if lang == Lang::Chinese {
+                            format!("删除实例 {version}")
+                        } else {
+                            format!("Delete instance {version}")
+                        },
+                        lines: vec![
+                            lang.pick(
+                                "The instance directory, saves and mods are deleted.",
+                                "实例目录、存档和模组都会被删除。",
+                            )
+                            .into(),
+                            lang.pick(
+                                "Keep saves with the CLI: remove-version --keep-saves",
+                                "如需保留存档：remove-version --keep-saves",
+                            )
+                            .into(),
+                        ],
+                        action: ConfirmAction::RemoveVersion(version),
+                        danger: true,
+                    });
+                }
+                AppCommand::None
+            }
+            KeyCode::Char('R') => {
+                self.open_rename_input();
+                AppCommand::None
+            }
+            KeyCode::Char('c') => {
+                self.open_copy_input();
+                AppCommand::None
+            }
+            KeyCode::Char('e') => {
+                self.open_export_input();
+                AppCommand::None
+            }
             _ => AppCommand::None,
         }
     }
@@ -1904,6 +2011,14 @@ impl App {
                     LogLevel::Info,
                     self.lang().pick("Mod list refreshed", "模组列表已刷新"),
                 );
+                AppCommand::None
+            }
+            KeyCode::Char('u') => {
+                self.begin_update_check();
+                AppCommand::None
+            }
+            KeyCode::Char('U') => {
+                self.confirm_apply_updates();
                 AppCommand::None
             }
             _ => AppCommand::None,
@@ -2163,6 +2278,23 @@ impl App {
         let Some(mut modal) = self.modal.take() else {
             return AppCommand::None;
         };
+        // Keep enough of an input dialog to restore it verbatim when validation
+        // fails, so the user can correct the value instead of losing context.
+        let input_snapshot = match &modal {
+            Modal::Input {
+                title,
+                hint,
+                input,
+                action,
+                ..
+            } => Some((
+                title.clone(),
+                hint.clone(),
+                *action,
+                input.value().to_string(),
+            )),
+            _ => None,
+        };
         let mut request: Option<ModalRequest> = None;
         let mut close = false;
         match &mut modal {
@@ -2265,14 +2397,14 @@ impl App {
                     self.modal = None;
                 }
                 Err(error) => {
-                    if let Some(Modal::Input {
-                        error: slot, input, ..
-                    }) = self.modal.as_mut()
-                    {
-                        *slot = Some(error);
-                        if action == InputAction::JavaPath {
-                            input.set(value);
-                        }
+                    if let Some((title, hint, action, value)) = input_snapshot {
+                        self.modal = Some(Modal::Input {
+                            title,
+                            hint,
+                            input: TextInput::new(value),
+                            action,
+                            error: Some(error),
+                        });
                     } else {
                         self.modal = Some(Modal::Input {
                             title: "Input".into(),
@@ -2399,6 +2531,39 @@ impl App {
                 self.reset_settings();
                 AppCommand::None
             }
+            ConfirmAction::RemoveVersion(version) => {
+                let lang = self.lang();
+                match InstanceManager::new(&self.game_dir).remove(&version, false, false) {
+                    Ok(report) => {
+                        if self.settings.active_version.as_deref() == Some(version.as_str()) {
+                            self.settings.active_version = None;
+                            self.save_settings_silent();
+                        }
+                        self.refresh_local();
+                        let message = if lang == Lang::Chinese {
+                            format!(
+                                "已删除 {version}，释放 {}",
+                                theme::format_bytes(report.freed_bytes)
+                            )
+                        } else {
+                            format!(
+                                "Deleted {version} ({} freed)",
+                                theme::format_bytes(report.freed_bytes)
+                            )
+                        };
+                        self.log_and_toast(LogLevel::Ok, message);
+                    }
+                    Err(error) => {
+                        let prefix = lang.pick("Delete failed", "删除失败");
+                        self.log_and_toast(LogLevel::Error, format!("{prefix}: {error}"));
+                    }
+                }
+                AppCommand::None
+            }
+            ConfirmAction::ApplyUpdates => {
+                self.begin_apply_updates();
+                AppCommand::None
+            }
         }
     }
 
@@ -2439,6 +2604,108 @@ impl App {
                     format!("Java path set to {resolved}")
                 };
                 self.toast(LogLevel::Ok, message);
+                Ok(())
+            }
+            InputAction::JvmArgs => {
+                let lang = self.lang();
+                let trimmed = value.trim();
+                let args = crate::split_args(trimmed)?;
+                self.settings.jvm_args = trimmed.to_string();
+                self.settings.normalize();
+                self.settings_autosave_blocked = false;
+                self.save_settings_silent();
+                let message = if args.is_empty() {
+                    lang.pick("JVM arguments cleared", "JVM 参数已清空")
+                        .to_string()
+                } else if lang == Lang::Chinese {
+                    format!("已保存 {} 个 JVM 参数", args.len())
+                } else {
+                    format!("{} JVM argument(s) saved", args.len())
+                };
+                self.toast(LogLevel::Ok, message);
+                Ok(())
+            }
+            InputAction::RenameVersion => {
+                let lang = self.lang();
+                let from = self
+                    .rename_source
+                    .clone()
+                    .ok_or_else(|| lang.pick("No instance selected", "未选择实例").to_string())?;
+                let to = value.trim();
+                crate::util::validate_component(to)?;
+                if from == to {
+                    self.rename_source = None;
+                    return Ok(());
+                }
+                InstanceManager::new(&self.game_dir)
+                    .rename(&from, to)
+                    .map_err(|error| error.to_string())?;
+                self.rename_source = None;
+                if self.settings.active_version.as_deref() == Some(from.as_str()) {
+                    self.settings.active_version = Some(to.to_string());
+                    self.save_settings_silent();
+                }
+                self.refresh_local();
+                let message = if lang == Lang::Chinese {
+                    format!("实例已重命名：{from} -> {to}")
+                } else {
+                    format!("Instance renamed: {from} -> {to}")
+                };
+                self.log_and_toast(LogLevel::Ok, message);
+                Ok(())
+            }
+            InputAction::CopyVersion => {
+                let lang = self.lang();
+                let from = self
+                    .copy_source
+                    .clone()
+                    .ok_or_else(|| lang.pick("No instance selected", "未选择实例").to_string())?;
+                let to = value.trim();
+                crate::util::validate_component(to)?;
+                let bytes = InstanceManager::new(&self.game_dir)
+                    .copy(&from, to)
+                    .map_err(|error| error.to_string())?;
+                self.copy_source = None;
+                self.refresh_local();
+                let message = if lang == Lang::Chinese {
+                    format!(
+                        "已复制 {from} -> {to}（{}）",
+                        crate::tui::theme::format_bytes(bytes)
+                    )
+                } else {
+                    format!(
+                        "Copied {from} -> {to} ({})",
+                        crate::tui::theme::format_bytes(bytes)
+                    )
+                };
+                self.log_and_toast(LogLevel::Ok, message);
+                Ok(())
+            }
+            InputAction::ExportModpack => {
+                let lang = self.lang();
+                let id = self
+                    .export_source
+                    .clone()
+                    .ok_or_else(|| lang.pick("No instance selected", "未选择实例").to_string())?;
+                let raw = value.trim();
+                if raw.is_empty() {
+                    return Err(lang
+                        .pick("Output path is empty", "输出路径为空")
+                        .to_string());
+                }
+                let mut path = std::path::PathBuf::from(raw);
+                if !path.is_absolute() {
+                    path = self.game_dir.join(path);
+                }
+                if !path
+                    .to_string_lossy()
+                    .to_ascii_lowercase()
+                    .ends_with(".mrpack")
+                {
+                    path.set_extension("mrpack");
+                }
+                self.begin_export_modpack(id, path);
+                self.export_source = None;
                 Ok(())
             }
         }
@@ -2524,6 +2791,39 @@ impl App {
             PickerKind::InstalledVersions => {
                 self.set_active_version(id.to_string());
             }
+            PickerKind::JavaRuntimes => {
+                let lang = self.lang();
+                if id == "__browse__" {
+                    self.open_java_input();
+                    return AppCommand::None;
+                }
+                if id == "__auto__" {
+                    self.settings.java.clear();
+                    self.settings_autosave_blocked = false;
+                    self.save_settings_silent();
+                    self.log_and_toast(
+                        LogLevel::Info,
+                        lang.pick("Java will be auto-detected", "Java 将自动检测"),
+                    );
+                    return AppCommand::None;
+                }
+                match resolve_java_setting(id, lang) {
+                    Ok((resolved, major)) => {
+                        self.settings.java = resolved.clone();
+                        self.settings_autosave_blocked = false;
+                        self.save_settings_silent();
+                        let message = match major {
+                            Some(major) if lang == Lang::Chinese => {
+                                format!("已选择 Java {major}：{resolved}")
+                            }
+                            Some(major) => format!("Java {major} selected: {resolved}"),
+                            None => format!("Java path set to {resolved}"),
+                        };
+                        self.log_and_toast(LogLevel::Ok, message);
+                    }
+                    Err(error) => self.log_and_toast(LogLevel::Error, error),
+                }
+            }
         }
         AppCommand::None
     }
@@ -2584,6 +2884,82 @@ impl App {
                 .into(),
             input: TextInput::new("").with_max_chars(16),
             action: InputAction::OfflineName,
+            error: None,
+        });
+    }
+
+    fn open_java_picker(&mut self) {
+        let lang = self.lang();
+        let current = self.settings.java.clone();
+        let mut items = Vec::new();
+        items.push(PickerItem {
+            id: "__auto__".into(),
+            label: lang.pick("Auto-detect", "自动检测").to_string(),
+            meta: lang
+                .pick(
+                    "pick the best installed runtime",
+                    "自动选择本机最合适的运行时",
+                )
+                .to_string(),
+            tag: "auto".into(),
+            installed: current.trim().is_empty(),
+        });
+        let required = self.current_version().and_then(|row| row.java_major);
+        let infos = crate::java::detect_java(Some(&self.game_dir));
+        let recommended = crate::java::best_java(&infos, required).map(|info| info.path.clone());
+        for info in infos {
+            let installed = !current.trim().is_empty() && info.path == current;
+            let tag = if recommended.as_deref() == Some(info.path.as_str()) {
+                lang.pick("recommended", "推荐").to_string()
+            } else {
+                info.origin.label().to_string()
+            };
+            items.push(PickerItem {
+                id: info.path.clone(),
+                label: info.label(),
+                meta: info.meta(),
+                tag,
+                installed,
+            });
+        }
+        items.push(PickerItem {
+            id: "__browse__".into(),
+            label: lang
+                .pick("Enter a path manually", "手动输入路径")
+                .to_string(),
+            meta: lang
+                .pick(
+                    "java executable or JDK folder",
+                    "Java 可执行文件或 JDK 目录",
+                )
+                .to_string(),
+            tag: "input".into(),
+            installed: false,
+        });
+        self.modal = Some(Modal::Picker(PickerState::new(
+            lang.pick("Java runtime", "Java 运行时").to_string(),
+            lang.pick(
+                "enter select · type to filter · esc close",
+                "回车选择 · 输入筛选 · esc 关闭",
+            )
+            .to_string(),
+            PickerKind::JavaRuntimes,
+            items,
+        )));
+    }
+
+    fn open_jvm_input(&mut self) {
+        let lang = self.lang();
+        self.modal = Some(Modal::Input {
+            title: lang.pick("JVM arguments", "JVM 参数").to_string(),
+            hint: lang
+                .pick(
+                    "Extra JVM flags, e.g. -Dfoo=bar -XX:+UseStringDeduplication",
+                    "附加 JVM 参数，例如 -Dfoo=bar -XX:+UseStringDeduplication",
+                )
+                .to_string(),
+            input: TextInput::new(self.settings.jvm_args.clone()).with_max_chars(1024),
+            action: InputAction::JvmArgs,
             error: None,
         });
     }
@@ -2873,6 +3249,229 @@ impl App {
                 mod_version: None,
             },
         );
+    }
+
+    fn open_rename_input(&mut self) {
+        let Some(version) = self.selected_version().map(|row| row.id.clone()) else {
+            self.toast(
+                LogLevel::Warn,
+                self.lang().pick("No version selected", "未选择版本"),
+            );
+            return;
+        };
+        let lang = self.lang();
+        self.rename_source = Some(version.clone());
+        self.modal = Some(Modal::Input {
+            title: lang.pick("Rename instance", "重命名实例").to_string(),
+            hint: lang
+                .pick(
+                    "New id for the version directory; no slashes",
+                    "版本目录的新 ID；不能包含斜杠",
+                )
+                .to_string(),
+            input: TextInput::new(version).with_max_chars(64),
+            action: InputAction::RenameVersion,
+            error: None,
+        });
+    }
+
+    fn open_copy_input(&mut self) {
+        let Some(version) = self.selected_version().map(|row| row.id.clone()) else {
+            self.toast(
+                LogLevel::Warn,
+                self.lang().pick("No version selected", "未选择版本"),
+            );
+            return;
+        };
+        let lang = self.lang();
+        self.copy_source = Some(version.clone());
+        self.modal = Some(Modal::Input {
+            title: lang.pick("Copy instance", "复制实例").to_string(),
+            hint: lang
+                .pick(
+                    "New id for the copy (saves and mods are included)",
+                    "副本的新 ID（包含存档和模组）",
+                )
+                .to_string(),
+            input: TextInput::new(format!("{version}-copy")).with_max_chars(64),
+            action: InputAction::CopyVersion,
+            error: None,
+        });
+    }
+
+    fn open_export_input(&mut self) {
+        let Some(version) = self.selected_version().map(|row| row.id.clone()) else {
+            self.toast(
+                LogLevel::Warn,
+                self.lang().pick("No version selected", "未选择版本"),
+            );
+            return;
+        };
+        let lang = self.lang();
+        let default_path = self
+            .game_dir
+            .join("modpacks")
+            .join(format!(
+                "{}.mrpack",
+                crate::instance::sanitize_instance_id(&version)
+            ))
+            .display()
+            .to_string();
+        self.export_source = Some(version);
+        self.modal = Some(Modal::Input {
+            title: lang.pick("Export modpack", "导出整合包").to_string(),
+            hint: lang
+                .pick(
+                    "Destination .mrpack path (relative paths use the game dir)",
+                    "导出的 .mrpack 路径（相对路径基于游戏目录）",
+                )
+                .to_string(),
+            input: TextInput::new(default_path).with_max_chars(512),
+            action: InputAction::ExportModpack,
+            error: None,
+        });
+    }
+
+    /// Check every installed jar against Modrinth in the background.
+    pub fn begin_update_check(&mut self) {
+        let lang = self.lang();
+        let Some(version) = self.settings.active_version.clone() else {
+            self.toast(
+                LogLevel::Warn,
+                lang.pick(
+                    "Select an installed version first",
+                    "请先选择一个已安装版本",
+                ),
+            );
+            return;
+        };
+        if self.updates_loading {
+            self.toast(
+                LogLevel::Info,
+                lang.pick("Update check already running", "更新检查正在进行"),
+            );
+            return;
+        }
+        self.updates_loading = true;
+        self.updates_request = self.updates_request.wrapping_add(1);
+        let request = self.updates_request;
+        self.add_log(
+            LogLevel::Info,
+            if lang == Lang::Chinese {
+                format!("正在检查 {version} 的模组更新…")
+            } else {
+                format!("Checking mod updates for {version}…")
+            },
+        );
+        jobs::start_update_check(
+            self.tx.clone(),
+            request,
+            self.game_dir.clone(),
+            version,
+            self.active_loader_id(),
+        );
+    }
+
+    pub fn confirm_apply_updates(&mut self) {
+        let lang = self.lang();
+        if self.updates_loading {
+            self.toast(
+                LogLevel::Info,
+                lang.pick("Wait for the update check", "请等待更新检查完成"),
+            );
+            return;
+        }
+        if self.mod_updates.is_empty() {
+            self.toast(
+                LogLevel::Info,
+                lang.pick(
+                    "No updates found. Press u to check.",
+                    "没有可用更新。按 u 检查。",
+                ),
+            );
+            return;
+        }
+        let count = self.mod_updates.len();
+        self.modal = Some(Modal::Confirm {
+            title: lang.pick("Apply mod updates", "应用模组更新").into(),
+            lines: vec![
+                if lang == Lang::Chinese {
+                    format!("下载并替换 {count} 个模组？")
+                } else {
+                    format!("Download and replace {count} mod(s)?")
+                },
+                lang.pick(
+                    "Disabled mods stay disabled; old files are removed.",
+                    "已禁用的模组仍保持禁用；旧文件会被删除。",
+                )
+                .into(),
+            ],
+            action: ConfirmAction::ApplyUpdates,
+            danger: false,
+        });
+    }
+
+    fn begin_apply_updates(&mut self) {
+        let lang = self.lang();
+        if self.job.as_ref().is_some_and(JobView::is_running) {
+            self.toast(
+                LogLevel::Warn,
+                lang.pick("Wait for the current task to finish", "请等待当前任务完成"),
+            );
+            return;
+        }
+        let Some(version) = self.settings.active_version.clone() else {
+            return;
+        };
+        let updates = self.mod_updates.clone();
+        if updates.is_empty() {
+            return;
+        }
+        let id = self.next_job_id;
+        self.next_job_id += 1;
+        self.pending_activate = None;
+        self.pending_loader = None;
+        self.pending_update_apply = true;
+        self.show_job_panel = true;
+        self.job = Some(JobView::new(
+            id,
+            if lang == Lang::Chinese {
+                format!("更新 {} 个模组", updates.len())
+            } else {
+                format!("Update {} mod(s)", updates.len())
+            },
+        ));
+        progress::reset_cancel();
+        progress::set_job(id);
+        jobs::start_apply_updates(self.tx.clone(), id, self.game_dir.clone(), version, updates);
+    }
+
+    fn begin_export_modpack(&mut self, id: String, path: std::path::PathBuf) {
+        let lang = self.lang();
+        if self.job.as_ref().is_some_and(JobView::is_running) {
+            self.toast(
+                LogLevel::Warn,
+                lang.pick("Wait for the current task to finish", "请等待当前任务完成"),
+            );
+            return;
+        }
+        let job_id = self.next_job_id;
+        self.next_job_id += 1;
+        self.pending_activate = None;
+        self.pending_loader = None;
+        self.pending_update_apply = false;
+        self.show_job_panel = true;
+        self.job = Some(JobView::new(
+            job_id,
+            if lang == Lang::Chinese {
+                format!("导出整合包 {id}")
+            } else {
+                format!("Export modpack {id}")
+            },
+        ));
+        progress::reset_cancel();
+        progress::set_job(job_id);
+        jobs::start_export_modpack(self.tx.clone(), job_id, self.game_dir.clone(), id, path);
     }
 
     pub fn open_remote_picker(&mut self) {
@@ -3329,6 +3928,55 @@ impl App {
                     }
                 }
             }
+            BackendEvent::ModUpdates { request, result } => {
+                if request != self.updates_request {
+                    return;
+                }
+                self.updates_loading = false;
+                let lang = self.lang();
+                match result {
+                    Ok(updates) => {
+                        let count = updates.len();
+                        self.mod_updates = updates;
+                        self.refresh_mods();
+                        if count == 0 {
+                            self.log_and_toast(
+                                LogLevel::Ok,
+                                lang.pick(
+                                    "All installed mods are up to date",
+                                    "所有已安装模组均为最新",
+                                ),
+                            );
+                        } else {
+                            let lines: Vec<String> = self
+                                .mod_updates
+                                .iter()
+                                .map(|update| {
+                                    format!(
+                                        "{} {} -> {}",
+                                        update.project, update.current, update.latest
+                                    )
+                                })
+                                .collect();
+                            for line in lines {
+                                self.add_log(LogLevel::Info, line);
+                            }
+                            let message = if lang == Lang::Chinese {
+                                format!("{count} 个模组可更新 · 按 U 应用")
+                            } else {
+                                format!("{count} update(s) available · press U to apply")
+                            };
+                            self.log_and_toast(LogLevel::Ok, message);
+                        }
+                    }
+                    Err(error) => {
+                        let error = theme::one_line(&error, 400);
+                        let prefix = lang.pick("Update check failed", "更新检查失败");
+                        self.add_log(LogLevel::Error, format!("{prefix}: {error}"));
+                        self.toast(LogLevel::Error, error);
+                    }
+                }
+            }
             BackendEvent::Java { path, major } => {
                 self.java_probing = false;
                 self.java_path = path;
@@ -3379,6 +4027,11 @@ impl App {
                     self.settings.active_loader = Some(loader);
                     self.save_settings_silent();
                 }
+                if self.pending_update_apply {
+                    self.pending_update_apply = false;
+                    self.mod_updates.clear();
+                    self.refresh_mods();
+                }
                 self.refresh_local();
                 if let Some(version) = activated {
                     if let Some(index) = self.versions.iter().position(|row| row.id == version) {
@@ -3392,6 +4045,7 @@ impl App {
                     self.job = None;
                     self.pending_activate = None;
                     self.pending_loader = None;
+                    self.pending_update_apply = false;
                     self.log_and_toast(
                         LogLevel::Warn,
                         self.lang().pick("Task cancelled", "任务已取消"),
@@ -3401,6 +4055,7 @@ impl App {
                 let error = theme::one_line(&error, 400);
                 self.pending_activate = None;
                 self.pending_loader = None;
+                self.pending_update_apply = false;
                 if let Some(job) = self.job.as_mut() {
                     job.finished = Some(Err(error.clone()));
                     job.finished_at = Some(Instant::now());
@@ -3468,14 +4123,21 @@ impl App {
             .to_string()
         })?;
         let _ = std::io::stdout().flush();
-        let result = self.launcher.launch(
-            Some(&version),
-            Some(account),
-            ram,
-            loader.as_deref(),
+        let options = crate::launcher::LaunchOptions {
+            version: Some(version.clone()),
+            ram_mb: ram,
+            loader,
             width,
             height,
-        );
+            extra_jvm: self.settings.jvm_arguments(),
+            gc: self.settings.gc_preset(),
+            fullscreen: false,
+            server: None,
+            dry_run: false,
+            // The TUI prints a localized diagnosis itself.
+            diagnose: false,
+        };
+        let result = self.launcher.launch_with(options, Some(account));
         match result {
             Ok(0) => {
                 let message = if lang == Lang::Chinese {
@@ -3494,6 +4156,24 @@ impl App {
                     format!("Minecraft {version} exited with code {code}")
                 };
                 println!("\n  {message}");
+                if let Some(diagnosis) = crate::diagnose::analyze_instance(&self.game_dir, &version)
+                {
+                    println!("\n  {}", diagnosis.source);
+                    for finding in &diagnosis.findings {
+                        println!(
+                            "  [{}] {}",
+                            finding.severity.label(),
+                            finding.title_localized(lang == Lang::Chinese)
+                        );
+                        if !finding.hint.is_empty() {
+                            println!(
+                                "        → {}",
+                                finding.hint_localized(lang == Lang::Chinese)
+                            );
+                        }
+                    }
+                    self.pending_diagnosis = Some(diagnosis);
+                }
                 wait_for_enter(lang);
                 Err(message)
             }
@@ -3576,7 +4256,33 @@ impl App {
                     self.spawn_particles(theme::GOLD, 26);
                 }
             }
-            Err(error) => self.log_and_toast(LogLevel::Error, error),
+            Err(error) => {
+                self.log_and_toast(LogLevel::Error, error);
+                if task == SuspendTask::Launch {
+                    if let Some(diagnosis) = self.pending_diagnosis.take() {
+                        for finding in diagnosis.findings.iter().take(4) {
+                            let text = format!(
+                                "{} — {}",
+                                finding.title_localized(self.lang() == Lang::Chinese),
+                                finding.hint_localized(self.lang() == Lang::Chinese)
+                            );
+                            self.add_log(
+                                match finding.severity {
+                                    crate::diagnose::Severity::Error => LogLevel::Error,
+                                    crate::diagnose::Severity::Warn => LogLevel::Warn,
+                                    crate::diagnose::Severity::Info => LogLevel::Info,
+                                },
+                                text,
+                            );
+                        }
+                        self.toast(
+                            LogLevel::Warn,
+                            self.lang()
+                                .pick("Crash analysis added to Activity", "崩溃诊断已写入活动日志"),
+                        );
+                    }
+                }
+            }
         }
         self.refresh_local();
     }
@@ -4090,5 +4796,183 @@ mod tests {
             std::fs::create_dir_all(&empty_home).unwrap();
             assert!(resolve_java_setting(empty_home.to_str().unwrap(), Lang::Chinese).is_err());
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn settings_expose_java_picker_jvm_args_and_gc() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("java").join("java-runtime-gamma");
+        std::fs::create_dir_all(home.join("bin")).unwrap();
+        let exe = home.join("bin").join("java");
+        std::fs::write(
+            &exe,
+            "#!/bin/sh\nif [ \"$1\" = '-version' ]; then echo 'openjdk version \"21.0.1\"' >&2; fi\nexit 0\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(
+            home.join("release"),
+            b"IMPLEMENTOR=\"Test Vendor\"\nJAVA_VERSION=\"21.0.1\"\nOS_ARCH=\"x86_64\"\n",
+        )
+        .unwrap();
+
+        let (tx, _rx) = jobs::channel();
+        let mut app = App::new(
+            launcher(dir.path()),
+            tx,
+            Bootstrap {
+                no_splash: true,
+                ..Bootstrap::default()
+            },
+        );
+
+        app.settings_cursor = 6;
+        app.settings_activate();
+        let items = match &app.modal {
+            Some(Modal::Picker(picker)) => picker.items.clone(),
+            _ => panic!("expected the Java picker"),
+        };
+        assert!(items.iter().any(|item| item.id == "__auto__"));
+        assert!(items.iter().any(|item| item.id == "__browse__"));
+        let java_id = exe.to_string_lossy().to_string();
+        assert!(
+            items.iter().any(|item| item.id == java_id),
+            "items: {items:?}"
+        );
+
+        app.apply_pick(PickerKind::JavaRuntimes, &java_id);
+        assert_eq!(app.settings.java, java_id);
+        app.apply_pick(PickerKind::JavaRuntimes, "__auto__");
+        assert!(app.settings.java.is_empty());
+
+        app.settings_cursor = 7;
+        app.settings_activate();
+        assert!(matches!(
+            app.modal,
+            Some(Modal::Input {
+                action: InputAction::JvmArgs,
+                ..
+            })
+        ));
+        app.apply_input(InputAction::JvmArgs, "-Dfoo=bar -Xss2M")
+            .unwrap();
+        assert_eq!(app.settings.jvm_arguments(), vec!["-Dfoo=bar", "-Xss2M"]);
+        assert!(app
+            .apply_input(InputAction::JvmArgs, "'unterminated")
+            .is_err());
+
+        app.settings_cursor = 8;
+        app.settings_adjust(1);
+        assert_eq!(app.settings.gc, "g1");
+        app.settings_adjust(1);
+        assert_eq!(app.settings.gc, "zgc");
+        app.settings_adjust(-1);
+        assert_eq!(app.settings.gc, "g1");
+    }
+
+    #[test]
+    fn versions_screen_renames_and_deletes_instances() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let dir = tempfile::tempdir().unwrap();
+        let version = dir.path().join("versions").join("1.21.4");
+        std::fs::create_dir_all(&version).unwrap();
+        std::fs::write(
+            version.join("1.21.4.json"),
+            br#"{"id":"1.21.4","type":"release","mainClass":"Main","libraries":[],"downloads":{"client":{"url":"https://example.org/x"}}}"#,
+        )
+        .unwrap();
+        let (tx, _rx) = jobs::channel();
+        let mut app = App::new(
+            launcher(dir.path()),
+            tx,
+            Bootstrap {
+                no_splash: true,
+                ..Bootstrap::default()
+            },
+        );
+        assert_eq!(app.versions.len(), 1);
+        app.screen = Screen::Versions;
+        app.version_sel = 0;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE));
+        assert!(matches!(
+            app.modal,
+            Some(Modal::Input {
+                action: InputAction::RenameVersion,
+                ..
+            })
+        ));
+        assert!(app
+            .apply_input(InputAction::RenameVersion, "../escape")
+            .is_err());
+        assert!(
+            app.rename_source.is_some(),
+            "the source instance must survive a validation error"
+        );
+        app.apply_input(InputAction::RenameVersion, "my-pack")
+            .unwrap();
+        app.modal = None;
+        assert!(dir.path().join("versions/my-pack/my-pack.json").is_file());
+        assert_eq!(app.settings.active_version.as_deref(), Some("my-pack"));
+
+        app.refresh_local();
+        app.version_sel = 0;
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        let confirmed = match app.modal.take() {
+            Some(Modal::Confirm {
+                action: ConfirmAction::RemoveVersion(id),
+                ..
+            }) => id,
+            _ => panic!("expected a delete confirmation"),
+        };
+        app.apply_confirm(ConfirmAction::RemoveVersion(confirmed));
+        assert!(!dir.path().join("versions/my-pack").exists());
+        assert!(app.versions.is_empty());
+    }
+
+    #[test]
+    fn mod_updates_are_matched_to_installed_jars() {
+        let dir = tempfile::tempdir().unwrap();
+        let version = dir.path().join("versions").join("1.21.4");
+        std::fs::create_dir_all(version.join("mods")).unwrap();
+        std::fs::write(
+            version.join("1.21.4.json"),
+            br#"{"id":"1.21.4","type":"release","mainClass":"Main","libraries":[],"downloads":{"client":{"url":"https://example.org/x"}}}"#,
+        )
+        .unwrap();
+        std::fs::write(version.join("mods").join("sodium.jar"), b"jar").unwrap();
+        let (tx, _rx) = jobs::channel();
+        let mut app = App::new(
+            launcher(dir.path()),
+            tx,
+            Bootstrap {
+                no_splash: true,
+                ..Bootstrap::default()
+            },
+        );
+        assert_eq!(app.mods.len(), 1);
+        app.mod_updates = vec![crate::update::ModUpdate {
+            file: version.join("mods").join("sodium.jar"),
+            filename: "sodium-2.jar".into(),
+            enabled: true,
+            project: "Sodium".into(),
+            current: "0.5.0".into(),
+            latest: "0.6.0".into(),
+            download_url: "https://example.invalid/sodium.jar".into(),
+            download_name: "sodium-2.jar".into(),
+            download_sha1: None,
+        }];
+        app.refresh_mods();
+        assert_eq!(app.mods[0].update.as_deref(), Some("0.6.0"));
+        app.confirm_apply_updates();
+        assert!(matches!(
+            app.modal,
+            Some(Modal::Confirm {
+                action: ConfirmAction::ApplyUpdates,
+                ..
+            })
+        ));
     }
 }

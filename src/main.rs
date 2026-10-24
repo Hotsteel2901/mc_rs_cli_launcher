@@ -5,11 +5,13 @@
 
 mod account;
 mod auth;
+mod diagnose;
 mod error;
 mod fabric;
 mod forge;
 mod http;
 mod installer;
+mod instance;
 mod java;
 mod launcher;
 pub mod log;
@@ -18,6 +20,7 @@ mod modrinth;
 mod neoforge;
 mod progress;
 mod tui;
+mod update;
 mod util;
 mod version;
 
@@ -32,6 +35,7 @@ use crate::auth::MicrosoftAuth;
 use crate::fabric::FabricManager;
 use crate::forge::ForgeManager;
 use crate::http::SourceMode;
+use crate::instance::InstanceManager;
 use crate::launcher::MinecraftLauncher;
 use crate::mod_manager::ModManager;
 use crate::modrinth as mr;
@@ -63,6 +67,58 @@ fn parse_ram(value: &str) -> Result<u32, String> {
         ));
     }
     Ok(mb as u32)
+}
+
+fn parse_server_arg(value: &str) -> Result<String, String> {
+    crate::launcher::parse_server(value)?;
+    Ok(value.to_string())
+}
+
+/// Split a command-line fragment into arguments, honouring single/double quotes.
+fn split_args(value: &str) -> Result<Vec<String>, String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut has_content = false;
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match quote {
+            Some(active) if ch == active => quote = None,
+            Some(_) => {
+                current.push(ch);
+                has_content = true;
+            }
+            None => match ch {
+                '\'' | '"' => {
+                    quote = Some(ch);
+                    has_content = true;
+                }
+                '\\' => {
+                    if let Some(next) = chars.next() {
+                        current.push(next);
+                        has_content = true;
+                    }
+                }
+                c if c.is_whitespace() => {
+                    if has_content {
+                        args.push(std::mem::take(&mut current));
+                        has_content = false;
+                    }
+                }
+                c => {
+                    current.push(c);
+                    has_content = true;
+                }
+            },
+        }
+    }
+    if quote.is_some() {
+        return Err("Unterminated quote in --jvm-args".into());
+    }
+    if has_content {
+        args.push(current);
+    }
+    Ok(args)
 }
 
 fn parse_component(value: &str) -> Result<String, String> {
@@ -159,6 +215,16 @@ fn build_cli() -> Command {
              hot-rs-launcher enable-mod sodium -v 1.21.4\n  \
              hot-rs-launcher uninstall-mod sodium -v 1.21.4\n  \
              hot-rs-launcher logout                      # Clear saved session\n  \
+             hot-rs-launcher list-java                   # Show detected Java runtimes\n  \
+             hot-rs-launcher install-java --java-major 21\n  \
+             hot-rs-launcher remove-version -v 1.20.1 --keep-saves\n  \
+             hot-rs-launcher rename-version -v 1.21.4 --name my-pack\n  \
+             hot-rs-launcher export-modpack -v 1.21.4 -o pack.mrpack\n  \
+             hot-rs-launcher import-modpack pack.mrpack\n  \
+             hot-rs-launcher update-mods -v 1.21.4 --apply\n  \
+             hot-rs-launcher backup -v 1.21.4 --with-mods\n  \
+             hot-rs-launcher diagnose -v 1.21.4          # Analyze the latest crash\n  \
+             hot-rs-launcher play --dry-run --gc g1       # Print the command only\n  \
              hot-rs-launcher tui                         # Full-screen terminal UI",
         )
         // Global options
@@ -201,6 +267,47 @@ fn build_cli() -> Command {
                 .value_parser(value_parser!(u32).range(1..=100))
                 .default_value("10"),
         )
+        .arg(
+            arg!(--"java-major" <N> "Java major version for install-java (e.g. 8, 17, 21)")
+                .value_parser(value_parser!(u32).range(8..=99)),
+        )
+        .arg(
+            arg!(--"jvm-args" <ARGS> "Extra JVM arguments (quotes supported)")
+                .allow_hyphen_values(true),
+        )
+        .arg(
+            arg!(--gc <PRESET> "GC preset: auto, g1, zgc, parallel, serial, none")
+                .value_parser(clap::builder::ValueParser::new(
+                    crate::launcher::GcPreset::parse,
+                ))
+                .default_value("auto"),
+        )
+        .arg(arg!(--fullscreen "Start the game in fullscreen").action(ArgAction::SetTrue))
+        .arg(
+            arg!(--server <ADDR> "Join a server directly (host or host:port)")
+                .value_parser(parse_server_arg),
+        )
+        .arg(
+            arg!(--"dry-run" "Print the launch command without starting the game")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
+            arg!(--"no-diagnose" "Skip crash analysis after a failed launch")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(arg!(--apply "Apply available mod updates").action(ArgAction::SetTrue))
+        .arg(arg!(--all "Include disabled mods when checking updates").action(ArgAction::SetTrue))
+        .arg(arg!(-o --output <PATH> "Output file for export-modpack / backup"))
+        .arg(arg!(--name <NAME> "New instance id (rename/copy) or pack name (import)"))
+        .arg(
+            arg!(--"keep-saves" "Keep saves/ when removing an instance").action(ArgAction::SetTrue),
+        )
+        .arg(arg!(--"keep-mods" "Keep mods/ when removing an instance").action(ArgAction::SetTrue))
+        .arg(arg!(--"with-mods" "Include mods/ in backups").action(ArgAction::SetTrue))
+        .arg(
+            arg!(--"install-loader" "Install the modpack loader after importing")
+                .action(ArgAction::SetTrue),
+        )
         // Positional: action
         .arg(
             arg!([ACTION] "Action to perform")
@@ -226,6 +333,19 @@ fn build_cli() -> Command {
                     "disable-mod",
                     "enable-mod",
                     "uninstall-mod",
+                    "list-java",
+                    "install-java",
+                    "remove-version",
+                    "delete-version",
+                    "rename-version",
+                    "copy-version",
+                    "export-modpack",
+                    "import-modpack",
+                    "update-mods",
+                    "diagnose",
+                    "backup",
+                    "list-backups",
+                    "restore-backup",
                     "tui",
                     "ui",
                 ]),
@@ -250,7 +370,25 @@ fn build_cli() -> Command {
         )
 }
 
+/// Restore the default SIGPIPE behaviour so piping into head/tail exits
+/// quietly instead of panicking on a closed stdout.
+#[cfg(unix)]
+fn reset_sigpipe() {
+    extern "C" {
+        fn signal(signum: i32, handler: usize) -> usize;
+    }
+    const SIGPIPE: i32 = 13;
+    const SIG_DFL: usize = 0;
+    unsafe {
+        signal(SIGPIPE, SIG_DFL);
+    }
+}
+
+#[cfg(not(unix))]
+fn reset_sigpipe() {}
+
 fn main() {
+    reset_sigpipe();
     let matches = build_cli().get_matches();
     crate::log::set_verbose(matches.get_flag("verbose"));
     if matches.get_flag("about") {
@@ -289,6 +427,30 @@ fn main() {
     let forge_flag = matches.get_flag("forge");
     let neoforge_flag = matches.get_flag("neoforge");
     let limit = *matches.get_one::<u32>("limit").unwrap();
+    let java_major = matches.get_one::<u32>("java-major").copied();
+    let jvm_args = match matches.get_one::<String>("jvm-args") {
+        Some(value) => split_args(value).unwrap_or_else(|e| crate::die!(e)),
+        None => Vec::new(),
+    };
+    let gc = matches
+        .get_one::<crate::launcher::GcPreset>("gc")
+        .copied()
+        .unwrap_or_default();
+    let fullscreen = matches.get_flag("fullscreen");
+    let server = matches.get_one::<String>("server").cloned();
+    let dry_run = matches.get_flag("dry-run");
+    let diagnose = !matches.get_flag("no-diagnose");
+    let apply_updates = matches.get_flag("apply");
+    let include_disabled = matches.get_flag("all");
+    let output = matches
+        .get_one::<String>("output")
+        .cloned()
+        .map(PathBuf::from);
+    let new_name = matches.get_one::<String>("name").cloned();
+    let keep_saves = matches.get_flag("keep-saves");
+    let keep_mods = matches.get_flag("keep-mods");
+    let with_mods = matches.get_flag("with-mods");
+    let install_loader = matches.get_flag("install-loader");
 
     // Resolve source mode: manual > auto-detect
     let manual_mode = if official_flag && bmcl_flag {
@@ -376,14 +538,93 @@ fn main() {
         "login" => cmd_login(&mut launcher, device_code),
         "offline" => cmd_offline(&mut launcher, query.as_deref().unwrap_or("Steve")),
         "download" => cmd_download(&mut launcher, mc_version.as_deref(), no_assets),
-        "play" => cmd_play(
-            &mut launcher,
-            mc_version.as_deref(),
-            ram_mb,
-            loader.as_deref(),
-            width,
-            height,
+        "list-java" => cmd_list_java(&game_dir, mc_version.clone()),
+        "install-java" => cmd_install_java(&game_dir, java_major, threads),
+        "remove-version" | "delete-version" => {
+            let id = instance_arg(&query, &mc_version);
+            cmd_remove_version(&game_dir, &id, keep_saves, keep_mods);
+        }
+        "rename-version" => {
+            let from = instance_arg(&query, &mc_version);
+            let to = new_name.clone().unwrap_or_else(|| {
+                crate::die!(
+                    "Provide the new instance id with --name.",
+                    "Example: hot-rs-launcher rename-version -v 1.21.4 --name my-pack"
+                )
+            });
+            cmd_rename_version(&game_dir, &from, &to);
+        }
+        "copy-version" => {
+            let from = instance_arg(&query, &mc_version);
+            let to = new_name.clone().unwrap_or_else(|| {
+                crate::die!(
+                    "Provide the new instance id with --name.",
+                    "Example: hot-rs-launcher copy-version -v 1.21.4 --name 1.21.4-b"
+                )
+            });
+            cmd_copy_version(&game_dir, &from, &to);
+        }
+        "export-modpack" => {
+            let id = instance_arg(&query, &mc_version);
+            cmd_export_modpack(&game_dir, &id, loader.as_deref(), output.clone());
+        }
+        "import-modpack" => {
+            let archive = query.clone().unwrap_or_else(|| {
+                crate::die!(
+                    "Provide the .mrpack file to import.",
+                    "Example: hot-rs-launcher import-modpack ./pack.mrpack"
+                )
+            });
+            cmd_import_modpack(
+                &game_dir,
+                std::path::Path::new(&archive),
+                new_name.as_deref(),
+                install_loader,
+                java_path.as_deref(),
+            );
+        }
+        "update-mods" => cmd_update_mods(
+            &game_dir,
+            mc_version.clone(),
+            loader.clone(),
+            apply_updates,
+            include_disabled,
         ),
+        "diagnose" => cmd_diagnose(&game_dir, query.clone().or_else(|| mc_version.clone())),
+        "backup" => {
+            let id = instance_arg(&query, &mc_version);
+            cmd_backup(&game_dir, &id, with_mods);
+        }
+        "list-backups" => cmd_list_backups(&game_dir),
+        "restore-backup" => {
+            let archive = query.clone().unwrap_or_else(|| {
+                crate::die!(
+                    "Provide the backup archive to restore.",
+                    "Example: hot-rs-launcher restore-backup ./backups/1.21.4-20240101-120000.zip"
+                )
+            });
+            cmd_restore_backup(
+                &game_dir,
+                std::path::Path::new(&archive),
+                mc_version.as_deref(),
+            );
+        }
+        "play" => {
+            let options = crate::launcher::LaunchOptions {
+                version: mc_version.clone(),
+                ram_mb,
+                loader: loader.clone(),
+                width,
+                height,
+                extra_jvm: jvm_args.clone(),
+                gc,
+                fullscreen,
+                server: server.clone(),
+                dry_run,
+                diagnose,
+            };
+            cmd_play(&mut launcher, options);
+        }
         "tui" => {
             let explicit_ram = matches.value_source("ram") == Some(ValueSource::CommandLine);
             let explicit_threads =
@@ -536,62 +777,48 @@ fn cmd_list_loaders() {
 
 fn cmd_list_installed(game_dir: &std::path::Path, launcher: &MinecraftLauncher) {
     crate::log::header("Locally Installed Minecraft Versions");
-    let versions = ModManager::list_installed_versions(game_dir);
-    if versions.is_empty() {
+    let instances = InstanceManager::new(game_dir).list();
+    if instances.is_empty() {
         crate::warn_msg!("No versions installed.");
         crate::info!("Download one: hot-rs-launcher download -v <version>");
         return;
     }
 
-    for v in &versions {
-        let vdir = game_dir.join("versions").join(v);
-        let jar = vdir.join(format!("{}.jar", v));
-        let jar_size = if jar.exists() {
-            let size = jar.metadata().map(|m| m.len()).unwrap_or(0) as f64 / 1_048_576.0;
-            format!("  ({:.1} MB)", size)
+    for detail in &instances {
+        let loaders = if detail.loaders.is_empty() {
+            "vanilla".to_string()
         } else {
-            String::new()
+            detail.loaders.join("+")
         };
-
-        let mods_dir = vdir.join("mods");
-        let mod_count = count_jars(&mods_dir, ".jar");
-        let dis_count = count_jars(&mods_dir, ".jar.disabled");
-
-        let mut tags: Vec<String> = Vec::new();
-        for loader in &["fabric", "forge", "neoforge"] {
-            if game_dir
-                .join("libraries")
-                .join(loader)
-                .join(format!("{}-profile-{}.json", loader, v))
-                .exists()
-            {
-                tags.push(
-                    match *loader {
-                        "fabric" => "Fabric",
-                        "forge" => "Forge",
-                        "neoforge" => "NeoForge",
-                        _ => loader,
-                    }
-                    .to_string(),
-                );
+        let mut tags = vec![format!(
+            "{:<8} {:<16}",
+            detail
+                .java_major
+                .map(|major| format!("Java {major}"))
+                .unwrap_or_else(|| "Java ?".into()),
+            loaders
+        )];
+        let mods = detail.mods_enabled + detail.mods_disabled;
+        if mods > 0 {
+            tags.push(format!("{mods} mod(s)"));
+        }
+        if detail.base != detail.id {
+            tags.push(format!("base {}", detail.base));
+        }
+        if let Some(name) = detail.name.as_deref() {
+            if name != detail.id && name != detail.base {
+                tags.push(format!("\"{name}\""));
             }
         }
-        if mod_count > 0 {
-            tags.push(format!("{} mods", mod_count));
-        }
-        if dis_count > 0 {
-            tags.push(format!("{} disabled", dis_count));
-        }
-
-        let tag_str = if tags.is_empty() {
-            String::new()
-        } else {
-            format!("  [{}]", tags.join(", "))
-        };
-        println!("  {: <12}{}{}", v, jar_size, tag_str);
+        println!(
+            "  {:<28} {:>9}  {}",
+            detail.id,
+            format_size(detail.total_size),
+            tags.join("  ")
+        );
     }
 
-    println!("\n  Total: {} version(s)", versions.len());
+    println!("\n  Total: {} instance(s)", instances.len());
     if let Some(acc) = launcher.accounts.get_default() {
         println!(
             "  Account: {} ({})",
@@ -603,22 +830,9 @@ fn cmd_list_installed(game_dir: &std::path::Path, launcher: &MinecraftLauncher) 
     }
 }
 
-fn count_jars(dir: &std::path::Path, suffix: &str) -> usize {
-    if !dir.exists() {
-        return 0;
-    }
-    std::fs::read_dir(dir)
-        .map(|rd| {
-            rd.flatten()
-                .filter(|e| e.file_name().to_string_lossy().ends_with(suffix))
-                .count()
-        })
-        .unwrap_or(0)
-}
-
 fn cmd_list_mods(game_dir: &std::path::Path, mc_version: Option<String>) {
     let mc_version = resolve_mc_version(mc_version, game_dir);
-    crate::log::header(&format!("Mods for Minecraft {}", mc_version));
+    crate::log::header(&format!("Mods for {}", mc_version));
 
     let mm = ModManager::new(game_dir);
     let mods = mm.list_mods(&mc_version);
@@ -1008,7 +1222,7 @@ fn cmd_install_mod(
     let (_paths, _version_data, project) = mm.install(&slug, &mc_version, loader, mod_version);
 
     let title = project["title"].as_str().unwrap_or(&slug);
-    let source = project["source"].as_str().unwrap_or("?");
+    let source = project["source"].as_str().unwrap_or("modrinth");
     crate::success!(
         "{} installed for Minecraft {} (source: {})!",
         title,
@@ -1146,27 +1360,400 @@ fn cmd_download(launcher: &mut MinecraftLauncher, mc_version: Option<&str>, no_a
         });
 }
 
-fn cmd_play(
-    launcher: &mut MinecraftLauncher,
-    mc_version: Option<&str>,
-    ram_mb: u32,
-    loader: Option<&str>,
-    width: Option<u32>,
-    height: Option<u32>,
-) {
-    let account = launcher.accounts.get_default().unwrap_or_else(|| {
+fn cmd_play(launcher: &mut MinecraftLauncher, options: crate::launcher::LaunchOptions) {
+    let account = launcher.accounts.get_default();
+    if account.is_none() && !options.dry_run {
         crate::die!(
             "No saved account. Run 'login' or 'offline <name>' first.",
             "  hot-rs-launcher login        # Microsoft login\n  hot-rs-launcher offline Steve # Offline mode"
         );
+    }
+    let exit_code = launcher.launch_with(options, account).unwrap_or_else(|e| {
+        crate::die!(format!("Launch failed: {}", e));
     });
-
-    let exit_code = launcher
-        .launch(mc_version, Some(account), ram_mb, loader, width, height)
-        .unwrap_or_else(|e| {
-            crate::die!(format!("Launch failed: {}", e));
-        });
     std::process::exit(exit_code);
+}
+
+/// Id for instance commands: positional, then -v.
+fn instance_arg(query: &Option<String>, mc_version: &Option<String>) -> String {
+    query
+        .clone()
+        .or_else(|| mc_version.clone())
+        .unwrap_or_else(|| {
+            crate::die!(
+                "Specify the instance id.",
+                "Example: hot-rs-launcher remove-version -v 1.20.1 --keep-saves"
+            )
+        })
+}
+
+fn format_size(bytes: u64) -> String {
+    let mb = bytes as f64 / 1_048_576.0;
+    if mb >= 1024.0 {
+        format!("{:.1} GB", mb / 1024.0)
+    } else {
+        format!("{:.1} MB", mb)
+    }
+}
+
+/// Keep the TUI's active instance pointing at something that exists.
+fn sync_active_version(game_dir: &std::path::Path, from: &str, to: Option<&str>) {
+    let path = crate::tui::config::Settings::path(game_dir);
+    if !path.exists() {
+        return;
+    }
+    let (mut settings, _) = crate::tui::config::Settings::load(&path);
+    if settings.active_version.as_deref() == Some(from) {
+        settings.active_version = to.map(|value| value.to_string());
+        if let Err(error) = settings.save(&path) {
+            crate::warn_msg!("{}", error);
+        }
+    }
+}
+
+fn cmd_list_java(game_dir: &std::path::Path, mc_version: Option<String>) {
+    crate::log::header("Detected Java Runtimes");
+    let required = mc_version.and_then(|id| {
+        std::fs::read(
+            game_dir
+                .join("versions")
+                .join(&id)
+                .join(format!("{id}.json")),
+        )
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|value| value["javaVersion"]["majorVersion"].as_u64())
+        .map(|major| major as u32)
+    });
+    let infos = java::detect_java(Some(game_dir));
+    if infos.is_empty() {
+        crate::warn_msg!("No Java runtime found.");
+        crate::info!("Install Mojang's runtime: hot-rs-launcher install-java --java-major 21");
+        return;
+    }
+    let recommended = java::best_java(&infos, required).map(|info| info.path.clone());
+    for info in &infos {
+        let marker = if Some(&info.path) == recommended.as_ref() {
+            " *"
+        } else {
+            ""
+        };
+        println!(
+            "  {:<26} {:<32} {}{}",
+            info.label(),
+            info.meta(),
+            info.path,
+            marker
+        );
+    }
+    if let Some(required) = required {
+        crate::info!(
+            "{} runtime(s); * recommended for Java {}.",
+            infos.len(),
+            required
+        );
+    } else {
+        crate::info!(
+            "{} runtime(s). Use --java <path> to pick one; pass -v <id> for a recommendation.",
+            infos.len()
+        );
+    }
+}
+
+fn cmd_install_java(game_dir: &std::path::Path, major: Option<u32>, threads: usize) {
+    let major = major.unwrap_or_else(|| {
+        crate::die!(
+            "Specify the Java major version.",
+            "Example: hot-rs-launcher install-java --java-major 21"
+        )
+    });
+    crate::log::header(&format!("Install Java {}", major));
+    let path = java::download_runtime_for_major(game_dir, major, threads).unwrap_or_else(|| {
+        crate::die!(format!(
+            "Could not install Java {} (no Mojang runtime for this platform/version).",
+            major
+        ))
+    });
+    crate::success!("Java {} installed: {}", major, path);
+    crate::info!("Use it with: hot-rs-launcher play --java {}", path);
+}
+
+fn cmd_remove_version(game_dir: &std::path::Path, id: &str, keep_saves: bool, keep_mods: bool) {
+    let manager = InstanceManager::new(game_dir);
+    crate::log::header(&format!("Remove Instance {}", id));
+    let report = manager
+        .remove(id, keep_saves, keep_mods)
+        .unwrap_or_else(|e| crate::die!(format!("Remove failed: {e}")));
+    for entry in &report.removed {
+        println!("  removed: {}", entry);
+    }
+    for entry in &report.kept {
+        println!("  kept:    {}", entry);
+    }
+    crate::success!("Freed {}.", format_size(report.freed_bytes));
+    sync_active_version(game_dir, id, None);
+}
+
+fn cmd_rename_version(game_dir: &std::path::Path, from: &str, to: &str) {
+    let manager = InstanceManager::new(game_dir);
+    crate::log::header(&format!("Rename Instance {} -> {}", from, to));
+    manager
+        .rename(from, to)
+        .unwrap_or_else(|e| crate::die!(format!("Rename failed: {e}")));
+    crate::success!("Renamed '{}' to '{}'.", from, to);
+    sync_active_version(game_dir, from, Some(to));
+    crate::info!("Launch with: hot-rs-launcher play -v {}", to);
+}
+
+fn cmd_copy_version(game_dir: &std::path::Path, from: &str, to: &str) {
+    let manager = InstanceManager::new(game_dir);
+    crate::log::header(&format!("Copy Instance {} -> {}", from, to));
+    let bytes = manager
+        .copy(from, to)
+        .unwrap_or_else(|e| crate::die!(format!("Copy failed: {e}")));
+    crate::success!("Copied '{}' to '{}' ({}).", from, to, format_size(bytes));
+    crate::info!("Launch with: hot-rs-launcher play -v {}", to);
+}
+
+fn cmd_export_modpack(
+    game_dir: &std::path::Path,
+    id: &str,
+    loader: Option<&str>,
+    output: Option<PathBuf>,
+) {
+    let manager = InstanceManager::new(game_dir);
+    let output = output.unwrap_or_else(|| {
+        game_dir.join("modpacks").join(format!(
+            "{}.mrpack",
+            crate::instance::sanitize_instance_id(id)
+        ))
+    });
+    crate::log::header(&format!("Export Modpack from {}", id));
+    let report = manager
+        .export_modpack(id, loader, &output)
+        .unwrap_or_else(|e| crate::die!(format!("Export failed: {e}")));
+    crate::success!("Modpack: {}", report.path.display());
+    println!(
+        "  Downloads: {}   Overrides: {}",
+        report.files, report.overrides
+    );
+    if report.offline {
+        crate::warn_msg!("Modrinth was unreachable; all mods were bundled as overrides.");
+    }
+    crate::info!(
+        "Import elsewhere with: hot-rs-launcher import-modpack '{}'",
+        report.path.display()
+    );
+}
+
+fn cmd_import_modpack(
+    game_dir: &std::path::Path,
+    archive: &std::path::Path,
+    name: Option<&str>,
+    install_loader: bool,
+    java: Option<&str>,
+) {
+    let manager = InstanceManager::new(game_dir);
+    crate::log::header("Import Modpack");
+    crate::info!("Archive: {}", archive.display());
+    let report = manager
+        .import_modpack(archive, name)
+        .unwrap_or_else(|e| crate::die!(format!("Import failed: {e}")));
+    crate::success!(
+        "Imported '{}' (Minecraft {}{})",
+        report.id,
+        report.base,
+        report
+            .loader
+            .as_deref()
+            .map(|loader| format!(" + {loader}"))
+            .unwrap_or_default()
+    );
+    println!("  Downloaded: {} file(s)", report.files);
+    println!("  Overrides:  {} file(s)", report.overrides);
+
+    if let Some(loader) = report.loader.as_deref() {
+        let installed =
+            crate::instance::loader_profile_path(game_dir, loader, &report.id).is_some();
+        if installed {
+            crate::info!("{} is already installed for this instance.", loader);
+        } else if install_loader {
+            crate::info!(
+                "Installing {} {}...",
+                loader,
+                report.loader_version.as_deref().unwrap_or("")
+            );
+            let result = match loader {
+                "fabric" => FabricManager::new(game_dir)
+                    .install(&report.base, report.loader_version.as_deref())
+                    .map(|(jars, _)| format!("{} libraries", jars.len())),
+                "forge" => ForgeManager::new(game_dir)
+                    .install(&report.base, report.loader_version.as_deref(), java)
+                    .map(|(id, _)| id),
+                "neoforge" => NeoForgeManager::new(game_dir)
+                    .install(&report.base, report.loader_version.as_deref(), java)
+                    .map(|(id, _)| id),
+                other => Err(crate::error::AppError::Loader(format!(
+                    "Unsupported loader {other}"
+                ))),
+            };
+            match result {
+                Ok(summary) => crate::success!("{} installed ({}).", loader, summary),
+                Err(error) => {
+                    crate::error_msg!("Loader install failed: {error}");
+                }
+            }
+        } else {
+            let version_flag = report
+                .loader_version
+                .as_deref()
+                .map(|version| format!(" --loader-version {version}"))
+                .unwrap_or_default();
+            crate::info!(
+                "Install the loader with: hot-rs-launcher install-{} -v {}{}",
+                loader,
+                report.base,
+                version_flag
+            );
+        }
+    }
+    crate::info!("Launch with: hot-rs-launcher play -v {}", report.id);
+}
+
+fn cmd_update_mods(
+    game_dir: &std::path::Path,
+    mc_version: Option<String>,
+    loader: Option<String>,
+    apply: bool,
+    include_disabled: bool,
+) {
+    let mc_version = resolve_mc_version(mc_version, game_dir);
+    let loader = loader.or_else(|| {
+        InstanceManager::new(game_dir)
+            .loaders(&mc_version)
+            .first()
+            .cloned()
+    });
+    crate::log::header(&format!(
+        "Mod Updates for {} ({})",
+        mc_version,
+        loader.as_deref().unwrap_or("auto")
+    ));
+    let check = crate::update::check(game_dir, &mc_version, loader.as_deref(), include_disabled)
+        .unwrap_or_else(|e| crate::die!(format!("Update check failed: {e}")));
+
+    if check.updates.is_empty() {
+        crate::success!(
+            "All {} known mods are up to date ({} not on Modrinth).",
+            check.up_to_date,
+            check.unknown
+        );
+        return;
+    }
+    for entry in &check.updates {
+        println!(
+            "  {:<34} {:<14} -> {:<14} {}",
+            entry.project, entry.current, entry.latest, entry.filename
+        );
+    }
+    crate::info!(
+        "{} update(s); {} up to date; {} not identified by Modrinth.",
+        check.updates.len(),
+        check.up_to_date,
+        check.unknown
+    );
+
+    if apply {
+        crate::log::header("Applying Updates");
+        for entry in &check.updates {
+            match crate::update::apply(game_dir, &mc_version, entry) {
+                Ok(path) => crate::success!(
+                    "{} -> {}",
+                    entry.project,
+                    path.file_name().unwrap_or_default().to_string_lossy()
+                ),
+                Err(error) => {
+                    crate::error_msg!("Failed to update {}: {}", entry.project, error);
+                }
+            }
+        }
+    } else {
+        crate::info!(
+            "Apply with: hot-rs-launcher update-mods -v {} --apply",
+            mc_version
+        );
+    }
+}
+
+fn cmd_diagnose(game_dir: &std::path::Path, id: Option<String>) {
+    let id = id.unwrap_or_else(|| {
+        let installed = ModManager::list_installed_versions(game_dir);
+        installed.last().cloned().unwrap_or_else(|| {
+            crate::die!(
+                "Specify an instance with -v <id>.",
+                "Example: hot-rs-launcher diagnose -v 1.21.4"
+            )
+        })
+    });
+    crate::log::header(&format!("Diagnose {}", id));
+    match crate::diagnose::analyze_instance(game_dir, &id) {
+        Some(diagnosis) => print!("{}", crate::diagnose::render(&diagnosis)),
+        None => {
+            crate::warn_msg!("No crash report or logs/latest.log found for '{}'.", id);
+            crate::info!("Launch the instance once, then run diagnose again.");
+        }
+    }
+}
+
+fn cmd_backup(game_dir: &std::path::Path, id: &str, with_mods: bool) {
+    let manager = InstanceManager::new(game_dir);
+    crate::log::header(&format!("Backup {}", id));
+    let path = manager
+        .backup(id, with_mods)
+        .unwrap_or_else(|e| crate::die!(format!("Backup failed: {e}")));
+    let size = path.metadata().map(|meta| meta.len()).unwrap_or(0);
+    crate::success!("Backup: {} ({})", path.display(), format_size(size));
+    crate::info!(
+        "Restore with: hot-rs-launcher restore-backup '{}'",
+        path.display()
+    );
+}
+
+fn cmd_list_backups(game_dir: &std::path::Path) {
+    let manager = InstanceManager::new(game_dir);
+    let backups = manager.list_backups();
+    crate::log::header("Backups");
+    if backups.is_empty() {
+        crate::warn_msg!("No backups yet.");
+        crate::info!("Create one with: hot-rs-launcher backup -v <id>");
+        return;
+    }
+    for (path, size, modified) in &backups {
+        let age = modified
+            .and_then(|time| SystemTime::now().duration_since(time).ok())
+            .map(|elapsed| format!("{} ago", crate::tui::theme::format_duration(elapsed)))
+            .unwrap_or_default();
+        println!(
+            "  {:<54} {:>9}  {}",
+            path.file_name().unwrap_or_default().to_string_lossy(),
+            format_size(*size),
+            age
+        );
+    }
+    crate::info!(
+        "{} backup(s) in {}",
+        backups.len(),
+        manager.game_dir.join("backups").display()
+    );
+}
+
+fn cmd_restore_backup(game_dir: &std::path::Path, archive: &std::path::Path, target: Option<&str>) {
+    let manager = InstanceManager::new(game_dir);
+    crate::log::header("Restore Backup");
+    let (id, restored) = manager
+        .restore(archive, target)
+        .unwrap_or_else(|e| crate::die!(format!("Restore failed: {e}")));
+    crate::success!("Restored {} file(s) into '{}'.", restored, id);
 }
 
 // ─── helpers ───────────────────────────────────────────────────────
@@ -1253,5 +1840,73 @@ mod cli_tests {
                 .kind(),
             clap::error::ErrorKind::DisplayVersion
         );
+    }
+
+    #[test]
+    fn new_actions_and_launch_flags_parse() {
+        for args in [
+            vec!["list-java"],
+            vec!["install-java", "--java-major", "21"],
+            vec!["remove-version", "-v", "1.21.4", "--keep-saves"],
+            vec!["rename-version", "-v", "1.21.4", "--name", "my-pack"],
+            vec!["copy-version", "-v", "1.21.4", "--name", "copy-pack"],
+            vec!["export-modpack", "-v", "1.21.4", "-o", "pack.mrpack"],
+            vec![
+                "import-modpack",
+                "pack.mrpack",
+                "--name",
+                "pack",
+                "--install-loader",
+            ],
+            vec!["update-mods", "-v", "1.21.4", "--apply", "--all"],
+            vec!["diagnose", "-v", "1.21.4"],
+            vec!["backup", "-v", "1.21.4", "--with-mods"],
+            vec!["list-backups"],
+            vec!["restore-backup", "b.zip", "-v", "1.21.4"],
+            vec![
+                "play",
+                "--gc",
+                "g1",
+                "--dry-run",
+                "--server",
+                "mc.example.com:25565",
+                "--jvm-args",
+                "-Dfoo=bar",
+                "--fullscreen",
+                "--no-diagnose",
+            ],
+        ] {
+            assert!(
+                build_cli()
+                    .try_get_matches_from(std::iter::once("hot-rs-launcher").chain(args.clone()))
+                    .is_ok(),
+                "should accept {args:?}"
+            );
+        }
+        for args in [
+            vec!["play", "--gc", "bogus"],
+            vec!["play", "--server", "a b"],
+            vec!["install-java", "--java-major", "4"],
+            vec!["play", "--server", "host:0"],
+        ] {
+            assert!(
+                build_cli()
+                    .try_get_matches_from(std::iter::once("hot-rs-launcher").chain(args.clone()))
+                    .is_err(),
+                "should reject {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn jvm_arguments_are_split_like_a_shell() {
+        assert_eq!(
+            split_args("-Dfoo='a b' -Xmx4G").unwrap(),
+            vec!["-Dfoo=a b", "-Xmx4G"]
+        );
+        assert_eq!(split_args("a 'b c' d").unwrap(), vec!["a", "b c", "d"]);
+        assert_eq!(split_args("").unwrap(), Vec::<String>::new());
+        assert!(split_args("'unterminated").is_err());
+        assert_eq!(split_args("  ").unwrap(), Vec::<String>::new());
     }
 }

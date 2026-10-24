@@ -10,7 +10,7 @@ pub mod config;
 mod i18n;
 mod input;
 mod jobs;
-mod theme;
+pub mod theme;
 mod ui;
 
 use std::io::{self, IsTerminal, Write};

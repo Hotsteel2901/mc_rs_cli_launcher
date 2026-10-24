@@ -8,6 +8,13 @@ use std::time::SystemTime;
 
 const MC_MANIFEST: &str = "https://launchermeta.mojang.com/mc/game/version_manifest_v2.json";
 
+struct LibraryFile {
+    url: String,
+    path: PathBuf,
+    hash: Option<String>,
+    native: bool,
+}
+
 pub struct VersionManager {
     pub game_dir: PathBuf,
     pub versions_dir: PathBuf,
@@ -209,19 +216,13 @@ impl VersionManager {
         allowed
     }
 
-    pub fn download_libraries(
+    /// Resolve the libraries of a version into files to download and the
+    /// classpath jars. Pure path computation, so dry runs can skip downloads.
+    fn plan_libraries(
         &self,
         data: &serde_json::Value,
-        natives_dir: &Path,
-        max_workers: usize,
-    ) -> AppResult<Vec<PathBuf>> {
-        struct Download {
-            url: String,
-            path: PathBuf,
-            hash: Option<String>,
-            native: bool,
-        }
-        let mut downloads = Vec::<Download>::new();
+    ) -> AppResult<(Vec<LibraryFile>, Vec<PathBuf>)> {
+        let mut downloads = Vec::<LibraryFile>::new();
         let mut jars = Vec::new();
         let mut seen = std::collections::HashSet::new();
         for lib in data["libraries"].as_array().into_iter().flatten() {
@@ -253,7 +254,7 @@ impl VersionManager {
                     .filter(|s| !s.is_empty())
                     .map(String::from)
                     .unwrap_or_else(|| format!("{}/{rel}", base.trim_end_matches('/')));
-                downloads.push(Download {
+                downloads.push(LibraryFile {
                     url,
                     path,
                     hash: info["sha1"].as_str().map(String::from),
@@ -284,6 +285,21 @@ impl VersionManager {
                 add(info, &native_rel, true, false)?;
             }
         }
+        Ok((downloads, jars))
+    }
+
+    /// Classpath jars for a version without touching the network or disk.
+    pub fn library_paths(&self, data: &serde_json::Value) -> AppResult<Vec<PathBuf>> {
+        Ok(self.plan_libraries(data)?.1)
+    }
+
+    pub fn download_libraries(
+        &self,
+        data: &serde_json::Value,
+        natives_dir: &Path,
+        max_workers: usize,
+    ) -> AppResult<Vec<PathBuf>> {
+        let (downloads, jars) = self.plan_libraries(data)?;
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(max_workers.clamp(1, 64))
             .build()

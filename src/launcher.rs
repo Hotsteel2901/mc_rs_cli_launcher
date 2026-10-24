@@ -14,6 +14,195 @@ use crate::version::VersionManager;
 const LAUNCHER_NAME: &str = "hot-rs-launcher";
 const LAUNCHER_VER: &str = env!("CARGO_PKG_VERSION");
 
+/// Garbage collector presets, mirroring what HMCL / PCL2 expose.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GcPreset {
+    #[default]
+    Auto,
+    G1,
+    Zgc,
+    Parallel,
+    Serial,
+    None,
+}
+
+impl GcPreset {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "auto" | "default" => Ok(Self::Auto),
+            "g1" | "aikar" => Ok(Self::G1),
+            "zgc" => Ok(Self::Zgc),
+            "parallel" => Ok(Self::Parallel),
+            "serial" | "serialgc" => Ok(Self::Serial),
+            "none" | "off" => Ok(Self::None),
+            other => Err(format!(
+                "Unknown GC preset '{other}' (auto, g1, zgc, parallel, serial, none)"
+            )),
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::G1 => "g1",
+            Self::Zgc => "zgc",
+            Self::Parallel => "parallel",
+            Self::Serial => "serial",
+            Self::None => "none",
+        }
+    }
+
+    /// JVM flags for this preset. ZGC flags depend on the Java version.
+    pub fn flags(self, java_major: Option<u32>) -> Vec<String> {
+        let flags: &[&str] = match self {
+            Self::Auto | Self::None => &[],
+            Self::G1 => &[
+                "-XX:+UseG1GC",
+                "-XX:+ParallelRefProcEnabled",
+                "-XX:MaxGCPauseMillis=200",
+                "-XX:+UnlockExperimentalVMOptions",
+                "-XX:+DisableExplicitGC",
+                "-XX:+AlwaysPreTouch",
+                "-XX:G1NewSizePercent=30",
+                "-XX:G1MaxNewSizePercent=40",
+                "-XX:G1HeapRegionSize=8M",
+                "-XX:G1ReservePercent=20",
+                "-XX:G1HeapWastePercent=5",
+                "-XX:G1MixedGCCountTarget=4",
+                "-XX:InitiatingHeapOccupancyPercent=15",
+                "-XX:G1MixedGCLiveThresholdPercent=90",
+                "-XX:G1RSetUpdatingPauseTimePercent=5",
+                "-XX:SurvivorRatio=32",
+                "-XX:+PerfDisableSharedMem",
+                "-XX:MaxTenuringThreshold=1",
+            ],
+            Self::Zgc => match java_major {
+                Some(major) if major >= 21 => &["-XX:+UseZGC", "-XX:+ZGenerational"],
+                Some(major) if major >= 15 => &["-XX:+UseZGC"],
+                _ => &["-XX:+UnlockExperimentalVMOptions", "-XX:+UseZGC"],
+            },
+            Self::Parallel => &["-XX:+UseParallelGC"],
+            Self::Serial => &["-XX:+UseSerialGC"],
+        };
+        flags.iter().map(|flag| flag.to_string()).collect()
+    }
+}
+
+/// Everything the CLI / TUI can tweak for one launch.
+#[derive(Clone, Debug)]
+pub struct LaunchOptions {
+    pub version: Option<String>,
+    pub ram_mb: u32,
+    pub loader: Option<String>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    /// Extra JVM arguments, most useful for mod-specific workarounds.
+    pub extra_jvm: Vec<String>,
+    pub gc: GcPreset,
+    pub fullscreen: bool,
+    /// Direct connect target: "host" or "host:port" (or "[v6]:port").
+    pub server: Option<String>,
+    /// Print the resolved command instead of starting the game.
+    pub dry_run: bool,
+    /// Analyze crash reports when the game exits with a non-zero code.
+    pub diagnose: bool,
+}
+
+impl Default for LaunchOptions {
+    fn default() -> Self {
+        Self {
+            version: None,
+            ram_mb: 4096,
+            loader: None,
+            width: None,
+            height: None,
+            extra_jvm: Vec::new(),
+            gc: GcPreset::Auto,
+            fullscreen: false,
+            server: None,
+            dry_run: false,
+            diagnose: true,
+        }
+    }
+}
+
+/// Split "host", "host:port" or "[v6]:port" without allowing option injection.
+pub fn parse_server(value: &str) -> Result<(String, Option<u16>), String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err("Server address is empty".into());
+    }
+    if value.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(format!("Invalid server address: {value:?}"));
+    }
+    if let Some(rest) = value.strip_prefix('[') {
+        let (host, tail) = rest
+            .split_once(']')
+            .ok_or_else(|| format!("Invalid IPv6 server address: {value:?}"))?;
+        if host.is_empty()
+            || !host
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.')
+        {
+            return Err(format!("Invalid IPv6 server address: {value:?}"));
+        }
+        let port = match tail.strip_prefix(':') {
+            Some(port) => Some(
+                port.parse::<u16>()
+                    .ok()
+                    .filter(|port| *port > 0)
+                    .ok_or_else(|| format!("Invalid server port: {port:?}"))?,
+            ),
+            None if tail.is_empty() => None,
+            None => return Err(format!("Invalid server address: {value:?}")),
+        };
+        return Ok((host.to_string(), port));
+    }
+    if let Some((host, port)) = value.rsplit_once(':') {
+        if !host.is_empty() && port.chars().all(|c| c.is_ascii_digit()) {
+            let parsed = port
+                .parse::<u16>()
+                .ok()
+                .filter(|port| *port > 0)
+                .ok_or_else(|| format!("Invalid server port: {port:?}"))?;
+            if host.starts_with('-')
+                || !host
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || matches!(c, '.' | '-' | '_'))
+            {
+                return Err(format!("Invalid server host: {host:?}"));
+            }
+            return Ok((host.to_string(), Some(parsed)));
+        }
+    }
+    let host = value;
+    if !host
+        .chars()
+        .all(|c| c.is_alphanumeric() || matches!(c, '.' | '-' | '_'))
+    {
+        return Err(format!("Invalid server host: {host:?}"));
+    }
+    if host.starts_with('-') {
+        return Err(format!("Invalid server host: {host:?}"));
+    }
+    Ok((host.to_string(), None))
+}
+
+/// Quote one argv element for display; never used to spawn anything.
+pub fn shell_quote(argument: &str) -> String {
+    if argument.is_empty() {
+        return "''".into();
+    }
+    let safe = argument
+        .chars()
+        .all(|c| c.is_alphanumeric() || "_-./:=+@,%".contains(c));
+    if safe {
+        argument.to_string()
+    } else {
+        format!("'{}'", argument.replace('\'', "'\\''"))
+    }
+}
+
 pub struct MinecraftLauncher {
     pub game_dir: PathBuf,
     pub accounts: crate::account::AccountManager,
@@ -130,21 +319,33 @@ impl MinecraftLauncher {
         loader: Option<&str>,
     ) -> AppResult<(Option<String>, Option<serde_json::Value>)> {
         util::validate_component(mc_version)?;
+        let marker = crate::instance::marker_for(&self.game_dir, mc_version);
         let candidates = loader
-            .map(|name| vec![name])
-            .unwrap_or_else(|| vec!["fabric", "neoforge", "forge"]);
+            .map(|name| vec![name.to_string()])
+            .unwrap_or_else(|| {
+                let mut list: Vec<String> = Vec::new();
+                if let Some(preferred) = marker.as_ref().and_then(|marker| marker.loader.clone()) {
+                    list.push(preferred);
+                }
+                for name in ["fabric", "neoforge", "forge"] {
+                    if !list.iter().any(|entry| entry == name) {
+                        list.push(name.to_string());
+                    }
+                }
+                list
+            });
         for name in candidates {
-            if !["fabric", "forge", "neoforge"].contains(&name) {
+            if !["fabric", "forge", "neoforge"]
+                .iter()
+                .any(|known| *known == name)
+            {
                 return Err("Unsupported loader".into());
             }
-            let path = self
-                .game_dir
-                .join("libraries")
-                .join(name)
-                .join(format!("{name}-profile-{mc_version}.json"));
-            if !path.exists() {
+            let Some(path) =
+                crate::instance::loader_profile_path(&self.game_dir, &name, mc_version)
+            else {
                 continue;
-            }
+            };
             let profile: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
             if !profile["mainClass"].is_string()
                 || !profile["libraries"].is_array()
@@ -152,7 +353,7 @@ impl MinecraftLauncher {
             {
                 return Err(AppError::Loader(format!("Invalid or legacy {name} profile. Reinstall with: hot-rs-launcher install-{name} -v {mc_version}")));
             }
-            return Ok((Some(name.into()), Some(profile)));
+            return Ok((Some(name), Some(profile)));
         }
         if let Some(name) = loader {
             return Err(AppError::Loader(format!("No {name} profile for {mc_version}. Run: hot-rs-launcher install-{name} -v {mc_version}")));
@@ -233,31 +434,68 @@ impl MinecraftLauncher {
     }
 
     /// Launch Minecraft.
-    pub fn launch(
+    pub fn launch_with(
         &mut self,
-        version_id: Option<&str>,
+        options: LaunchOptions,
         account_data: Option<serde_json::Value>,
-        ram_mb: u32,
-        loader: Option<&str>,
-        width: Option<u32>,
-        height: Option<u32>,
     ) -> AppResult<i32> {
+        let LaunchOptions {
+            version,
+            ram_mb,
+            loader,
+            width,
+            height,
+            extra_jvm,
+            gc,
+            fullscreen,
+            server,
+            dry_run,
+            diagnose,
+        } = options;
         let mut account_data = account_data.unwrap_or_else(|| {
-            self.accounts.get_default().unwrap_or_else(|| {
-                crate::die!("No account. Run 'login' or 'offline <name>' first.");
-            })
+            if dry_run {
+                serde_json::json!({
+                    "type": "offline",
+                    "username": "Player",
+                    "uuid": "00000000-0000-0000-0000-000000000000"
+                })
+            } else {
+                self.accounts.get_default().unwrap_or_else(|| {
+                    crate::die!("No account. Run 'login' or 'offline <name>' first.");
+                })
+            }
         });
 
-        let (acc_type, username, user_uuid, access_token) =
-            self.ensure_session(&mut account_data)?;
+        // A dry run must not refresh tokens or otherwise touch the network for
+        // account state; it only needs the resolved command line.
+        let (acc_type, username, user_uuid, access_token) = if dry_run {
+            (
+                account_data["type"]
+                    .as_str()
+                    .unwrap_or("offline")
+                    .to_string(),
+                account_data["username"]
+                    .as_str()
+                    .unwrap_or("Player")
+                    .to_string(),
+                account_data["uuid"]
+                    .as_str()
+                    .unwrap_or("00000000-0000-0000-0000-000000000000")
+                    .to_string(),
+                "0".to_string(),
+            )
+        } else {
+            self.ensure_session(&mut account_data)?
+        };
 
-        let (version_id_str, version_data) = self.versions.get_version_info(version_id)?;
+        let (version_id_str, version_data) = self.versions.get_version_info(version.as_deref())?;
         let mc_version = &version_id_str;
 
         let version_game_dir = self.game_dir.join("versions").join(mc_version);
         std::fs::create_dir_all(&version_game_dir)?;
 
-        let (loader_name, loader_profile) = self.load_loader_profile(mc_version, loader)?;
+        let (loader_name, loader_profile) =
+            self.load_loader_profile(mc_version, loader.as_deref())?;
 
         if let Some(ref ln) = loader_name {
             let title = match ln.as_str() {
@@ -278,28 +516,51 @@ impl MinecraftLauncher {
         }
         crate::info!("Game dir: {}\n", version_game_dir.display());
 
-        crate::log::step(1, 4, "Downloading client jar...");
-        let client_jar = self
-            .versions
-            .download_client_jar(mc_version, &version_data)?;
-
         let natives_dir = self.game_dir.join("natives").join(mc_version);
-        std::fs::create_dir_all(&natives_dir)?;
+        if dry_run {
+            crate::log::step(1, 4, "Resolving client jar (dry run)...");
+        } else {
+            crate::log::step(1, 4, "Downloading client jar...");
+        }
+        let client_jar = if dry_run {
+            self.versions
+                .versions_dir
+                .join(mc_version)
+                .join(format!("{mc_version}.jar"))
+        } else {
+            self.versions
+                .download_client_jar(mc_version, &version_data)?
+        };
 
-        crate::log::step(2, 4, "Downloading libraries...");
         let mut library_data = version_data.clone();
         if let Some(profile) = &loader_profile {
             library_data["libraries"] =
                 merged_libraries(&version_data["libraries"], &profile["libraries"]);
         }
-        let lib_jars =
+        let lib_jars = if dry_run {
+            crate::log::step(2, 4, "Resolving libraries (dry run)...");
+            self.versions.library_paths(&library_data)?
+        } else {
+            crate::log::step(2, 4, "Downloading libraries...");
+            std::fs::create_dir_all(&natives_dir)?;
             self.versions
-                .download_libraries(&library_data, &natives_dir, self.threads)?;
+                .download_libraries(&library_data, &natives_dir, self.threads)?
+        };
 
-        crate::log::step(3, 4, "Downloading assets...");
-        let assets_index = self.versions.download_assets(&version_data, self.threads)?;
+        let assets_index = if dry_run {
+            crate::log::step(3, 4, "Resolving assets (dry run)...");
+            version_data["assetIndex"]["id"]
+                .as_str()
+                .unwrap_or("legacy")
+                .to_string()
+        } else {
+            crate::log::step(3, 4, "Downloading assets...");
+            self.versions.download_assets(&version_data, self.threads)?
+        };
 
-        crate::log::step(4, 4, "Launching game...");
+        if !dry_run {
+            crate::log::step(4, 4, "Launching game...");
+        }
 
         let sep = if cfg!(windows) { ";" } else { ":" };
         if loader_profile.is_some() {
@@ -458,6 +719,9 @@ impl MinecraftLauncher {
                 }
             }
         }
+
+        // Extra JVM arguments from --jvm-args / settings.
+        jvm_args.extend(extra_jvm);
 
         // --- Game args ---
         let mut game_args: Vec<String> = Vec::new();
@@ -646,6 +910,21 @@ impl MinecraftLauncher {
             }
         }
 
+        if let Some(target) = server.as_deref() {
+            let (host, port) = parse_server(target).map_err(AppError::Generic)?;
+            if !game_args.iter().any(|arg| arg == "--server") {
+                game_args.push("--server".into());
+                game_args.push(host);
+                if let Some(port) = port {
+                    game_args.push("--port".into());
+                    game_args.push(port.to_string());
+                }
+            }
+        }
+        if fullscreen && !game_args.iter().any(|arg| arg == "--fullscreen") {
+            game_args.push("--fullscreen".into());
+        }
+
         // Ensure -cp is present
         if !jvm_args.iter().any(|a| a == "-cp" || a == "-classpath") {
             jvm_args.push("-cp".into());
@@ -655,6 +934,13 @@ impl MinecraftLauncher {
         // Get Java
         let java_path = self.select_java(&version_data)?;
         let java_ver = java::java_major(&java_path);
+
+        // GC presets are inserted after Java selection because ZGC flags depend
+        // on the runtime version.
+        let gc_flags = gc.flags(java_ver);
+        for (index, flag) in gc_flags.iter().enumerate() {
+            jvm_args.insert(index, flag.clone());
+        }
 
         let mut cmd_parts: Vec<String> =
             Vec::with_capacity(1 + jvm_args.len() + 1 + game_args.len());
@@ -673,6 +959,28 @@ impl MinecraftLauncher {
         crate::info!("Version: {}", mc_version);
         crate::info!("Player:  {}", username);
         crate::info!("RAM:     {} MB", ram_mb);
+        if gc != GcPreset::Auto && gc != GcPreset::None {
+            crate::info!("GC:      {}", gc.label());
+        }
+        if let Some(target) = server.as_deref() {
+            crate::info!("Server:  {}", target);
+        }
+
+        if dry_run {
+            crate::log::header("Launch command (dry run)");
+            println!("  Game dir: {}", version_game_dir.display());
+            println!();
+            let command = cmd_parts
+                .iter()
+                .map(|part| shell_quote(part))
+                .collect::<Vec<_>>()
+                .join(" ");
+            println!("  {}", command);
+            println!();
+            crate::info!("Remove --dry-run to start the game.");
+            return Ok(0);
+        }
+
         crate::success!("Starting Minecraft...\n");
 
         let mut child = Command::new(&java_path)
@@ -691,7 +999,20 @@ impl MinecraftLauncher {
         let status = child
             .wait()
             .map_err(|e| AppError::Generic(format!("Error waiting for Minecraft: {e}")))?;
-        Ok(status.code().unwrap_or(1))
+        let code = status.code().unwrap_or(1);
+        if code != 0 && diagnose {
+            crate::warn_msg!("Minecraft exited with code {}.", code);
+            match crate::diagnose::analyze_instance(&self.game_dir, mc_version) {
+                Some(diagnosis) => {
+                    crate::log::header("Crash Analysis");
+                    print!("{}", crate::diagnose::render(&diagnosis));
+                }
+                None => {
+                    crate::info!("No crash report or log found for this instance.");
+                }
+            }
+        }
+        Ok(code)
     }
 
     /// Download a Minecraft version without launching.
@@ -843,5 +1164,57 @@ mod tests {
         assert_eq!(merged.as_array().unwrap().len(), 3);
         assert_eq!(merged[0]["name"], "g:a:2");
         assert_eq!(merged[1]["name"], "g:a:1:natives-linux");
+    }
+
+    #[test]
+    fn gc_presets_map_to_expected_flags() {
+        assert!(GcPreset::parse("G1")
+            .unwrap()
+            .flags(Some(21))
+            .contains(&"-XX:+UseG1GC".to_string()));
+        let zgc21 = GcPreset::parse("zgc").unwrap().flags(Some(21));
+        assert!(zgc21.contains(&"-XX:+ZGenerational".to_string()));
+        let zgc17 = GcPreset::parse("zgc").unwrap().flags(Some(17));
+        assert!(!zgc17.contains(&"-XX:+ZGenerational".to_string()));
+        assert!(GcPreset::parse("none").unwrap().flags(Some(17)).is_empty());
+        assert!(GcPreset::parse("auto").unwrap().flags(Some(17)).is_empty());
+        assert!(GcPreset::parse("bogus").is_err());
+        assert_eq!(GcPreset::parse("Serial").unwrap().label(), "serial");
+    }
+
+    #[test]
+    fn server_addresses_are_parsed_and_injection_is_rejected() {
+        assert_eq!(
+            parse_server("mc.example.com").unwrap(),
+            ("mc.example.com".to_string(), None)
+        );
+        assert_eq!(
+            parse_server("mc.example.com:25565").unwrap(),
+            ("mc.example.com".to_string(), Some(25565))
+        );
+        assert_eq!(
+            parse_server("[::1]:25565").unwrap(),
+            ("::1".to_string(), Some(25565))
+        );
+        for bad in [
+            "",
+            "host name",
+            "--server",
+            "host:0",
+            "host:99999",
+            "[::1",
+            "a b:1",
+            "-oops",
+        ] {
+            assert!(parse_server(bad).is_err(), "{bad} should be rejected");
+        }
+    }
+
+    #[test]
+    fn shell_quoting_is_readable() {
+        assert_eq!(shell_quote("-Xmx4G"), "-Xmx4G");
+        assert_eq!(shell_quote("a b"), "'a b'");
+        assert_eq!(shell_quote("it's"), "'it'\\''s'");
+        assert_eq!(shell_quote(""), "''");
     }
 }

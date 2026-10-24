@@ -1510,7 +1510,7 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("GPL-3.0-only"), "{text}");
-        assert!(text.contains("2.4.0"), "{text}");
+        assert!(text.contains(env!("CARGO_PKG_VERSION")), "{text}");
     }
 
     #[test]
@@ -1529,6 +1529,56 @@ mod tests {
         app.screen = Screen::Dashboard;
         let tiny = render_at(&mut app, 40, 12);
         assert!(tiny.contains("too small"));
+    }
+
+    #[test]
+    fn renders_java_picker_settings_rows_and_update_badges() {
+        let (mut app, _dir) = app_with_data();
+        app.splash_until = None;
+        app.screen = Screen::Settings;
+        app.settings_cursor = 7;
+        let text = render_at(&mut app, 120, 40);
+        assert!(text.contains("JVM arguments"), "{text}");
+        assert!(text.contains("Garbage collector"), "{text}");
+        assert!(
+            text.contains("PROFILE PREVIEW") || text.contains("JVM"),
+            "{text}"
+        );
+
+        app.settings_cursor = 6;
+        app.settings_activate();
+        let text = render_at(&mut app, 120, 40);
+        assert!(text.contains("Auto-detect"), "{text}");
+        assert!(
+            text.contains("Java runtime") || text.contains("Java"),
+            "{text}"
+        );
+        app.modal = None;
+
+        app.mod_updates = vec![crate::update::ModUpdate {
+            file: app.game_dir.join("versions/1.21.4/mods/sodium.jar"),
+            filename: "sodium-2.jar".into(),
+            enabled: true,
+            project: "Sodium".into(),
+            current: "0.5.0".into(),
+            latest: "0.6.0".into(),
+            download_url: "https://example.invalid/sodium.jar".into(),
+            download_name: "sodium-2.jar".into(),
+            download_sha1: None,
+        }];
+        app.refresh_mods();
+        app.screen = Screen::Mods;
+        for (width, height) in [(120, 40), (80, 24), (60, 20)] {
+            let text = render_at(&mut app, width, height);
+            assert!(text.contains("↑"), "{width}x{height}: {text}");
+        }
+
+        app.screen = Screen::Dashboard;
+        let text = render_at(&mut app, 120, 40);
+        assert!(
+            text.contains("press u") || text.contains("可更新"),
+            "{text}"
+        );
     }
 
     #[test]

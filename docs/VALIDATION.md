@@ -1,5 +1,32 @@
 # 验证记录
 
+## 2026-10-24 · Hot-RS-Launcher 2.5.0（本地 Linux）
+
+本轮新增：Java 运行时发现/安装、实例重命名/复制/删除、备份恢复、Modrinth .mrpack 导入导出、模组更新检查与应用、崩溃诊断、启动参数（GC / JVM 参数 / 直连 / 全屏 / dry-run），以及 TUI 对应界面与快捷键。
+
+| 验证项目 | 结果 |
+| --- | --- |
+| `cargo fmt --all -- --check` | 通过 |
+| 单元测试 | 117 / 117（另 1 个 `#[ignore]` 手动预览） |
+| CLI 集成测试 | 11 / 11 |
+| `cargo clippy --locked --all-targets -- -D warnings` | 通过 |
+| `cargo build --locked --release` | 通过 |
+| 伪终端冒烟（120×40） | 启动/退出码 0；`2` → `R` 重命名后磁盘目录与 JSON 同步；`5` → Java 选择器显示 Auto-detect 与推荐项；终端恢复 |
+| 手动 CLI 冒烟 | `list-java`、`diagnose`、`rename/copy/remove`、`export/import` .mrpack、`backup/list-backups`、`play --dry-run`（不下载、不刷新令牌）、管道到 `head` 时不再 panic |
+
+新增自动测试覆盖：
+
+- Java：`release` 解析、`java -version` 回退、managed runtime 扫描、Mojang 组件选择、推荐项优先级。
+- 实例：删除（保留存档）、重命名/复制的 JSON/JAR/profile 重键、marker 基准版本、备份恢复、.mrpack 往返（离线）。
+- 更新：同版本/旧版本不产生更新、禁用模组保持禁用、文件名映射。
+- 诊断：OOM / Java 版本 / Mixin / 依赖 / GLFW 等规则、崩溃报告选择、英文本地化。
+- 启动参数：GC 预设（含 ZGC 分代条件）、服务器地址校验（含 IPv6 与注入拒绝）、shell 引号显示、`--jvm-args` 拆分、dry-run 命令输出。
+- TUI：Java 选择器 / JVM / GC 设置、版本重命名/删除、更新标记渲染、Dashboard 更新提示。
+
+未覆盖：真实 Microsoft 授权、真实 Modrinth 更新下载与真实 .mrpack 包、Windows/macOS 终端差异、真实 Minecraft 图形启动。
+
+---
+
 ## 2026-10-18 · Hot-RS-Launcher 2.4.0 复验（本地 Linux）
 
 本轮包含改名、TUI「关于」页、CLI `--about`、资源下载调度重写、账号/Java 路径/空闲渲染等修复。以下结果来自本地工作树（Linux x86_64，8 核，Rust 1.99），尚未包含推送后的三平台 CI 结果。

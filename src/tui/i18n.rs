@@ -64,6 +64,8 @@ pub fn localize_job_phase(lang: Lang, label: &str) -> &str {
         "Saving loader profile" => "保存加载器配置",
         "Finalizing loader profile" => "完成加载器配置",
         "Running launcher worker" => "运行安装器",
+        "Hash installed mods" => "计算模组摘要",
+        "Write .mrpack" => "写入 .mrpack",
         _ => label,
     }
 }

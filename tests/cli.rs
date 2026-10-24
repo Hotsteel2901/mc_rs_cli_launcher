@@ -161,3 +161,215 @@ fn cached_game_launch_uses_absolute_paths_custom_resolution_and_child_exit_code(
         version.canonicalize().unwrap().to_str().unwrap()
     );
 }
+
+/// A minimal installed instance: version json, jar and (optionally) saves/mods.
+fn make_instance(game: &std::path::Path, id: &str) {
+    let dir = game.join("versions").join(id);
+    std::fs::create_dir_all(dir.join("saves").join("world")).unwrap();
+    std::fs::write(dir.join("saves").join("world").join("level.dat"), b"level").unwrap();
+    std::fs::create_dir_all(dir.join("mods")).unwrap();
+    std::fs::write(dir.join("mods").join("example.jar"), b"jar").unwrap();
+    let metadata = serde_json::json!({
+        "id": id, "type": "release", "mainClass": "TestMain", "libraries": [],
+        "downloads": {"client": {"url": "http://127.0.0.1:1/unreachable"}},
+        "javaVersion": {"majorVersion": 17}
+    });
+    std::fs::write(dir.join(format!("{id}.json")), metadata.to_string()).unwrap();
+    std::fs::write(dir.join(format!("{id}.jar")), b"jar").unwrap();
+}
+
+#[test]
+fn instance_lifecycle_commands_work_offline() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = dir.path().join("game");
+    make_instance(&game, "1.21.4");
+
+    assert!(run(
+        &game,
+        &["rename-version", "-v", "1.21.4", "--name", "my-pack"]
+    )
+    .status
+    .success());
+    assert!(game.join("versions/my-pack/my-pack.json").is_file());
+    assert!(!game.join("versions/1.21.4").exists());
+
+    assert!(run(
+        &game,
+        &["copy-version", "-v", "my-pack", "--name", "copy-pack"]
+    )
+    .status
+    .success());
+    assert!(game.join("versions/copy-pack/copy-pack.json").is_file());
+
+    let removed = run(
+        &game,
+        &["remove-version", "-v", "copy-pack", "--keep-saves"],
+    );
+    assert!(removed.status.success());
+    assert!(String::from_utf8_lossy(&removed.stdout).contains("kept"));
+    assert!(game
+        .join("versions/copy-pack/saves/world/level.dat")
+        .is_file());
+    assert!(!game.join("versions/copy-pack/copy-pack.json").exists());
+
+    assert!(run(&game, &["remove-version", "-v", "my-pack"])
+        .status
+        .success());
+    assert!(!game.join("versions/my-pack").exists());
+    assert!(!run(&game, &["remove-version", "-v", "missing"])
+        .status
+        .success());
+    assert!(!run(&game, &["rename-version", "-v", "copy-pack"])
+        .status
+        .success());
+}
+
+#[test]
+fn modpack_and_backup_round_trip_works_offline() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = dir.path().join("game");
+    make_instance(&game, "1.21.4");
+    // No network: the exported pack must contain no Modrinth lookups.
+    std::fs::remove_file(game.join("versions/1.21.4/mods/example.jar")).unwrap();
+
+    let pack = dir.path().join("pack.mrpack");
+    let exported = run(
+        &game,
+        &[
+            "export-modpack",
+            "-v",
+            "1.21.4",
+            "-o",
+            pack.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        exported.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&exported.stderr)
+    );
+    assert!(pack.is_file());
+
+    let imported = run(
+        &game,
+        &[
+            "import-modpack",
+            pack.to_str().unwrap(),
+            "--name",
+            "imported",
+        ],
+    );
+    assert!(
+        imported.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&imported.stderr)
+    );
+    assert!(game.join("versions/imported/imported.json").is_file());
+
+    assert!(run(&game, &["backup", "-v", "1.21.4"]).status.success());
+    let listed = run(&game, &["list-backups"]);
+    assert!(listed.status.success());
+    assert!(String::from_utf8_lossy(&listed.stdout).contains("1.21.4"));
+    let archive = std::fs::read_dir(game.join("backups"))
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "zip"))
+        .expect("backup archive");
+    std::fs::remove_file(game.join("versions/1.21.4/saves/world/level.dat")).unwrap();
+    let restored = run(&game, &["restore-backup", archive.to_str().unwrap()]);
+    assert!(
+        restored.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&restored.stderr)
+    );
+    assert!(game.join("versions/1.21.4/saves/world/level.dat").is_file());
+}
+
+#[test]
+fn diagnose_reports_crash_reports_offline() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = dir.path().join("game");
+    make_instance(&game, "1.21.4");
+    let reports = game.join("versions/1.21.4/crash-reports");
+    std::fs::create_dir_all(&reports).unwrap();
+    std::fs::write(
+        reports.join("crash-test.txt"),
+        "Description: Test crash\njava.lang.OutOfMemoryError: Java heap space\n",
+    )
+    .unwrap();
+    let result = run(&game, &["diagnose", "-v", "1.21.4"]);
+    assert!(result.status.success());
+    let output = String::from_utf8_lossy(&result.stdout);
+    assert!(output.contains("内存不足"), "{output}");
+    let empty = run(&game, &["diagnose", "-v", "my-pack"]);
+    assert!(empty.status.success());
+    assert!(String::from_utf8_lossy(&empty.stdout).contains("No crash report"));
+}
+
+#[cfg(unix)]
+#[test]
+fn dry_run_prints_the_command_without_starting_the_game() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let game = root.path().join("game");
+    make_instance(&game, "test-version");
+    {
+        use std::io::Write;
+        let jar_path = game.join("versions/test-version/test-version.jar");
+        let mut jar = zip::ZipWriter::new(std::fs::File::create(&jar_path).unwrap());
+        jar.start_file("fixture.txt", zip::write::FileOptions::default())
+            .unwrap();
+        jar.write_all(b"fixture").unwrap();
+        jar.finish().unwrap();
+    }
+    let java = root.path().join("fake-java");
+    std::fs::write(
+        &java,
+        "#!/bin/sh\nif [ \"$1\" = '-version' ]; then echo 'openjdk version \"17.0.1\"' >&2; exit 0; fi\nprintf '%s\\n' \"$@\" > launch-args.txt\nexit 7\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&java, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    let result = Command::new(env!("CARGO_BIN_EXE_hot-rs-launcher"))
+        .args([
+            "play",
+            "-v",
+            "test-version",
+            "--dir",
+            game.to_str().unwrap(),
+            "--java",
+            java.to_str().unwrap(),
+            "--ram",
+            "2G",
+            "--jvm-args",
+            "-Dfoo=bar",
+            "--gc",
+            "g1",
+            "--server",
+            "mc.example.com:25565",
+            "--fullscreen",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let output = String::from_utf8_lossy(&result.stdout);
+    for expected in [
+        "-Xmx2048M",
+        "-Dfoo=bar",
+        "-XX:+UseG1GC",
+        "--server",
+        "mc.example.com",
+        "--port",
+        "25565",
+        "--fullscreen",
+    ] {
+        assert!(output.contains(expected), "missing {expected} in {output}");
+    }
+    assert!(!game.join("versions/test-version/launch-args.txt").exists());
+}

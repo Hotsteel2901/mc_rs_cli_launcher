@@ -151,6 +151,52 @@ pub fn get_versions(version_ids: &[&str]) -> serde_json::Value {
     api_get("/versions", &[("ids", &json_str)])
 }
 
+/// Batch lookup of Modrinth files by SHA-1 (POST /version_files).
+/// Returns a map of lower-case hash -> version object.
+pub fn lookup_files_by_sha1(
+    hashes: &[String],
+) -> Result<std::collections::HashMap<String, serde_json::Value>, String> {
+    let mut map = std::collections::HashMap::new();
+    for chunk in hashes.chunks(100) {
+        let body = serde_json::json!({"hashes": chunk, "algorithm": "sha1"});
+        let (status, bytes) = http::http_post_json(&format!("{MODRINTH_API}/version_files"), &body)
+            .map_err(|e| format!("Modrinth API error: {e}"))?;
+        if status != 200 {
+            return Err(format!("Modrinth returned HTTP {status} for version_files"));
+        }
+        let value: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|e| format!("Invalid response: {e}"))?;
+        for (hash, version) in value.as_object().into_iter().flatten() {
+            map.insert(hash.to_ascii_lowercase(), version.clone());
+        }
+    }
+    Ok(map)
+}
+
+/// The newest version of a project matching a loader and Minecraft version.
+/// Modrinth returns versions newest first.
+pub fn latest_compatible(
+    project_id: &str,
+    loaders: Option<&[String]>,
+    mc_version: &str,
+) -> Result<Option<serde_json::Value>, String> {
+    let versions =
+        get_project_versions_result(project_id, loaders, Some(&[mc_version.to_string()]))?;
+    Ok(versions
+        .as_array()
+        .and_then(|versions| versions.first())
+        .cloned())
+}
+
+/// Primary downloadable file of a version object.
+pub fn primary_file(version: &serde_json::Value) -> Option<&serde_json::Value> {
+    let files = version["files"].as_array()?;
+    files
+        .iter()
+        .find(|file| file["primary"].as_bool().unwrap_or(false))
+        .or_else(|| files.first())
+}
+
 /// Download files from a version object into a directory.
 /// Returns paths to downloaded files.
 pub fn download_version_files(

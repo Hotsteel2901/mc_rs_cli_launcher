@@ -365,9 +365,17 @@ fn stats(frame: &mut Frame, app: &App, area: Rect, t: f64) {
     let mods_value = active_mods
         .map(|row| format!("{}", row.mods_enabled))
         .unwrap_or_else(|| "0".into());
-    let mods_hint = active_mods
-        .map(|row| format!("{} {}", row.mods_disabled, lang.pick("disabled", "已禁用")))
-        .unwrap_or_else(|| lang.pick("no version", "无版本").into());
+    let mods_hint = if !app.mod_updates.is_empty() {
+        if app.lang() == crate::tui::i18n::Lang::Chinese {
+            format!("{} 个可更新 · 按 u 查看", app.mod_updates.len())
+        } else {
+            format!("{} update(s) · press u", app.mod_updates.len())
+        }
+    } else {
+        active_mods
+            .map(|row| format!("{} {}", row.mods_disabled, lang.pick("disabled", "已禁用")))
+            .unwrap_or_else(|| lang.pick("no version", "无版本").into())
+    };
     let java_value = if app.java_probing {
         format!(
             "{}{}",
@@ -757,6 +765,13 @@ fn version_detail(frame: &mut Frame, app: &App, area: Rect, t: f64) {
         theme::PURPLE,
     ));
     lines.push(kv(
+        lang.pick("Java", "Java"),
+        row.java_major
+            .map(|major| format!("Java {major}"))
+            .unwrap_or_else(|| lang.pick("unknown", "未知").into()),
+        theme::GREEN,
+    ));
+    lines.push(kv(
         lang.pick("Client jar", "客户端 JAR"),
         if row.jar_size == 0 {
             lang.pick("missing", "缺失").into()
@@ -769,6 +784,18 @@ fn version_detail(frame: &mut Frame, app: &App, area: Rect, t: f64) {
             theme::TEXT_DIM
         },
     ));
+    lines.push(kv(
+        lang.pick("On disk", "占用空间"),
+        theme::format_bytes(row.total_size),
+        theme::TEXT_DIM,
+    ));
+    if row.base != row.id {
+        lines.push(kv(
+            lang.pick("Based on", "基于版本"),
+            row.base.clone(),
+            theme::CYAN,
+        ));
+    }
     lines.push(kv(
         lang.pick("Modified", "修改时间"),
         age_label(lang, row.age),
@@ -837,6 +864,45 @@ fn version_detail(frame: &mut Frame, app: &App, area: Rect, t: f64) {
             Style::default().fg(theme::TEXT_DIM).bg(theme::SURFACE),
         ),
     ]));
+    lines.push(Line::from(vec![
+        Span::styled(
+            " [e]     ",
+            Style::default()
+                .fg(theme::BG)
+                .bg(theme::PURPLE)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            lang.pick(" export as .mrpack", " 导出为 .mrpack"),
+            Style::default().fg(theme::TEXT_DIM).bg(theme::SURFACE),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(
+            " [R] [c] ",
+            Style::default()
+                .fg(theme::BG)
+                .bg(theme::BLUE)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            lang.pick(" rename / copy instance", " 重命名 / 复制实例"),
+            Style::default().fg(theme::TEXT_DIM).bg(theme::SURFACE),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(
+            " [d]     ",
+            Style::default()
+                .fg(theme::BG)
+                .bg(theme::RED)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            lang.pick(" delete instance", " 删除实例"),
+            Style::default().fg(theme::TEXT_DIM).bg(theme::SURFACE),
+        ),
+    ]));
     frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: true })
@@ -870,9 +936,18 @@ fn list_mods(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
         .unwrap_or_else(|| lang.pick("no version", "无版本").into());
     let enabled = app.mods.iter().filter(|row| row.enabled).count();
     let disabled = app.mods.len() - enabled;
+    let checking = if app.updates_loading {
+        if lang == crate::tui::i18n::Lang::Chinese {
+            " · 检查更新…"
+        } else {
+            " · checking updates…"
+        }
+    } else {
+        ""
+    };
     let block = panel(
         format!(
-            "{} · {version} · {enabled} {} / {disabled} {}",
+            "{} · {version} · {enabled} {} / {disabled} {}{checking}",
             lang.pick("MODS", "模组"),
             lang.pick("on", "启用"),
             lang.pick("off", "禁用")
@@ -934,7 +1009,7 @@ fn list_mods(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
             } else {
                 theme::TEXT_FAINT
             };
-            let max = inner.width.saturating_sub(14) as usize;
+            let max = inner.width.saturating_sub(16) as usize;
             let line = Line::from(vec![
                 Span::styled(format!(" {status} "), Style::default().fg(color).bg(bg)),
                 Span::styled(
@@ -955,6 +1030,17 @@ fn list_mods(frame: &mut Frame, app: &mut App, area: Rect, t: f64) {
                         } else {
                             Modifier::empty()
                         }),
+                ),
+                Span::styled(
+                    if row.update.is_some() { "↑ " } else { "  " },
+                    Style::default()
+                        .fg(if row.update.is_some() {
+                            theme::GOLD
+                        } else {
+                            bg
+                        })
+                        .bg(bg)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                     format!("{:>7}", short_bytes(row.size)),
@@ -1025,7 +1111,7 @@ fn mod_detail(frame: &mut Frame, app: &App, area: Rect, t: f64) {
         .active_version
         .as_deref()
         .map(|version| app.game_dir.join("versions").join(version).join("mods"));
-    let lines = vec![
+    let mut lines = vec![
         Line::from(vec![Span::styled(
             theme::truncate_chars(
                 row.display.strip_suffix(".jar").unwrap_or(&row.display),
@@ -1118,7 +1204,28 @@ fn mod_detail(frame: &mut Frame, app: &App, area: Rect, t: f64) {
                 Style::default().fg(theme::TEXT_DIM).bg(theme::SURFACE),
             ),
         ]),
+        Line::from(vec![
+            Span::styled(
+                " [u] [U] ",
+                Style::default()
+                    .fg(theme::BG)
+                    .bg(theme::GOLD)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                lang.pick(" check / apply updates", " 检查 / 应用更新"),
+                Style::default().fg(theme::TEXT_DIM).bg(theme::SURFACE),
+            ),
+        ]),
     ];
+    if let Some(latest) = row.update.as_ref() {
+        lines.push(Line::from(""));
+        lines.push(kv(
+            lang.pick("Update", "更新"),
+            format!("→ {latest}"),
+            theme::GOLD,
+        ));
+    }
     frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: true })
@@ -1594,8 +1701,16 @@ fn settings_fields(frame: &mut Frame, app: &App, area: Rect, t: f64) {
             "自动模式下资源优先 BMCLAPI，其他文件优先官方。",
         ),
         lang.pick(
-            "Empty means auto-detect. Enter to edit.",
-            "留空表示自动检测。回车编辑。",
+            "Enter to pick a detected runtime or type a path.",
+            "回车选择已检测的运行时，或手动输入路径。",
+        ),
+        lang.pick(
+            "Extra JVM flags such as -XX:+UseStringDeduplication.",
+            "额外的 JVM 参数，例如 -XX:+UseStringDeduplication。",
+        ),
+        lang.pick(
+            "GC preset; zgc needs Java 21 for generational mode.",
+            "垃圾回收器预设；ZGC 的分代模式需要 Java 21。",
         ),
         lang.pick(
             "Turn off decorative motion for lower CPU use.",
@@ -1797,13 +1912,21 @@ fn settings_value(app: &App, index: usize) -> String {
                 )
             }
         }
-        7 => if app.settings.reduced_motion {
+        7 => {
+            if app.settings.jvm_args.trim().is_empty() {
+                lang.pick("none", "无").into()
+            } else {
+                theme::truncate_chars(&app.settings.jvm_args, 28)
+            }
+        }
+        8 => app.settings.gc.to_uppercase(),
+        9 => if app.settings.reduced_motion {
             lang.pick("On", "开")
         } else {
             lang.pick("Off", "关")
         }
         .into(),
-        8 => if app.settings.splash {
+        10 => if app.settings.splash {
             lang.pick("On", "开")
         } else {
             lang.pick("Off", "关")
@@ -1865,6 +1988,12 @@ fn settings_preview(frame: &mut Frame, app: &App, area: Rect, t: f64) {
     if loader != "vanilla" {
         command.push_str(&format!(" --{loader}"));
     }
+    if app.settings.gc != "auto" {
+        command.push_str(&format!(" --gc {}", app.settings.gc));
+    }
+    if !app.settings.jvm_args.trim().is_empty() {
+        command.push_str(&format!(" --jvm-args '{}'", app.settings.jvm_args));
+    }
     let lines = vec![
         Line::from(vec![Span::styled(
             lang.pick("Launch profile", "启动配置"),
@@ -1893,6 +2022,23 @@ fn settings_preview(frame: &mut Frame, app: &App, area: Rect, t: f64) {
             "Java",
             theme::truncate_chars(&java, inner.width.saturating_sub(14) as usize),
             theme::GREEN,
+        ),
+        kv(
+            lang.pick("GC", "GC"),
+            app.settings.gc.to_uppercase(),
+            theme::PURPLE,
+        ),
+        kv(
+            lang.pick("JVM args", "JVM 参数"),
+            if app.settings.jvm_args.trim().is_empty() {
+                lang.pick("none", "无").into()
+            } else {
+                theme::truncate_chars(
+                    &app.settings.jvm_args,
+                    inner.width.saturating_sub(14) as usize,
+                )
+            },
+            theme::TEXT_DIM,
         ),
         Line::from(""),
         Line::from(vec![Span::styled(

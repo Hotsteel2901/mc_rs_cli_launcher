@@ -195,14 +195,20 @@ impl ModManager {
 
     /// Detect installed loaders for a game version.
     fn detect_loaders(&self, mc_version: &str) -> Vec<String> {
+        let marker = crate::instance::marker_for(&self.game_dir, mc_version);
         let mut found = Vec::new();
+        if let Some(preferred) = marker.and_then(|marker| marker.loader) {
+            if crate::instance::loader_profile_path(&self.game_dir, &preferred, mc_version)
+                .is_some()
+            {
+                found.push(preferred);
+            }
+        }
         for loader in &["fabric", "neoforge", "forge"] {
-            let p = self
-                .game_dir
-                .join("libraries")
-                .join(loader)
-                .join(format!("{}-profile-{}.json", loader, mc_version));
-            if p.exists() {
+            if found.iter().any(|entry| entry == loader) {
+                continue;
+            }
+            if crate::instance::loader_profile_path(&self.game_dir, loader, mc_version).is_some() {
                 found.push(loader.to_string());
             }
         }

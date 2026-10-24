@@ -480,6 +480,383 @@ fn find_java_in_dir(root: &Path, exe_name: &str) -> Option<String> {
     None
 }
 
+// ─── Java discovery ────────────────────────────────────────────────
+
+/// Where a discovered runtime came from; shown in pickers and logs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JavaOrigin {
+    JavaHome,
+    Path,
+    Scan,
+    Managed,
+}
+
+impl JavaOrigin {
+    pub fn label(self) -> &'static str {
+        match self {
+            JavaOrigin::JavaHome => "JAVA_HOME",
+            JavaOrigin::Path => "PATH",
+            JavaOrigin::Scan => "scan",
+            JavaOrigin::Managed => "runtime",
+        }
+    }
+}
+
+/// A discovered Java runtime with the metadata a launcher needs to explain
+/// "which Java should I use for this version?".
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JavaInfo {
+    pub path: String,
+    pub major: Option<u32>,
+    pub version: String,
+    pub vendor: String,
+    pub arch: String,
+    pub origin: JavaOrigin,
+}
+
+impl JavaInfo {
+    /// "Java 21 · Temurin" or "Java ? · unknown".
+    pub fn label(&self) -> String {
+        let major = self
+            .major
+            .map(|m| m.to_string())
+            .unwrap_or_else(|| "?".into());
+        format!("Java {major} · {}", self.vendor)
+    }
+
+    /// Compact metadata for a picker row.
+    pub fn meta(&self) -> String {
+        let mut parts = Vec::new();
+        if !self.version.is_empty() {
+            parts.push(self.version.clone());
+        }
+        if !self.arch.is_empty() {
+            parts.push(self.arch.clone());
+        }
+        parts.push(self.origin.label().to_string());
+        parts.join(" · ")
+    }
+}
+
+/// Parse an OpenJDK release file (KEY="value" per line). Values may be
+/// quoted or bare; comments and blank lines are ignored.
+pub fn parse_release_file(text: &str) -> std::collections::BTreeMap<String, String> {
+    let mut map = std::collections::BTreeMap::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let value = value.trim();
+        let value = value
+            .strip_prefix('"')
+            .and_then(|v| v.strip_suffix('"'))
+            .unwrap_or(value);
+        if !key.trim().is_empty() {
+            map.insert(key.trim().to_string(), value.to_string());
+        }
+    }
+    map
+}
+
+/// "17.0.8" -> 17, "1.8.0_402" -> 8, "21-ea" -> 21.
+pub fn major_from_version(version: &str) -> Option<u32> {
+    let version = version.trim();
+    let stripped = version.strip_prefix("1.").unwrap_or(version);
+    let digits: String = stripped
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.parse().ok()
+}
+
+fn java_home_of(exe: &str) -> Option<PathBuf> {
+    let path = Path::new(exe);
+    let bin = path.parent()?;
+    let home = bin.parent()?;
+    Some(home.to_path_buf())
+}
+
+fn read_release_file(home: &Path) -> Option<std::collections::BTreeMap<String, String>> {
+    let text = fs::read_to_string(home.join("release")).ok()?;
+    Some(parse_release_file(&text))
+}
+
+/// The three fields we can recover from java -version output.
+pub struct JavaProbe {
+    pub major: Option<u32>,
+    pub version: String,
+    pub vendor: String,
+}
+
+/// Parse java -version output, which writes to stderr on most JDKs:
+/// "openjdk version \"17.0.8\" 2023-07-18" / "java version \"1.8.0_402\"".
+pub fn parse_java_version_output(text: &str) -> Option<JavaProbe> {
+    let re = regex::Regex::new("(?m)^\\s*(\\S+)\\s+version\\s+\"([^\"]+)\"").ok()?;
+    let caps = re.captures(text)?;
+    let vendor = caps.get(1).map(|m| m.as_str()).unwrap_or("Java");
+    let vendor = match vendor {
+        "openjdk" => "OpenJDK",
+        "java" => "Java",
+        other => other,
+    };
+    let version = caps
+        .get(2)
+        .map(|m| m.as_str().to_string())
+        .unwrap_or_default();
+    Some(JavaProbe {
+        major: major_from_version(&version),
+        version,
+        vendor: vendor.to_string(),
+    })
+}
+
+/// Inspect one executable, preferring the cheap release file in the JDK home
+/// and falling back to spawning java -version.
+pub fn inspect_java(path: &str, origin: JavaOrigin) -> JavaInfo {
+    let mut info = JavaInfo {
+        path: path.to_string(),
+        major: None,
+        version: String::new(),
+        vendor: String::new(),
+        arch: String::new(),
+        origin,
+    };
+    if let Some(release) = java_home_of(path).as_deref().and_then(read_release_file) {
+        info.version = release
+            .get("JAVA_VERSION")
+            .or_else(|| release.get("JAVA_RUNTIME_VERSION"))
+            .cloned()
+            .unwrap_or_default();
+        info.vendor = release
+            .get("IMPLEMENTOR")
+            .or_else(|| release.get("JAVA_VENDOR"))
+            .cloned()
+            .unwrap_or_default();
+        info.arch = release.get("OS_ARCH").cloned().unwrap_or_default();
+        info.major = major_from_version(&info.version);
+    }
+    if info.major.is_none() {
+        if let Ok(output) = Command::new(path).arg("-version").output() {
+            let text = format!(
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stderr),
+                String::from_utf8_lossy(&output.stdout)
+            );
+            if let Some(probe) = parse_java_version_output(&text) {
+                info.major = probe.major;
+                if info.version.is_empty() {
+                    info.version = probe.version;
+                }
+                if info.vendor.is_empty() {
+                    info.vendor = probe.vendor;
+                }
+            }
+        }
+    }
+    if info.vendor.is_empty() {
+        info.vendor = "Java".into();
+    }
+    info
+}
+
+/// Managed runtimes live under <game_dir>/java/<component>/.../bin/java.
+pub fn scan_managed_javas(game_dir: &Path) -> Vec<String> {
+    let exe_name = if cfg!(windows) { "java.exe" } else { "java" };
+    let pattern = format!(
+        "{}/java/**/bin/{}",
+        glob::Pattern::escape(&game_dir.to_string_lossy()),
+        exe_name
+    );
+    glob::glob(&pattern)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|p| p.is_file())
+                .map(|p| p.to_string_lossy().to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// All usable Java runtimes, best first (highest major, managed before system).
+pub fn detect_java(game_dir: Option<&Path>) -> Vec<JavaInfo> {
+    let mut candidates: Vec<(String, JavaOrigin)> = Vec::new();
+    if let Ok(java_home) = std::env::var("JAVA_HOME") {
+        let exe = if cfg!(windows) { "java.exe" } else { "java" };
+        let path = Path::new(&java_home).join("bin").join(exe);
+        if path.is_file() {
+            candidates.push((path.to_string_lossy().to_string(), JavaOrigin::JavaHome));
+        }
+    }
+    if let Ok(path) = which::which("java") {
+        candidates.push((path.to_string_lossy().to_string(), JavaOrigin::Path));
+    }
+    for path in scan_java_installations() {
+        candidates.push((path, JavaOrigin::Scan));
+    }
+    if let Some(game_dir) = game_dir {
+        for path in scan_managed_javas(game_dir) {
+            candidates.push((path, JavaOrigin::Managed));
+        }
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    let mut infos: Vec<JavaInfo> = Vec::new();
+    for (path, origin) in candidates {
+        let key = fs::canonicalize(&path)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| path.clone());
+        if !seen.insert(key) {
+            continue;
+        }
+        infos.push(inspect_java(&path, origin));
+    }
+    sort_java(&mut infos);
+    infos
+}
+
+fn sort_java(infos: &mut [JavaInfo]) {
+    infos.sort_by(|a, b| {
+        b.major
+            .unwrap_or(0)
+            .cmp(&a.major.unwrap_or(0))
+            .then_with(|| (b.origin == JavaOrigin::Managed).cmp(&(a.origin == JavaOrigin::Managed)))
+            .then_with(|| a.path.cmp(&b.path))
+    });
+}
+
+/// Pick the runtime that should run a version needing the given major.
+/// Exact major wins; then the lowest newer major; then the highest older one.
+pub fn best_java(infos: &[JavaInfo], required: Option<u32>) -> Option<&JavaInfo> {
+    let Some(required) = required else {
+        return infos.first();
+    };
+    infos
+        .iter()
+        .find(|info| info.major == Some(required))
+        .or_else(|| {
+            infos
+                .iter()
+                .filter(|info| info.major.is_some_and(|major| major > required))
+                .min_by_key(|info| info.major)
+        })
+        .or_else(|| {
+            infos
+                .iter()
+                .filter(|info| info.major.is_some_and(|major| major < required))
+                .max_by_key(|info| info.major)
+        })
+}
+
+/// The managed runtime of a given major, if it was installed earlier.
+pub fn managed_java(game_dir: &Path, major: u32) -> Option<String> {
+    scan_managed_javas(game_dir).into_iter().find(|path| {
+        java_home_of(path)
+            .as_deref()
+            .and_then(read_release_file)
+            .and_then(|release| {
+                release
+                    .get("JAVA_VERSION")
+                    .and_then(|v| major_from_version(v))
+            })
+            .or_else(|| java_major(path))
+            == Some(major)
+    })
+}
+
+/// Fetch Mojang's runtime index (all.json).
+pub fn fetch_java_manifest() -> Result<serde_json::Value, String> {
+    let (status, body) = http::http_get(MOJANG_JAVA_MANIFEST)
+        .map_err(|e| format!("Java runtime index is unavailable: {e}"))?;
+    if status != 200 {
+        return Err(format!("Java runtime index returned HTTP {status}"));
+    }
+    serde_json::from_slice(&body).map_err(|e| format!("Invalid Java runtime index: {e}"))
+}
+
+/// Choose the Mojang component that provides the requested major on this
+/// platform. Returns (component, version name).
+pub fn component_for_major(
+    manifest: &serde_json::Value,
+    platform: &str,
+    major: u32,
+) -> Option<(String, String)> {
+    let components = manifest.get(platform)?.as_object()?;
+    let mut best: Option<(String, String)> = None;
+    for (name, entries) in components {
+        for entry in entries.as_array().into_iter().flatten() {
+            let Some(version_name) = entry["version"]["name"].as_str() else {
+                continue;
+            };
+            if major_from_version(version_name) != Some(major) {
+                continue;
+            }
+            if entry["manifest"]["url"].as_str().is_none() {
+                continue;
+            }
+            let better = match &best {
+                Some((_, current)) => compare_versions(version_name, current).is_gt(),
+                None => true,
+            };
+            if better {
+                best = Some((name.clone(), version_name.to_string()));
+            }
+        }
+    }
+    best
+}
+
+fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
+    let split = |value: &str| {
+        value
+            .split(|c: char| !c.is_ascii_digit())
+            .filter(|part| !part.is_empty())
+            .filter_map(|part| part.parse::<u32>().ok())
+            .collect::<Vec<_>>()
+    };
+    split(a).cmp(&split(b))
+}
+
+/// Download (or reuse) Mojang's Java runtime for a major version.
+/// This is the install-java path: the component covering the major on this
+/// platform is selected from Mojang's index, then installed under
+/// <game_dir>/java/<component>.
+pub fn download_runtime_for_major(
+    game_dir: &Path,
+    major: u32,
+    max_workers: usize,
+) -> Option<String> {
+    if let Some(path) = managed_java(game_dir, major) {
+        crate::info!("Java {} runtime already installed: {}", major, path);
+        return Some(path);
+    }
+    let platform = mojang_java_platform()?;
+    let manifest = fetch_java_manifest().ok()?;
+    let (component, version_name) = component_for_major(&manifest, platform, major)?;
+    crate::info!(
+        "Mojang runtime for Java {}: {} ({}, {})",
+        major,
+        component,
+        version_name,
+        platform
+    );
+    let path = download_mojang_java(game_dir, &component, max_workers)?;
+    if let Some(actual) = java_major(&path) {
+        if actual != major {
+            crate::warn_msg!(
+                "Downloaded runtime reports Java {}, expected Java {}.",
+                actual,
+                major
+            );
+        }
+    }
+    Some(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -506,5 +883,114 @@ mod tests {
             Some(java)
         );
         assert!(find_java_in_dir(&dir.path().join("missing[1]"), "java").is_none());
+    }
+
+    #[test]
+    fn release_files_and_version_strings_are_parsed() {
+        let release = parse_release_file(
+            "# comment\nIMPLEMENTOR=\"Eclipse Adoptium\"\nJAVA_VERSION=\"17.0.8\"\nOS_ARCH=\"x86_64\"\nBARE=value\n",
+        );
+        assert_eq!(release.get("IMPLEMENTOR").unwrap(), "Eclipse Adoptium");
+        assert_eq!(release.get("JAVA_VERSION").unwrap(), "17.0.8");
+        assert_eq!(release.get("BARE").unwrap(), "value");
+        assert_eq!(major_from_version("17.0.8"), Some(17));
+        assert_eq!(major_from_version("1.8.0_402"), Some(8));
+        assert_eq!(major_from_version("21-ea"), Some(21));
+        assert_eq!(major_from_version(""), None);
+        assert_eq!(major_from_version("ea"), None);
+    }
+
+    #[test]
+    fn java_version_output_is_parsed() {
+        let probe =
+            parse_java_version_output("openjdk version \"17.0.8\" 2023-07-18\nOpenJDK Runtime")
+                .unwrap();
+        assert_eq!(probe.major, Some(17));
+        assert_eq!(probe.version, "17.0.8");
+        assert_eq!(probe.vendor, "OpenJDK");
+
+        let legacy = parse_java_version_output("java version \"1.8.0_402\"\nJava(TM) SE").unwrap();
+        assert_eq!(legacy.major, Some(8));
+        assert_eq!(legacy.vendor, "Java");
+        assert!(parse_java_version_output("no version here").is_none());
+    }
+
+    #[test]
+    fn managed_runtime_is_found_without_launching_java() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("java").join("java-runtime-gamma");
+        let bin = home.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let exe = bin.join(if cfg!(windows) { "java.exe" } else { "java" });
+        std::fs::write(&exe, b"fixture").unwrap();
+        std::fs::write(
+            home.join("release"),
+            b"IMPLEMENTOR=\"Eclipse Adoptium\"\nJAVA_VERSION=\"17.0.8\"\nOS_ARCH=\"x86_64\"\n",
+        )
+        .unwrap();
+        let found = scan_managed_javas(dir.path());
+        assert_eq!(found.len(), 1);
+        let info = inspect_java(&found[0], JavaOrigin::Managed);
+        assert_eq!(info.major, Some(17));
+        assert_eq!(info.vendor, "Eclipse Adoptium");
+        assert_eq!(info.arch, "x86_64");
+        assert!(info.label().contains("Java 17"));
+        assert_eq!(
+            managed_java(dir.path(), 17).map(|p| Path::new(&p).to_path_buf()),
+            Some(exe)
+        );
+        assert!(managed_java(dir.path(), 21).is_none());
+    }
+
+    #[test]
+    fn mojang_component_selection_prefers_the_newest_matching_build() {
+        let manifest = serde_json::json!({
+            "linux": {
+                "jre-legacy": [{"version": {"name": "8u422"}, "manifest": {"url": "u8"}}],
+                "java-runtime-alpha": [{"version": {"name": "16.0.1"}, "manifest": {"url": "u16"}}],
+                "java-runtime-beta": [{"version": {"name": "17.0.1"}, "manifest": {"url": "u17a"}}],
+                "java-runtime-gamma": [{"version": {"name": "17.0.8"}, "manifest": {"url": "u17b"}}],
+                "java-runtime-delta": [{"version": {"name": "21.0.3"}, "manifest": {"url": "u21"}}]
+            },
+            "windows-x64": {
+                "java-runtime-gamma": [{"version": {"name": "17.0.8"}, "manifest": {"url": "uw"}}]
+            }
+        });
+        assert_eq!(
+            component_for_major(&manifest, "linux", 17),
+            Some(("java-runtime-gamma".into(), "17.0.8".into()))
+        );
+        assert_eq!(
+            component_for_major(&manifest, "linux", 8).map(|(c, _)| c),
+            Some("jre-legacy".into())
+        );
+        assert_eq!(
+            component_for_major(&manifest, "linux", 21).map(|(c, _)| c),
+            Some("java-runtime-delta".into())
+        );
+        assert!(component_for_major(&manifest, "linux", 11).is_none());
+        assert!(component_for_major(&manifest, "solaris", 17).is_none());
+    }
+
+    #[test]
+    fn best_java_prefers_exact_then_nearest_newer() {
+        let info = |major: u32, origin: JavaOrigin| JavaInfo {
+            path: format!("/jdk-{major}/bin/java"),
+            major: Some(major),
+            version: format!("{major}.0.0"),
+            vendor: "Test".into(),
+            arch: "x86_64".into(),
+            origin,
+        };
+        let infos = vec![
+            info(8, JavaOrigin::Scan),
+            info(17, JavaOrigin::Path),
+            info(21, JavaOrigin::Managed),
+        ];
+        assert_eq!(best_java(&infos, Some(17)).unwrap().major, Some(17));
+        assert_eq!(best_java(&infos, Some(11)).unwrap().major, Some(17));
+        assert_eq!(best_java(&infos, Some(25)).unwrap().major, Some(21));
+        assert_eq!(best_java(&infos, None).unwrap().major, Some(8));
+        assert!(best_java(&[], Some(17)).is_none());
     }
 }

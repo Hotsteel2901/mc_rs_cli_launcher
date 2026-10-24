@@ -13,7 +13,7 @@ hot-rs-launcher --dir ./minecraft tui
 ## 界面
 
 ```text
- ◆ Hot-RS-Launcher  v2.4.0                 ◆ cli-first                     ● Steve  ·  1.21.4 · Fabric  · auto
+ ◆ Hot-RS-Launcher  v2.5.0                 ◆ cli-first                     ● Steve  ·  1.21.4 · Fabric  · auto
 ──────────────────────────────────────────────────────────────────────────────────────────────────────────────
 ╭────────────────────╮ ╭ INSTANCE ───────────────────────────────────────────────────────────────────────────╮
 │      ▄██████▄      │ │M I N E C R A F T                                 ╭─────────────────────────────────╮│
@@ -22,7 +22,7 @@ hot-rs-launcher --dir ./minecraft tui
 │     ████  ████     │ │◆ 1.21.4  ·  Fabric  ·  1 mod                     ╰─────────────────────────────────╯│
 │     ▀▀██████▀▀     │ │◉ Steve  ·  OFFLINE                                                                  │
 │   Hot-RS-Launcher  │ │                                                  RAM  4 GB                          │
-│       v2.4.0       │ │                                                  LOAD Fabric                        │
+│       v2.5.0       │ │                                                  LOAD Fabric                        │
 │                    │ │                                                  PATH ~/minecraft                   │
 │▌ ◈ Dashboard    1  │ ╰─────────────────────────────────────────────────────────────────────────────────────╯
 │                    │                                                                                        
@@ -56,10 +56,10 @@ hot-rs-launcher --dir ./minecraft tui
 | 区域 | 能力 |
 | --- | --- |
 | Dashboard | 活跃实例、账号、加载器、RAM、Java、版本/模组统计；一键启动；空目录引导 |
-| Versions | 本地版本列表、详情、设为活跃、启动、下载远程版本、选择/安装 Fabric/Forge/NeoForge |
-| Mods | 已安装模组列表、启用/禁用、卸载、按当前版本与加载器搜索 Modrinth、安装 |
+| Versions | 本地版本列表、详情（基准版本、Java 要求、磁盘占用）、设为活跃、启动、下载远程版本、选择/安装 Fabric/Forge/NeoForge、重命名/复制/删除实例、导出 .mrpack |
+| Mods | 已安装模组列表、启用/禁用、卸载、按当前版本与加载器搜索 Modrinth、安装、检查/应用 Modrinth 更新（`↑` 标记） |
 | Accounts | 账号列表、默认账号、离线账号、Microsoft 浏览器/设备码登录、登出 |
-| Settings | 界面语言（English / 中文）、内存、窗口尺寸、下载线程、官方/BMCLAPI 源、Java 路径、减少动效、开场动画 |
+| Settings | 界面语言（English / 中文）、内存、窗口尺寸、下载线程、官方/BMCLAPI 源、Java 运行时选择（带推荐项）、JVM 参数、GC 预设、减少动效、开场动画 |
 | Activity | 完整活动日志、实时追踪、暂停跟随、清空 |
 | 关于（About） | 版本、作者、GitHub（@Hotsteel2901）与 Codeberg（@hotsteel）仓库地址、许可证；`g` / `b` 在浏览器中打开 |
 | 全局 | 后台任务面板、分阶段进度、实时传输速度、每文件百分比、取消任务、Toast、帮助；底部状态栏与任务面板 |
@@ -107,6 +107,10 @@ hot-rs-launcher --dir ./minecraft tui
 | `v` | 设为活跃实例 |
 | `i` | 为选中版本选择/安装加载器 |
 | `n` | 下载其他版本 |
+| `d` | 删除选中实例（确认后删除目录、存档和模组） |
+| `R` | 重命名选中实例 |
+| `c` | 复制选中实例（包含存档与模组） |
+| `e` | 导出为 Modrinth `.mrpack`（输入目标路径） |
 | `r` | 刷新 |
 
 ### Mods
@@ -117,6 +121,8 @@ hot-rs-launcher --dir ./minecraft tui
 | `x` | 卸载（确认） |
 | `s` / `/` | 搜索 Modrinth |
 | `v` | 切换活跃 Minecraft 版本 |
+| `u` | 检查 Modrinth 更新（后台任务） |
+| `U` | 应用全部可用更新（确认后下载并替换） |
 | `r` | 刷新 |
 
 ### Accounts
@@ -132,10 +138,12 @@ hot-rs-launcher --dir ./minecraft tui
 
 | 按键 | 行为 |
 | --- | --- |
-| `←` / `→` | 调整当前项（语言项会切换 English / 中文） |
-| `Enter` | 编辑 Java 路径 / 切换开关 / 切换界面语言 |
+| `←` / `→` | 调整当前项（语言项会切换 English / 中文，GC 项循环预设） |
+| `Enter` | 打开 Java 运行时选择器 / 编辑 JVM 参数 / 切换开关 / 切换界面语言 |
 | `s` | 立即保存（修改通常会自动保存） |
 | `R` | 恢复默认值（保留活跃版本） |
+
+Java 行会列出 `JAVA_HOME`、`PATH`、系统扫描和 `<game_dir>/java` 下的运行时，按当前实例的 Java 要求标注推荐项；选择器最后一项可以手动输入路径。JVM 参数按 shell 风格拆分，留空表示不追加。
 
 ### About
 
@@ -170,6 +178,8 @@ hot-rs-launcher --dir ./minecraft tui
   "language": "en",
   "active_loader": "fabric",
   "source": "auto",
+  "jvm_args": "",
+  "gc": "auto",
   "reduced_motion": false,
   "splash": true,
   "active_version": "1.21.4"
@@ -180,6 +190,8 @@ hot-rs-launcher --dir ./minecraft tui
 - `width` / `height`：0 表示交给 Minecraft 决定；其余会限制在安全范围。
 - `threads`：1–64，默认 16；下载器复用 HTTP/TLS 连接。资源文件使用 `threads × 2` 的并发（至少 16、最多 64；镜像上限 24）。
 - `language`：`en`（默认）或 `zh`；在 Settings 第一项切换后立即生效并保存。命令行与日志中的底层工具输出仍保持英文。
+- `jvm_args`：附加 JVM 参数，按 shell 风格拆分后作为独立 argv 传入；空字符串表示不追加。
+- `gc`：`auto` / `g1` / `zgc` / `parallel` / `serial` / `none`；与 CLI `--gc` 一致，ZGC 的分代模式只在 Java 21+ 启用。
 - `active_loader`：`fabric` / `forge` / `neoforge`，或用 `null` 表示自动选择第一个已安装加载器；未安装的加载器会先要求安装。
 - `source`：`auto` / `official` / `bmcl`。`auto` 会为资源文件同时测速官方与 BMCLAPI 并整批使用更快的一方（失败文件回退另一源），库与元数据仍官方优先；`official` 完全禁用镜像。
 - `java`：空表示自动检测。
@@ -208,17 +220,22 @@ hot-rs-launcher --dir ./minecraft tui
 - Forge-family 安装器仍会执行第三方代码；TUI 不改变“只使用可信项目”的建议。
 - 模组安装使用当前活跃版本和已检测到的加载器；TUI 会拒绝在没有加载器的实例上安装模组。默认安装与当前版本/加载器兼容的最新模组版本；需要固定 `--mod-version` 时继续使用 CLI。依赖不会自动确认安装，结果会显示在活动日志中。
 - 加载器安装使用推荐/最新版本；需要固定 `--loader-version` 时继续使用 CLI。
-- TUI 不是并发安装器：同一时间只运行一个重量级任务；搜索和版本元数据属于轻量请求，可以并行。
-- 同一 Minecraft 版本下的多个加载器共享目录，切换前仍应备份存档。TUI 没有删除版本/存档功能。
+- TUI 不是并发安装器：同一时间只运行一个重量级任务；搜索、版本元数据和更新检查属于轻量请求，可以并行。
+- 同一 Minecraft 版本下的多个加载器共享目录，切换前仍应备份存档。
+- Versions 页的 `d` 会在确认后删除实例目录（含存档和模组），`R`/`c` 会改写版本 JSON 与加载器 profile 的键；需要保留存档时请用 CLI `remove-version --keep-saves`。
+- 导出整合包会对已安装 JAR 做 SHA-1 查询；Modrinth 不可达时全部模组会作为 overrides 打包，并在活动日志中提示。导入会安全解压 overrides（拒绝路径穿越），模组文件按 SHA-1 校验后原子写入。
+- 启动失败后 TUI 会读取最新崩溃报告/日志，把匹配到的诊断写入活动日志；它只做启发式分析，不修改任何文件。
 
 ## 实现与验证
 
 - `src/tui/app.rs`：状态、输入分发、本地数据刷新、后台事件归并。
-- `src/tui/jobs.rs`：线程/子进程任务、进度协议、取消与进程树清理。
+- `src/tui/jobs.rs`：线程/子进程任务、进度协议、取消与进程树清理，以及更新检查/批量更新/整合包导出任务。
 - `src/tui/ui/`：布局、各界面、弹窗、Toast、粒子、Splash。
 - `src/tui/theme.rs`：真彩色主题、渐变、缓动、进度条。
 - `src/progress.rs`：CLI 与 TUI 共用的下载进度总线，以及跨进程的 `@@MC_TUI@@` JSON 进度行。
-- 自动测试使用 `TestBackend` 在 120×40、100×32、80×24、60×20、52×16 和过小尺寸下渲染全部界面、弹窗、任务状态、搜索、Splash、Toast 与粒子；同时验证中英文切换、鼠标热区点击/滚轮和弹窗按钮。开发验证中还使用伪终端冒烟测试检查进入/离开备用屏幕、括号粘贴与鼠标模式开关、按键退出和退出码。
+- `src/instance.rs` / `src/update.rs` / `src/diagnose.rs`：实例生命周期与 .mrpack、Modrinth 更新、崩溃诊断；TUI 只负责展示与触发。
+- 自动测试使用 `TestBackend` 在 120×40、100×32、80×24、60×20、52×16 和过小尺寸下渲染全部界面、弹窗、任务状态、搜索、Splash、Toast 与粒子；同时验证中英文切换、鼠标热区点击/滚轮和弹窗按钮，以及 Java 选择器、JVM/GC 设置、更新标记和实例重命名/删除。
+- 开发验证中使用伪终端冒烟测试检查进入/离开备用屏幕、括号粘贴与鼠标模式开关、按键退出和退出码；本轮还实际驱动了 Versions 重命名对话框和 Java 选择器。
 - `hot-rs-launcher tui` 在非 TTY 下会明确失败，不会阻塞 CI。
 
 ## 为什么还是 CLI-only
