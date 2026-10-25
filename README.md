@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="icon.png" alt="Hot-RS-Launcher 图标" width="140" />
+</p>
+
 # Hot-RS-Launcher
 
 Rust 编写的 Minecraft 命令行启动器。支持 Microsoft / 离线账号、按 Minecraft 版本隔离游戏目录、Fabric / Forge / NeoForge、Java 运行时管理、实例重命名/复制/删除、Modrinth 模组/资源包/光影包浏览与下载、优化模组推荐安装、模组更新、.mrpack 整合包导入导出、崩溃诊断、存档与资源包管理，以及备份恢复。内置可选的全屏终端前端 `hot-rs-launcher tui`，仍然只依赖 CLI 核心，不引入 GUI。
