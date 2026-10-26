@@ -3493,31 +3493,37 @@ impl App {
                 AppCommand::None
             }
             ConfirmAction::RemoveVersion(version) => {
+                if self.job.as_ref().is_some_and(JobView::is_running) {
+                    self.toast(
+                        LogLevel::Warn,
+                        self.lang()
+                            .pick("Wait for the current task to finish", "请等待当前任务完成"),
+                    );
+                    return AppCommand::None;
+                }
                 let lang = self.lang();
-                match InstanceManager::new(&self.game_dir).remove(&version, false, false) {
-                    Ok(report) => {
-                        if self.settings.active_version.as_deref() == Some(version.as_str()) {
-                            self.settings.active_version = None;
-                            self.save_settings_silent();
-                        }
-                        self.refresh_local();
-                        let message = if lang == Lang::Chinese {
-                            format!(
-                                "已删除 {version}，释放 {}",
-                                theme::format_bytes(report.freed_bytes)
-                            )
-                        } else {
-                            format!(
-                                "Deleted {version} ({} freed)",
-                                theme::format_bytes(report.freed_bytes)
-                            )
-                        };
-                        self.log_and_toast(LogLevel::Ok, message);
-                    }
-                    Err(error) => {
-                        let prefix = lang.pick("Delete failed", "删除失败");
-                        self.log_and_toast(LogLevel::Error, format!("{prefix}: {error}"));
-                    }
+                let id = self.next_job_id;
+                self.next_job_id += 1;
+                self.show_job_panel = true;
+                self.job = Some(JobView::new(
+                    id,
+                    if lang == Lang::Chinese {
+                        format!("删除 {version}")
+                    } else {
+                        format!("Remove {version}")
+                    },
+                ));
+                progress::reset_cancel();
+                progress::set_job(id);
+                jobs::start_remove_version(
+                    self.tx.clone(),
+                    id,
+                    self.game_dir.clone(),
+                    version.clone(),
+                );
+                if self.settings.active_version.as_deref() == Some(version.as_str()) {
+                    self.settings.active_version = None;
+                    self.save_settings_silent();
                 }
                 AppCommand::None
             }
@@ -3719,25 +3725,28 @@ impl App {
                     .copy_source
                     .clone()
                     .ok_or_else(|| lang.pick("No instance selected", "未选择实例").to_string())?;
-                let to = value.trim();
-                crate::util::validate_component(to)?;
-                let bytes = InstanceManager::new(&self.game_dir)
-                    .copy(&from, to)
-                    .map_err(|error| error.to_string())?;
+                let to = value.trim().to_string();
+                crate::util::validate_component(&to)?;
+                if self.job.as_ref().is_some_and(JobView::is_running) {
+                    return Err(lang
+                        .pick("Wait for the current task to finish", "请等待当前任务完成")
+                        .to_string());
+                }
                 self.copy_source = None;
-                self.refresh_local();
-                let message = if lang == Lang::Chinese {
-                    format!(
-                        "已复制 {from} -> {to}（{}）",
-                        crate::tui::theme::format_bytes(bytes)
-                    )
-                } else {
-                    format!(
-                        "Copied {from} -> {to} ({})",
-                        crate::tui::theme::format_bytes(bytes)
-                    )
-                };
-                self.log_and_toast(LogLevel::Ok, message);
+                let id = self.next_job_id;
+                self.next_job_id += 1;
+                self.show_job_panel = true;
+                self.job = Some(JobView::new(
+                    id,
+                    if lang == Lang::Chinese {
+                        format!("复制 {from} -> {to}")
+                    } else {
+                        format!("Copy {from} -> {to}")
+                    },
+                ));
+                progress::reset_cancel();
+                progress::set_job(id);
+                jobs::start_copy_version(self.tx.clone(), id, self.game_dir.clone(), from, to);
                 Ok(())
             }
             InputAction::ImportSave => {
@@ -6348,7 +6357,7 @@ mod tests {
             br#"{"id":"1.21.4","type":"release","mainClass":"Main","libraries":[],"downloads":{"client":{"url":"https://example.org/x"}}}"#,
         )
         .unwrap();
-        let (tx, _rx) = jobs::channel();
+        let (tx, rx) = jobs::channel();
         let mut app = App::new(
             launcher(dir.path()),
             tx,
@@ -6393,6 +6402,24 @@ mod tests {
             _ => panic!("expected a delete confirmation"),
         };
         app.apply_confirm(ConfirmAction::RemoveVersion(confirmed));
+        // Removal runs on a worker thread; drain its events until it finishes.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            app.tick();
+            while let Ok(event) = rx.try_recv() {
+                app.handle_backend(event);
+            }
+            if !dir.path().join("versions/my-pack").exists()
+                && app.job.as_ref().is_none_or(|job| job.finished.is_some())
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "background removal did not finish"
+            );
+        }
         assert!(!dir.path().join("versions/my-pack").exists());
         assert!(app.versions.is_empty());
     }

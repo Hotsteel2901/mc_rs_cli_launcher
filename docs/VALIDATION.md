@@ -24,7 +24,7 @@
 - **代理**：`--proxy` 或 `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY`，拒绝 SOCKS（本构建未启用该特性）。
 - **下载健壮性**：429/503 尊重 `Retry-After`，重试加入抖动避免并发同步重试；模组文件同名但内容不同时拒绝静默覆盖；`update` 的文件名在计划阶段即校验。
 - **依赖判定**：改为读取 jar 内 `fabric.mod.json` / `mods.toml` 的 modId，文件名回退只接受版本样式后缀；`sodium-extra.jar` 不再被误判为 `sodium`。`incompatible` 依赖不再作为「可选推荐」提示安装。原版实例（未检测到加载器）拒绝安装模组，避免装进其他加载器的 jar。
-- **TUI**：加载器安装任务补上 `set_job`（下载进度不再恒为 0）；退出与 panic 路径补 `DisableMouseCapture`；`resume` 失败回滚 raw mode；退出时恢复原 panic hook；失败任务不再让界面永久保持 30 FPS；光影详情页的加载器探测改为 1.5 秒缓存并只扫描一次 mods/。
+- **TUI**：加载器安装任务补上 `set_job`（下载进度不再恒为 0）；退出与 panic 路径补 `DisableMouseCapture`；`resume` 失败回滚 raw mode；退出时恢复原 panic hook；失败任务不再让界面永久保持 30 FPS；光影详情页的加载器探测改为 1.5 秒缓存并只扫描一次 mods/；实例复制与删除改在后台任务中执行，并复用任务面板。
 - **实例与存储**：删除/重命名基础版本时保留仍被其他实例继承的加载器 profile；实例大小改为单次迭代遍历并缓存 5 秒；`mods_dir` 遇到非法实例 id 不再 `process::exit`，避免 TUI 线程直接终止进程。
 
 未覆盖：真实 zip bomb 的端到端下载测试（仅构造条目验证限制）、Windows/macOS 的代理与文件锁差异、真实大型整合包导入的耗时基线。

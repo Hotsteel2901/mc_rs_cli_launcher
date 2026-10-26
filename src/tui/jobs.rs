@@ -171,6 +171,46 @@ where
     }
 }
 
+/// Copying an instance walks every mod, save and region file; doing it on the
+/// UI thread froze the interface for seconds on large packs.
+pub fn start_copy_version(
+    tx: EventSender,
+    id: u64,
+    game_dir: std::path::PathBuf,
+    from: String,
+    to: String,
+) {
+    spawn_job(tx, id, format!("Copy {from} -> {to}"), move |tx, id| {
+        phase(tx, id, 1, 1, "Copy instance");
+        let bytes = crate::instance::InstanceManager::new(&game_dir)
+            .copy(&from, &to)
+            .map_err(|error| error.to_string())?;
+        Ok(format!(
+            "Copied {from} -> {to} ({})",
+            crate::tui::theme::format_bytes(bytes)
+        ))
+    });
+}
+
+/// Removing an instance recursively deletes its whole tree.
+pub fn start_remove_version(
+    tx: EventSender,
+    id: u64,
+    game_dir: std::path::PathBuf,
+    version: String,
+) {
+    spawn_job(tx, id, format!("Remove {version}"), move |tx, id| {
+        phase(tx, id, 1, 1, "Remove instance");
+        let report = crate::instance::InstanceManager::new(&game_dir)
+            .remove(&version, false, false)
+            .map_err(|error| error.to_string())?;
+        Ok(format!(
+            "Deleted {version} ({} freed)",
+            crate::tui::theme::format_bytes(report.freed_bytes)
+        ))
+    });
+}
+
 /// Check all installed jars against Modrinth without blocking the UI.
 pub fn start_update_check(
     tx: EventSender,
