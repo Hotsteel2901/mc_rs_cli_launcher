@@ -528,13 +528,20 @@ impl InstanceManager {
         }
         jars.sort_by(|a, b| a.0.cmp(&b.0));
 
-        let mut hashes = Vec::new();
+        // Hashing every mod is CPU-bound; pack exports with a few hundred mods
+        // used to spend seconds in a single-threaded loop.
+        let hashes: Vec<String> = {
+            use rayon::prelude::*;
+            jars.par_iter()
+                .map(|(path, _)| {
+                    util::sha1_file(path)
+                        .map_err(|e| format!("Cannot hash {}: {e}", path.display()))
+                })
+                .collect::<Result<Vec<_>, String>>()?
+        };
         let mut by_hash: HashMap<String, (PathBuf, bool)> = HashMap::new();
-        for (path, enabled) in &jars {
-            let hash = util::sha1_file(path)
-                .map_err(|e| AppError::Generic(format!("Cannot hash {}: {e}", path.display())))?;
-            hashes.push(hash.clone());
-            by_hash.insert(hash, (path.clone(), *enabled));
+        for (index, (path, enabled)) in jars.iter().enumerate() {
+            by_hash.insert(hashes[index].clone(), (path.clone(), *enabled));
         }
         let mut offline = false;
         let known = if hashes.is_empty() {
@@ -651,8 +658,8 @@ impl InstanceManager {
             }
             zip.start_file(format!("overrides/mods/{filename}"), options)
                 .map_err(zip_error)?;
-            let bytes = fs::read(path)?;
-            zip.write_all(&bytes)?;
+            let mut file = fs::File::open(path)?;
+            std::io::copy(&mut file, &mut zip)?;
         }
         zip.finish().map_err(zip_error)?;
 
@@ -885,7 +892,10 @@ impl InstanceManager {
                 added += add_tree(&mut zip, &source, Path::new(item), options)?;
             } else if source.is_file() {
                 zip.start_file(item, options).map_err(zip_error)?;
-                zip.write_all(&fs::read(&source)?)?;
+                // Stream instead of fs::read: a world region file can be
+                // hundreds of megabytes and must not sit in memory twice.
+                let mut file = fs::File::open(&source)?;
+                std::io::copy(&mut file, &mut zip)?;
                 added += 1;
             }
         }
@@ -1013,7 +1023,8 @@ fn add_tree(
         } else if kind.is_file() {
             let entry_name = child.to_string_lossy().replace('\\', "/");
             zip.start_file(entry_name, options).map_err(zip_error)?;
-            zip.write_all(&fs::read(&path)?)?;
+            let mut file = fs::File::open(&path)?;
+            std::io::copy(&mut file, zip)?;
             added += 1;
         }
     }

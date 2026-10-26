@@ -928,7 +928,8 @@ fn add_world_tree(
                 continue;
             }
             zip.start_file(entry_name, options).map_err(zip_error)?;
-            zip.write_all(&fs::read(entry.path())?)?;
+            let mut file = fs::File::open(entry.path())?;
+            std::io::copy(&mut file, zip)?;
             added += 1;
         }
     }
