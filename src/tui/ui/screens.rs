@@ -2666,12 +2666,10 @@ fn settings_fields(frame: &mut Frame, app: &App, area: Rect, t: f64) {
             .map(|at| {
                 if at.elapsed().as_secs() < 2 {
                     lang.pick("saved now", "刚刚保存").to_string()
+                } else if lang == crate::tui::i18n::Lang::Chinese {
+                    format!("{} 前保存", theme::format_duration(at.elapsed()))
                 } else {
-                    if lang == crate::tui::i18n::Lang::Chinese {
-                        format!("{} 前保存", theme::format_duration(at.elapsed()))
-                    } else {
-                        format!("saved {} ago", theme::format_duration(at.elapsed()))
-                    }
+                    format!("saved {} ago", theme::format_duration(at.elapsed()))
                 }
             })
             .unwrap_or_else(|| lang.pick("auto-saved", "自动保存").to_string());

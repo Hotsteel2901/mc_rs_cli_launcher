@@ -305,6 +305,15 @@ fn diagnose_reports_crash_reports_offline() {
     let empty = run(&game, &["diagnose", "-v", "my-pack"]);
     assert!(empty.status.success());
     assert!(String::from_utf8_lossy(&empty.stdout).contains("No crash report"));
+
+    let json = run(&game, &["diagnose", "-v", "1.21.4", "--json"]);
+    assert!(json.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert!(value["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|finding| finding["title"].as_str().unwrap_or("").contains("内存")));
 }
 
 #[test]
@@ -589,4 +598,144 @@ fn dry_run_prints_the_command_without_starting_the_game() {
         assert!(output.contains(expected), "missing {expected} in {output}");
     }
     assert!(!game.join("versions/test-version/launch-args.txt").exists());
+}
+
+fn run_env(dir: &std::path::Path, args: &[&str], envs: &[(&str, &str)]) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_hot-rs-launcher"));
+    command
+        .args(args)
+        .arg("--dir")
+        .arg(dir)
+        .env("NO_COLOR", "1");
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    command.output().unwrap()
+}
+
+#[test]
+fn doctor_reports_environment_without_network_or_keychain() {
+    let dir = tempfile::tempdir().unwrap();
+    let result = run_env(
+        dir.path(),
+        &["doctor", "--json"],
+        &[("MC_LAUNCHER_NO_NETWORK", "1")],
+    );
+    assert!(
+        result.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(value["ok"], true);
+    let checks = value["checks"].as_array().unwrap();
+    assert!(checks
+        .iter()
+        .any(|check| check["name"] == "Directory writable" && check["status"] == "ok"));
+    // The diagnostic must not create accounts or secrets as a side effect.
+    assert!(!dir.path().join("launcher_accounts.json").exists());
+    assert!(!dir.path().join("launcher_secrets.key").exists());
+}
+
+#[test]
+fn prune_deletes_only_unreferenced_library_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = dir.path().join("game");
+    make_instance(&game, "1.21.4");
+    let metadata = serde_json::json!({
+        "id": "1.21.4", "type": "release", "mainClass": "TestMain",
+        "libraries": [{"name": "g:a:1"}],
+        "downloads": {"client": {"url": "http://127.0.0.1:1/unreachable"}},
+        "javaVersion": {"majorVersion": 17}
+    });
+    std::fs::write(
+        game.join("versions/1.21.4/1.21.4.json"),
+        metadata.to_string(),
+    )
+    .unwrap();
+    let keep = game.join("libraries/g/a/1/a-1.jar");
+    let junk = game.join("libraries/junk/x/1/x-1.jar");
+    std::fs::create_dir_all(keep.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(junk.parent().unwrap()).unwrap();
+    std::fs::write(&keep, b"keep").unwrap();
+    std::fs::write(&junk, b"junk").unwrap();
+    std::fs::create_dir_all(game.join("libraries/fabric")).unwrap();
+    std::fs::write(
+        game.join("libraries/fabric/fabric-profile-1.21.4.json"),
+        b"{}",
+    )
+    .unwrap();
+
+    let plan = run(&game, &["prune", "--json"]);
+    assert!(plan.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&plan.stdout).unwrap();
+    let libraries = value["libraries"].as_array().unwrap();
+    assert!(libraries.iter().any(|path| path.as_str() == junk.to_str()));
+    assert!(!libraries.iter().any(|path| path.as_str() == keep.to_str()));
+    assert!(junk.is_file(), "dry run must not delete anything");
+
+    let applied = run(&game, &["prune", "--yes"]);
+    assert!(applied.status.success());
+    assert!(!junk.exists());
+    assert!(keep.is_file());
+    assert!(game
+        .join("libraries/fabric/fabric-profile-1.21.4.json")
+        .is_file());
+}
+
+#[test]
+fn json_listings_and_completions_are_scriptable() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = dir.path().join("game");
+    make_instance(&game, "1.21.4");
+
+    let installed = run(&game, &["list-installed", "--json"]);
+    assert!(installed.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&installed.stdout).unwrap();
+    assert_eq!(value["instances"][0]["id"], "1.21.4");
+    assert_eq!(value["account"], serde_json::Value::Null);
+
+    let mods = run(&game, &["list-mods", "-v", "1.21.4", "--json"]);
+    assert!(mods.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&mods.stdout).unwrap();
+    assert_eq!(value["mods"][0]["file"], "example.jar");
+
+    let backups = run(&game, &["list-backups", "--json"]);
+    assert!(backups.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&backups.stdout).unwrap();
+    assert_eq!(value["total"], 0);
+
+    let completions = run(&dir.path().join("no-game"), &["completions", "fish"]);
+    assert!(completions.status.success());
+    assert!(String::from_utf8_lossy(&completions.stdout).contains("complete -c hot-rs-launcher"));
+    assert!(!dir.path().join("no-game").exists());
+}
+
+#[test]
+fn removing_a_base_version_keeps_shared_loader_profiles() {
+    let dir = tempfile::tempdir().unwrap();
+    let game = dir.path().join("game");
+    make_instance(&game, "1.21.4");
+    make_instance(&game, "pack");
+    std::fs::write(
+        game.join("versions/pack/instance.json"),
+        br#"{"base":"1.21.4","loader":"fabric"}"#,
+    )
+    .unwrap();
+    let profile = game.join("libraries/fabric/fabric-profile-1.21.4.json");
+    std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+    std::fs::write(
+        &profile,
+        br#"{"mainClass":"x","libraries":[],"profile_format":1}"#,
+    )
+    .unwrap();
+
+    let removed = run(&game, &["remove-version", "-v", "1.21.4"]);
+    assert!(
+        removed.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    assert!(profile.is_file(), "shared loader profile must survive");
+    assert!(String::from_utf8_lossy(&removed.stdout).contains("still use it"));
 }

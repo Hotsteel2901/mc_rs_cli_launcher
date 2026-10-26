@@ -112,9 +112,10 @@ impl TerminalSession {
             return Ok(());
         }
         enable_raw_mode().map_err(|e| e.to_string())?;
-        self.active = true;
-        TERMINAL_ACTIVE.store(true, Ordering::SeqCst);
         let mut stdout = io::stdout();
+        // Only publish the "active" state after the terminal really switched,
+        // otherwise a failed resume leaves raw mode enabled while cleanup
+        // believes there is nothing to restore.
         if let Err(error) = execute!(
             stdout,
             EnterAlternateScreen,
@@ -123,11 +124,29 @@ impl TerminalSession {
             Hide,
             Clear(ClearType::All)
         ) {
+            let _ = execute!(
+                stdout,
+                Show,
+                DisableBracketedPaste,
+                DisableMouseCapture,
+                LeaveAlternateScreen
+            );
+            let _ = disable_raw_mode();
             return Err(error.to_string());
         }
-        self.terminal
-            .clear()
-            .map_err(|e| format!("Cannot redraw terminal: {e}"))?;
+        if let Err(error) = self.terminal.clear() {
+            let _ = execute!(
+                stdout,
+                Show,
+                DisableBracketedPaste,
+                DisableMouseCapture,
+                LeaveAlternateScreen
+            );
+            let _ = disable_raw_mode();
+            return Err(format!("Cannot redraw terminal: {error}"));
+        }
+        self.active = true;
+        TERMINAL_ACTIVE.store(true, Ordering::SeqCst);
         Ok(())
     }
 
@@ -158,6 +177,11 @@ impl Drop for TerminalSession {
     }
 }
 
+fn restore_panic_hook(hook: &std::sync::Arc<dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync>) {
+    let hook = hook.clone();
+    panic::set_hook(Box::new(move |info| (*hook)(info)));
+}
+
 fn restore_terminal_best_effort() {
     if !TERMINAL_ACTIVE.swap(false, Ordering::SeqCst) {
         return;
@@ -168,6 +192,7 @@ fn restore_terminal_best_effort() {
         stdout,
         Show,
         DisableBracketedPaste,
+        DisableMouseCapture,
         LeaveAlternateScreen,
         SetTitle("")
     );
@@ -187,9 +212,15 @@ pub fn run(launcher: MinecraftLauncher, bootstrap: Bootstrap) -> Result<(), Stri
     let (tx, rx) = jobs::channel();
     let sink_tx = tx.clone();
     install_progress_sink(sink_tx);
+    install_notice_sink(tx.clone());
 
     let main_thread = std::thread::current().id();
-    let previous_hook = panic::take_hook();
+    // Keep the previous hook alive so leaving the TUI restores the process's
+    // original panic behaviour instead of silently replacing it with the
+    // default one.
+    let previous_hook: std::sync::Arc<dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync> =
+        std::sync::Arc::from(panic::take_hook());
+    let hook = previous_hook.clone();
     panic::set_hook(Box::new(move |info| {
         let on_main = std::thread::current().id() == main_thread;
         if on_main {
@@ -199,7 +230,7 @@ pub fn run(launcher: MinecraftLauncher, bootstrap: Bootstrap) -> Result<(), Stri
         // must not print over the UI. The job runner already turns caught
         // panics into visible error events.
         if on_main || !TERMINAL_ACTIVE.load(Ordering::SeqCst) {
-            previous_hook(info);
+            (*hook)(info);
         }
     }));
 
@@ -209,8 +240,9 @@ pub fn run(launcher: MinecraftLauncher, bootstrap: Bootstrap) -> Result<(), Stri
         Err(error) => {
             crate::log::set_quiet(false);
             progress::clear_sink();
+            progress::clear_notice_sink();
             progress::reset_cancel();
-            let _ = panic::take_hook();
+            restore_panic_hook(&previous_hook);
             return Err(error);
         }
     };
@@ -226,8 +258,9 @@ pub fn run(launcher: MinecraftLauncher, bootstrap: Bootstrap) -> Result<(), Stri
     session.restore();
     crate::log::set_quiet(false);
     progress::clear_sink();
+    progress::clear_notice_sink();
     progress::reset_cancel();
-    let _ = panic::take_hook();
+    restore_panic_hook(&previous_hook);
 
     match run_result {
         Ok(()) => {
@@ -254,6 +287,18 @@ fn install_progress_sink(tx: jobs::EventSender) {
                 transfer,
             });
         }
+    }));
+}
+
+/// Backend warnings become activity-log lines instead of raw prints that would
+/// overwrite the alternate screen.
+fn install_notice_sink(tx: jobs::EventSender) {
+    progress::set_notice_sink(Box::new(move |level, text| {
+        let level = match level {
+            progress::NoticeLevel::Warn => jobs::LogLevel::Warn,
+            progress::NoticeLevel::Error => jobs::LogLevel::Error,
+        };
+        let _ = tx.send(BackendEvent::Log { id: 0, level, text });
     }));
 }
 

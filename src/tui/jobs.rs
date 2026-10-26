@@ -208,7 +208,6 @@ pub fn start_apply_updates(
 ) {
     let total = updates.len();
     spawn_job(tx, id, format!("Update {total} mod(s)"), move |tx, id| {
-        progress::reset_cancel();
         let mut done = 0usize;
         let mut failures: Vec<String> = Vec::new();
         for (index, update) in updates.iter().enumerate() {
@@ -268,7 +267,6 @@ pub fn start_export_modpack(
     path: std::path::PathBuf,
 ) {
     spawn_job(tx, id, format!("Export {instance}"), move |tx, id| {
-        progress::reset_cancel();
         phase(tx, id, 1, 2, "Hash installed mods");
         let manager = crate::instance::InstanceManager::new(&game_dir);
         if let Some(parent) = path.parent() {
@@ -296,7 +294,6 @@ pub fn start_backup_save(
     folder: String,
 ) {
     spawn_job(tx, id, format!("Backup world {folder}"), move |tx, id| {
-        progress::reset_cancel();
         phase(tx, id, 1, 2, "Archive world files");
         let manager = crate::content::ContentManager::new(&game_dir);
         let path = manager
@@ -315,7 +312,6 @@ pub fn start_import_save(
     archive: std::path::PathBuf,
 ) {
     spawn_job(tx, id, "Import world".to_string(), move |tx, id| {
-        progress::reset_cancel();
         phase(tx, id, 1, 2, "Read world archive");
         let manager = crate::content::ContentManager::new(&game_dir);
         let folder = manager
@@ -334,7 +330,6 @@ pub fn start_import_resourcepack(
     source: std::path::PathBuf,
 ) {
     spawn_job(tx, id, "Import resource pack".to_string(), move |tx, id| {
-        progress::reset_cancel();
         phase(tx, id, 1, 2, "Validate pack metadata");
         let manager = crate::content::ContentManager::new(&game_dir);
         let name = manager
@@ -358,7 +353,6 @@ pub fn start_install_resourcepack(
         id,
         format!("Install resource pack {title}"),
         move |tx, id| {
-            progress::reset_cancel();
             phase(tx, id, 1, 2, "Resolve Modrinth project");
             let report = crate::discover::install_resourcepack(&game_dir, &instance, &slug, true)
                 .map_err(|error| error.to_string())?;
@@ -380,7 +374,6 @@ pub fn start_install_shader(
     title: String,
 ) {
     spawn_job(tx, id, format!("Install shader {title}"), move |tx, id| {
-        progress::reset_cancel();
         phase(tx, id, 1, 2, "Resolve Modrinth project");
         let report = crate::discover::install_shader(&game_dir, &instance, &slug, true)
             .map_err(|error| error.to_string())?;
@@ -402,7 +395,6 @@ pub fn start_import_shader(
     source: std::path::PathBuf,
 ) {
     spawn_job(tx, id, "Import shader pack".to_string(), move |tx, id| {
-        progress::reset_cancel();
         phase(tx, id, 1, 2, "Validate shader files");
         let manager = crate::content::ContentManager::new(&game_dir);
         let name = manager
@@ -568,7 +560,6 @@ pub fn start_download(
         id,
         format!("Download Minecraft {mc_version}"),
         move |tx, id| {
-            progress::reset_cancel();
             let vm = crate::version::VersionManager::new(&game_dir);
             phase(tx, id, 1, 4, "Resolving version metadata");
             let (resolved, data) = vm
@@ -636,7 +627,6 @@ pub fn start_fabric(
         id,
         format!("Install Fabric for {mc_version}"),
         move |tx, id| {
-            progress::reset_cancel();
             phase(tx, id, 1, 2, "Fetching Fabric profile");
             let manager = crate::fabric::FabricManager::new(&game_dir);
             let (jars, profile) = manager
@@ -864,6 +854,14 @@ fn consume_line(tx: &EventSender, id: u64, line: &str) {
                     done: value["done"].as_bool().unwrap_or(false),
                 };
                 let _ = tx.send(BackendEvent::Transfer { id, transfer });
+            } else if value["kind"] == "notice" {
+                let level = if value["level"] == "error" {
+                    LogLevel::Error
+                } else {
+                    LogLevel::Warn
+                };
+                let text = value["text"].as_str().unwrap_or_default().to_string();
+                send_log(tx, id, level, text);
             }
         }
         return;

@@ -1484,13 +1484,16 @@ impl App {
             job.tick(dt);
         }
         if let Some(job) = self.job.as_ref() {
-            if let Some(Ok(_)) = &job.finished {
-                if job
-                    .finished_at
-                    .is_some_and(|at| at.elapsed() > Duration::from_millis(2400))
-                {
-                    self.job = None;
-                }
+            // Successful jobs fade out quickly; failures stay long enough to
+            // read. Either way the entry must eventually disappear, otherwise
+            // `wants_fast_frames` would keep the UI at 30 FPS forever.
+            let limit = if job.finished.as_ref().is_some_and(|result| result.is_ok()) {
+                Duration::from_millis(2400)
+            } else {
+                Duration::from_millis(12_000)
+            };
+            if job.finished.is_some() && job.finished_at.is_some_and(|at| at.elapsed() > limit) {
+                self.job = None;
             }
         }
 
@@ -1537,7 +1540,12 @@ impl App {
     /// 30 FPS over SSH for no reason.
     pub fn wants_fast_frames(&self) -> bool {
         self.splash_until.is_some()
-            || self.job.is_some()
+            || self.job.as_ref().is_some_and(|job| {
+                job.finished.is_none()
+                    || job
+                        .finished_at
+                        .is_none_or(|at| at.elapsed() < Duration::from_millis(2400))
+            })
             || self
                 .toasts
                 .iter()
@@ -4288,6 +4296,7 @@ impl App {
             },
         ));
         progress::reset_cancel();
+        progress::set_job(id);
         if loader == "fabric" {
             jobs::start_fabric(self.tx.clone(), id, self.game_dir.clone(), version, None);
         } else {
@@ -5376,7 +5385,7 @@ impl App {
     }
 
     fn finish_job(&mut self, id: u64, result: Result<String, String>) {
-        if !self.job.as_ref().is_some_and(|job| job.id == id) {
+        if self.job.as_ref().is_none_or(|job| job.id != id) {
             return;
         }
         progress::set_job(0);
