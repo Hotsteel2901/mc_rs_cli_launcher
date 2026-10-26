@@ -319,9 +319,15 @@ impl ModManager {
     ) -> Result<(Vec<PathBuf>, serde_json::Value, serde_json::Value), String> {
         crate::info!("Resolving mod: {}...", slug);
         let loader = self.pick_loader(mc_version, loader);
-        if let Some(ref l) = loader {
-            crate::info!("Using loader: {}", l);
-        }
+        let Some(ref loader_name) = loader else {
+            // Without a loader the API returns every loader's files and the
+            // newest one wins, so a vanilla instance silently got a Forge jar.
+            return Err(format!(
+                "No mod loader is installed for {mc_version}. Install one first \
+                 (install-fabric / install-forge / install-neoforge) or pass --loader."
+            ));
+        };
+        crate::info!("Using loader: {}", loader_name);
 
         let project = modrinth::get_project_result(slug)
             .map_err(|error| format!("Cannot resolve mod '{slug}': {error}"))?;
@@ -839,6 +845,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let manager = ModManager::new(dir.path());
         assert!(manager.list_mods("1.21.4").is_empty());
+        assert!(!dir.path().join("versions").exists());
+    }
+
+    #[test]
+    fn mods_require_a_loader_before_any_network_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = ModManager::new(dir.path());
+        let error = manager
+            .install_with("sodium", "1.21.4", None, None, DependencyMode::Skip)
+            .unwrap_err();
+        assert!(error.contains("No mod loader"), "{error}");
         assert!(!dir.path().join("versions").exists());
     }
 
