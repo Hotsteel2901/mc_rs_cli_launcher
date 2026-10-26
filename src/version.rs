@@ -2,11 +2,30 @@
 use crate::error::{AppError, AppResult};
 use crate::{http, progress, util};
 use rayon::prelude::*;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 
 const MC_MANIFEST: &str = "https://launchermeta.mojang.com/mc/game/version_manifest_v2.json";
+
+/// Version rule regexes (`os.version`) are tiny and repeated across every
+/// library; compiling one per library is pure waste.
+fn rule_regex(pattern: &str) -> Option<Arc<regex::Regex>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Option<Arc<regex::Regex>>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(guard) = cache.lock() {
+        if let Some(value) = guard.get(pattern) {
+            return value.clone();
+        }
+    }
+    let compiled = regex::Regex::new(pattern).ok().map(Arc::new);
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(pattern.to_string(), compiled.clone());
+    }
+    compiled
+}
 
 struct LibraryFile {
     url: String,
@@ -192,9 +211,8 @@ impl VersionManager {
                     };
                 }
                 if let Some(pattern) = os["version"].as_str() {
-                    matches &= regex::Regex::new(pattern)
-                        .ok()
-                        .is_some_and(|re| re.is_match(util::os_version()));
+                    matches &=
+                        rule_regex(pattern).is_some_and(|re| re.is_match(util::os_version()));
                 }
             }
             if let Some(required) = rule.get("features") {
@@ -224,6 +242,7 @@ impl VersionManager {
     ) -> AppResult<(Vec<LibraryFile>, Vec<PathBuf>)> {
         let mut downloads = Vec::<LibraryFile>::new();
         let mut jars = Vec::new();
+        let mut jar_set = std::collections::HashSet::new();
         let mut seen = std::collections::HashSet::new();
         for lib in data["libraries"].as_array().into_iter().flatten() {
             if !Self::rules_allow(&lib["rules"], true) {
@@ -240,7 +259,7 @@ impl VersionManager {
              -> AppResult<()> {
                 let rel = info["path"].as_str().unwrap_or(fallback);
                 let path = util::safe_join(&self.libraries_dir, rel)?;
-                if classpath && !jars.contains(&path) {
+                if classpath && jar_set.insert(path.clone()) {
                     jars.push(path.clone());
                 }
                 if !seen.insert(path.clone()) {
@@ -293,6 +312,17 @@ impl VersionManager {
         Ok(self.plan_libraries(data)?.1)
     }
 
+    /// Every library file (including native archives) this version needs.
+    /// Used by pruning and repair to know what must stay on disk.
+    pub fn planned_files(&self, data: &serde_json::Value) -> AppResult<Vec<PathBuf>> {
+        Ok(self
+            .plan_libraries(data)?
+            .0
+            .into_iter()
+            .map(|file| file.path)
+            .collect())
+    }
+
     pub fn download_libraries(
         &self,
         data: &serde_json::Value,
@@ -320,6 +350,7 @@ impl VersionManager {
         for file in downloads.iter().filter(|d| d.native) {
             self.extract_natives(&file.path, natives_dir)?;
         }
+        crate::verify::flush();
         Ok(jars)
     }
 
@@ -408,6 +439,22 @@ impl VersionManager {
         if samples.is_empty() {
             samples.extend(downloads.keys().take(2).map(|hash| (0, hash.to_string())));
         }
+        // Older clients need named copies as well as the content-addressed
+        // store; when they do, the objects alone do not prove the stage is done.
+        let virtual_assets = index_data["virtual"].as_bool().unwrap_or(false);
+        let resources = index_data["map_to_resources"].as_bool().unwrap_or(false);
+        // Everything already verified means there is nothing to download, so
+        // skip the mirror probe and the worker pool entirely. This is the
+        // common case on the second and later launches.
+        if !virtual_assets
+            && !resources
+            && downloads
+                .iter()
+                .all(|(hash, dest)| crate::verify::is_verified(dest, hash))
+        {
+            return Ok(id.into());
+        }
+
         let sample_hashes: Vec<String> = samples.into_iter().map(|(_, hash)| hash).collect();
         // In Auto mode measure both origins once per batch instead of always
         // assuming the mirror is faster; the winner gets the whole asset stage.
@@ -464,33 +511,43 @@ impl VersionManager {
                 )));
             }
         }
-        // Older clients need named assets as well as the content-addressed store.
-        let virtual_assets = index_data["virtual"].as_bool().unwrap_or(false);
-        let resources = index_data["map_to_resources"].as_bool().unwrap_or(false);
         if virtual_assets || resources {
             let version_id = data["id"].as_str().ok_or("Missing version ID")?;
             util::validate_component(version_id)?;
-            for (name, object) in objects {
-                let hash = object["hash"].as_str().ok_or("Missing asset hash")?;
-                let source = downloads.get(hash).ok_or("Missing downloaded asset")?;
-                for root in [
-                    virtual_assets.then(|| self.assets_dir.join("virtual").join(id)),
-                    resources.then(|| self.versions_dir.join(version_id).join("resources")),
-                ]
-                .into_iter()
-                .flatten()
-                {
-                    let dest = util::safe_join(&root, name)?;
-                    if !http::cached_file_valid(&dest, Some(hash)) {
-                        util::atomic_write(&dest, &fs::read(source)?)?;
-                    }
-                }
-            }
+            let roots: Vec<PathBuf> = [
+                virtual_assets.then(|| self.assets_dir.join("virtual").join(id)),
+                resources.then(|| self.versions_dir.join(version_id).join("resources")),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            // Legacy versions need thousands of copies; do them in parallel like
+            // the object downloads instead of one file at a time.
+            let entries: Vec<(&String, &serde_json::Value)> = objects.iter().collect();
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(max_workers.clamp(1, 64))
+                .build()
+                .map_err(|e| AppError::Generic(e.to_string()))?;
+            pool.install(|| {
+                entries
+                    .par_iter()
+                    .try_for_each(|(name, object)| -> AppResult<()> {
+                        let hash = object["hash"].as_str().ok_or("Missing asset hash")?;
+                        let source = downloads.get(hash).ok_or("Missing downloaded asset")?;
+                        for root in &roots {
+                            let dest = util::safe_join(root, name)?;
+                            if !http::cached_file_valid(&dest, Some(hash)) {
+                                util::atomic_write(&dest, &fs::read(source)?)?;
+                            }
+                        }
+                        Ok(())
+                    })
+            })?;
         }
+        crate::verify::flush();
         Ok(id.into())
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

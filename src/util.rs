@@ -124,6 +124,209 @@ pub fn safe_join(root: &Path, relative: &str) -> Result<PathBuf, String> {
     Ok(root.join(relative))
 }
 
+/// Limits applied while unpacking an archive that came from the network or a
+/// user-supplied file. A few hundred kilobytes of ZIP can otherwise expand into
+/// terabytes (zip bomb) or hundreds of thousands of inodes.
+#[derive(Clone, Copy, Debug)]
+pub struct ZipLimits {
+    pub max_entries: usize,
+    pub max_file_bytes: u64,
+    pub max_total_bytes: u64,
+}
+
+impl Default for ZipLimits {
+    fn default() -> Self {
+        Self {
+            max_entries: 100_000,
+            // A single Minecraft asset or mod is never this large; the client
+            // jar is ~25 MB and the biggest modpacks stay well below 512 MB.
+            max_file_bytes: 512 * 1024 * 1024,
+            max_total_bytes: 16 * 1024 * 1024 * 1024,
+        }
+    }
+}
+
+/// Tracks how much one archive has already expanded to.
+pub struct ZipBudget {
+    limits: ZipLimits,
+    entries: usize,
+    total: u64,
+}
+
+impl ZipBudget {
+    pub fn new(limits: ZipLimits) -> Self {
+        Self {
+            limits,
+            entries: 0,
+            total: 0,
+        }
+    }
+
+    /// Reject an entry using its declared size before any bytes are written.
+    pub fn admit(&mut self, entry: &zip::read::ZipFile<'_>) -> Result<(), String> {
+        if entry.is_dir() {
+            return Ok(());
+        }
+        self.entries += 1;
+        if self.entries > self.limits.max_entries {
+            return Err(format!(
+                "Archive has more than {} entries; refusing to extract",
+                self.limits.max_entries
+            ));
+        }
+        if entry.size() > self.limits.max_file_bytes {
+            return Err(format!(
+                "Archive entry '{}' declares {} bytes, above the {} byte limit",
+                entry.name(),
+                entry.size(),
+                self.limits.max_file_bytes
+            ));
+        }
+        if self.total.saturating_add(entry.size()) > self.limits.max_total_bytes {
+            return Err(format!(
+                "Archive expands beyond the {} byte limit; refusing to extract",
+                self.limits.max_total_bytes
+            ));
+        }
+        Ok(())
+    }
+
+    /// Account for bytes actually written, which may exceed the declared size.
+    pub fn charge(&mut self, bytes: u64) -> Result<(), String> {
+        if bytes > self.limits.max_file_bytes {
+            return Err(format!(
+                "Archive entry exceeded the {} byte per-file limit",
+                self.limits.max_file_bytes
+            ));
+        }
+        self.total = self.total.saturating_add(bytes);
+        if self.total > self.limits.max_total_bytes {
+            return Err(format!(
+                "Archive expands beyond the {} byte limit; refusing to extract",
+                self.limits.max_total_bytes
+            ));
+        }
+        Ok(())
+    }
+
+    fn per_file_cap(&self) -> u64 {
+        self.limits.max_file_bytes
+    }
+}
+
+/// ZIP entries use `/`; some Windows tools emit `\`. Normalise before joining
+/// so valid archives still work, while `..`, absolute paths and drive letters
+/// remain rejected by [`safe_join`].
+pub fn zip_relative_path(name: &str) -> Result<String, String> {
+    let normalised = name.replace('\\', "/");
+    let normalised = normalised.strip_prefix("./").unwrap_or(&normalised);
+    if normalised.is_empty() {
+        return Err("Empty archive path".into());
+    }
+    if normalised.starts_with('/') {
+        return Err(format!("Absolute path in archive: {name:?}"));
+    }
+    let bytes = normalised.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        return Err(format!("Drive-qualified path in archive: {name:?}"));
+    }
+    Ok(normalised.to_string())
+}
+
+pub fn zip_entry_is_symlink(entry: &zip::read::ZipFile<'_>) -> bool {
+    entry
+        .unix_mode()
+        .is_some_and(|mode| mode & 0o170000 == 0o120000)
+}
+
+/// Stream one entry to `dest` through a private temporary file, enforcing the
+/// per-file cap even when the archive lies about the declared size.
+pub fn extract_zip_entry(
+    reader: &mut impl Read,
+    dest: &Path,
+    budget: &mut ZipBudget,
+) -> Result<u64, String> {
+    let parent = dest
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("Cannot create {}: {error}", parent.display()))?;
+    let cap = budget.per_file_cap();
+    let mut temp = tempfile::NamedTempFile::new_in(parent).map_err(|error| {
+        format!(
+            "Cannot create a temporary file in {}: {error}",
+            parent.display()
+        )
+    })?;
+    let copied = std::io::copy(&mut reader.take(cap.saturating_add(1)), &mut temp)
+        .map_err(|error| format!("Cannot extract {}: {error}", dest.display()))?;
+    budget.charge(copied)?;
+    temp.persist(dest)
+        .map_err(|error| format!("Cannot publish {}: {}", dest.display(), error.error))?;
+    Ok(copied)
+}
+
+/// Extract every entry selected by `map` under `root`. `map` receives the raw
+/// archive name and returns the destination-relative path, or `None` to skip.
+pub fn extract_zip_entries<R: Read + std::io::Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    root: &Path,
+    limits: ZipLimits,
+    mut map: impl FnMut(&str) -> Option<String>,
+) -> Result<usize, String> {
+    let mut budget = ZipBudget::new(limits);
+    let mut written = 0;
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|error| format!("Corrupt archive entry #{index}: {error}"))?;
+        if entry.is_dir() {
+            continue;
+        }
+        if zip_entry_is_symlink(&entry) {
+            return Err(format!(
+                "Archive contains a symlink ({}); refusing to extract",
+                entry.name()
+            ));
+        }
+        let Some(relative) = map(entry.name()) else {
+            continue;
+        };
+        budget.admit(&entry)?;
+        let relative = zip_relative_path(&relative)?;
+        let dest = safe_join(root, &relative)?;
+        extract_zip_entry(&mut entry, &dest, &mut budget)?;
+        written += 1;
+    }
+    Ok(written)
+}
+
+/// Append `-2`, `-3`, … before the extension until the path is free. Used for
+/// archives whose default name only has second precision.
+pub fn unique_path(path: &Path) -> PathBuf {
+    if !path.exists() {
+        return path.to_path_buf();
+    }
+    let parent = path.parent().unwrap_or(Path::new("."));
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("backup");
+    let extension = path.extension().and_then(|value| value.to_str());
+    for index in 2..10_000u32 {
+        let name = match extension {
+            Some(ext) => format!("{stem}-{index}.{ext}"),
+            None => format!("{stem}-{index}"),
+        };
+        let candidate = parent.join(name);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    path.to_path_buf()
+}
+
 pub fn absolute_path(path: &Path) -> std::io::Result<PathBuf> {
     let path = if path.is_absolute() {
         path.to_path_buf()
@@ -345,5 +548,66 @@ mod tests {
         let path = dir.path().join("partial.jar");
         fs::write(&path, b"PK\x03\x04 this is not a zip archive").unwrap();
         assert!(!is_jar_intact(&path));
+    }
+
+    #[test]
+    fn zip_names_are_normalised_and_confined() {
+        assert_eq!(zip_relative_path("a\\b\\c.txt").unwrap(), "a/b/c.txt");
+        assert_eq!(zip_relative_path("./a/b").unwrap(), "a/b");
+        for bad in ["/etc/passwd", "C:/Windows/x", "C:x", ""] {
+            assert!(zip_relative_path(bad).is_err(), "{bad}");
+        }
+        // Normalisation must not launder traversal: safe_join still rejects it.
+        assert!(safe_join(Path::new("/tmp/out"), &zip_relative_path("../x").unwrap()).is_err());
+    }
+
+    #[test]
+    fn archive_extraction_rejects_traversal_and_oversized_entries() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let write_zip = |name: &str, bytes: &[u8]| {
+            let path = dir.path().join(format!("{}.zip", name.replace('/', "_")));
+            let mut writer = zip::ZipWriter::new(fs::File::create(&path).unwrap());
+            writer
+                .start_file(name, zip::write::FileOptions::default())
+                .unwrap();
+            writer.write_all(bytes).unwrap();
+            writer.finish().unwrap();
+            path
+        };
+        let out = dir.path().join("out");
+
+        let archive = write_zip("../escape", b"x");
+        let mut handle = zip::ZipArchive::new(fs::File::open(&archive).unwrap()).unwrap();
+        let error = extract_zip_entries(&mut handle, &out, ZipLimits::default(), |name| {
+            Some(name.to_string())
+        })
+        .unwrap_err();
+        assert!(error.contains("Unsafe"), "{error}");
+        assert!(!dir.path().join("escape").exists());
+
+        let archive = write_zip("big", b"12345");
+        let mut handle = zip::ZipArchive::new(fs::File::open(&archive).unwrap()).unwrap();
+        let limits = ZipLimits {
+            max_entries: 10,
+            max_file_bytes: 4,
+            max_total_bytes: 100,
+        };
+        let error = extract_zip_entries(&mut handle, &out, limits, |name| Some(name.to_string()))
+            .unwrap_err();
+        assert!(error.contains("limit"), "{error}");
+        assert!(!out.join("big").exists());
+    }
+
+    #[test]
+    fn unique_path_never_overwrites() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("save.zip");
+        assert_eq!(unique_path(&first), first);
+        fs::write(&first, b"1").unwrap();
+        let second = unique_path(&first);
+        assert_eq!(second, dir.path().join("save-2.zip"));
+        fs::write(&second, b"2").unwrap();
+        assert_eq!(unique_path(&first), dir.path().join("save-3.zip"));
     }
 }

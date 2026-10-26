@@ -17,6 +17,7 @@ mod instance;
 mod java;
 mod launcher;
 pub mod log;
+mod maintenance;
 mod mod_manager;
 mod modrinth;
 mod neoforge;
@@ -24,6 +25,7 @@ mod progress;
 mod tui;
 mod update;
 mod util;
+mod verify;
 mod version;
 
 use std::path::PathBuf;
@@ -46,21 +48,34 @@ use crate::version::VersionManager;
 
 /// Parse a RAM string like "4G", "2048M", or plain integer in MB.
 fn parse_ram(value: &str) -> Result<u32, String> {
-    let value = value.trim().to_uppercase();
-    let re = regex::Regex::new(r"^(\d+(?:\.\d+)?)\s*(G|GB|M|MB)?$").unwrap();
-    let caps = re.captures(&value).ok_or_else(|| {
-        format!(
-            "Invalid RAM value: '{}'. Use format like 4G, 2048M, or a plain number.",
-            value
-        )
-    })?;
-    let num: f64 = caps[1].parse().unwrap_or(0.0);
-    let unit = caps.get(2).map(|m| m.as_str()).unwrap_or("M");
-    let mb = if unit.starts_with('G') {
-        num * 1024.0
+    let original = value.trim();
+    let upper = original.to_ascii_uppercase();
+    // Accept the same grammar as the old regex: decimal number + optional
+    // G/GB/M/MB. Parsing by hand avoids compiling a regex for every CLI run.
+    let (number, scale) = if let Some(rest) = upper.strip_suffix("GB") {
+        (rest, 1024.0)
+    } else if let Some(rest) = upper.strip_suffix('G') {
+        (rest, 1024.0)
+    } else if let Some(rest) = upper.strip_suffix("MB") {
+        (rest, 1.0)
+    } else if let Some(rest) = upper.strip_suffix('M') {
+        (rest, 1.0)
     } else {
-        num
+        (upper.as_str(), 1.0)
     };
+    let number = number.trim();
+    if number.is_empty()
+        || number.matches('.').count() > 1
+        || !number.chars().all(|c| c.is_ascii_digit() || c == '.')
+    {
+        return Err(format!(
+            "Invalid RAM value: '{original}'. Use format like 4G, 2048M, or a plain number."
+        ));
+    }
+    let num: f64 = number.parse().map_err(|_| {
+        format!("Invalid RAM value: '{original}'. Use format like 4G, 2048M, or a plain number.")
+    })?;
+    let mb = num * scale;
     if !mb.is_finite() || mb < util::MIN_RAM_MB as f64 || mb > util::MAX_RAM_MB as f64 {
         return Err(format!(
             "RAM must be between {} MB and {} MB",
@@ -278,6 +293,9 @@ fn build_cli() -> Command {
                 .action(ArgAction::SetTrue),
         )
         .arg(arg!(--bmcl "Use BMCLAPI where supported (大陆用户推荐)").action(ArgAction::SetTrue))
+        .arg(
+            arg!(--proxy <URL> "HTTP(S) proxy, e.g. http://127.0.0.1:7890 (also reads HTTPS_PROXY)"),
+        )
         .arg(arg!(--"device-code" "Use device code login").action(ArgAction::SetTrue))
         .arg(
             arg!(--limit <N> "Max search results")
@@ -352,6 +370,10 @@ fn build_cli() -> Command {
         )
         .arg(arg!(--browse "Browse popular projects without a query").action(ArgAction::SetTrue))
         .arg(
+            arg!(--deep "Re-hash cached files instead of only checking presence (repair)")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
             arg!(--enable "Enable a downloaded resource pack or shader pack")
                 .action(ArgAction::SetTrue),
         )
@@ -412,6 +434,10 @@ fn build_cli() -> Command {
                     "disable-shader",
                     "import-shader",
                     "delete-shader",
+                    "doctor",
+                    "prune",
+                    "repair",
+                    "completions",
                     "tui",
                     "ui",
                 ]),
@@ -457,6 +483,10 @@ fn main() {
     reset_sigpipe();
     let matches = build_cli().get_matches();
     crate::log::set_verbose(matches.get_flag("verbose"));
+    // Must happen before the lazily-built HTTP agent handles its first request.
+    if let Some(proxy) = matches.get_one::<String>("proxy") {
+        http::set_proxy(Some(proxy)).unwrap_or_else(|error| crate::die!(error));
+    }
     if matches.get_flag("about") {
         print_about();
         return;
@@ -528,6 +558,7 @@ fn main() {
     let category = matches.get_one::<String>("category").cloned();
     let browse = matches.get_flag("browse");
     let enable_pack = matches.get_flag("enable");
+    let deep = matches.get_flag("deep");
 
     // Resolve source mode: manual > auto-detect
     let manual_mode = if official_flag && bmcl_flag {
@@ -583,10 +614,10 @@ fn main() {
     match action.as_str() {
         "logout" => cmd_logout(&mut launcher),
         "accounts" => cmd_accounts(&launcher),
-        "list-versions" => cmd_list_versions(),
+        "list-versions" => cmd_list_versions(json_output),
         "list-loaders" => cmd_list_loaders(),
-        "list-installed" => cmd_list_installed(&game_dir, &launcher),
-        "list-mods" => cmd_list_mods(&game_dir, mc_version),
+        "list-installed" => cmd_list_installed(&game_dir, &launcher, json_output),
+        "list-mods" => cmd_list_mods(&game_dir, mc_version, json_output),
         "search" => cmd_search(
             &game_dir,
             query,
@@ -686,7 +717,7 @@ fn main() {
         "login" => cmd_login(&mut launcher, device_code),
         "offline" => cmd_offline(&mut launcher, query.as_deref().unwrap_or("Steve")),
         "download" => cmd_download(&mut launcher, mc_version.as_deref(), no_assets),
-        "list-java" => cmd_list_java(&game_dir, mc_version.clone()),
+        "list-java" => cmd_list_java(&game_dir, mc_version.clone(), json_output),
         "install-java" => cmd_install_java(&game_dir, java_major, threads),
         "remove-version" | "delete-version" => {
             let id = instance_arg(&query, &mc_version);
@@ -738,12 +769,16 @@ fn main() {
             apply_updates,
             include_disabled,
         ),
-        "diagnose" => cmd_diagnose(&game_dir, query.clone().or_else(|| mc_version.clone())),
+        "diagnose" => cmd_diagnose(
+            &game_dir,
+            query.clone().or_else(|| mc_version.clone()),
+            json_output,
+        ),
         "backup" => {
             let id = instance_arg(&query, &mc_version);
             cmd_backup(&game_dir, &id, with_mods);
         }
-        "list-backups" => cmd_list_backups(&game_dir),
+        "list-backups" => cmd_list_backups(&game_dir, json_output),
         "restore-backup" => {
             let archive = query.clone().unwrap_or_else(|| {
                 crate::die!(
@@ -888,6 +923,10 @@ fn main() {
             };
             cmd_play(&mut launcher, options);
         }
+        "doctor" => cmd_doctor(&game_dir, json_output),
+        "prune" => cmd_prune(&game_dir, json_output, assume_yes),
+        "repair" => cmd_repair(&mut launcher, &game_dir, json_output, deep, assume_yes),
+        "completions" => cmd_completions(query.as_deref()),
         "tui" => {
             let explicit_ram = matches.value_source("ram") == Some(ValueSource::CommandLine);
             let explicit_threads =
@@ -988,8 +1027,7 @@ fn cmd_accounts(launcher: &MinecraftLauncher) {
     }
 }
 
-fn cmd_list_versions() {
-    crate::log::header("Minecraft Versions (from Modrinth)");
+fn cmd_list_versions(json: bool) {
     let versions = mr::list_game_versions();
     let mut arr: Vec<_> = versions.as_array().cloned().unwrap_or_default();
     arr.sort_by(|a, b| {
@@ -998,6 +1036,18 @@ fn cmd_list_versions() {
             .unwrap_or("")
             .cmp(a["date"].as_str().unwrap_or(""))
     });
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "total": arr.len(),
+                "versions": arr,
+            }))
+            .unwrap_or_default()
+        );
+        return;
+    }
+    crate::log::header("Minecraft Versions (from Modrinth)");
 
     for v in &arr {
         let marker = if v["major"].as_bool().unwrap_or(false) {
@@ -1038,9 +1088,52 @@ fn cmd_list_loaders() {
     );
 }
 
-fn cmd_list_installed(game_dir: &std::path::Path, launcher: &MinecraftLauncher) {
-    crate::log::header("Locally Installed Minecraft Versions");
+fn cmd_list_installed(game_dir: &std::path::Path, launcher: &MinecraftLauncher, json: bool) {
     let instances = InstanceManager::new(game_dir).list();
+    // Read account metadata without touching the OS keychain: listing must not
+    // trigger a keychain prompt or a slow D-Bus round trip.
+    let account = launcher.accounts.default_key().and_then(|key| {
+        launcher
+            .accounts
+            .accounts()
+            .get(&key)
+            .map(|value| (key, value))
+    });
+    if json {
+        let account = account
+            .as_ref()
+            .map(|(key, value)| {
+                serde_json::json!({
+                    "key": key,
+                    "username": value["username"],
+                    "type": value["type"],
+                })
+            })
+            .unwrap_or(serde_json::Value::Null);
+        let value = serde_json::json!({
+            "account": account,
+            "total": instances.len(),
+            "instances": instances.iter().map(|detail| serde_json::json!({
+                "id": detail.id,
+                "base": detail.base,
+                "name": detail.name,
+                "java_major": detail.java_major,
+                "loaders": detail.loaders,
+                "jar_size": detail.jar_size,
+                "total_size": detail.total_size,
+                "saves_size": detail.saves_size,
+                "mods_enabled": detail.mods_enabled,
+                "mods_disabled": detail.mods_disabled,
+                "last_played": detail.last_played.and_then(|time| time.duration_since(UNIX_EPOCH).ok()).map(|age| age.as_secs()),
+            })).collect::<Vec<_>>(),
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&value).unwrap_or_default()
+        );
+        return;
+    }
+    crate::log::header("Locally Installed Minecraft Versions");
     if instances.is_empty() {
         crate::warn_msg!("No versions installed.");
         crate::info!("Download one: hot-rs-launcher download -v <version>");
@@ -1082,7 +1175,7 @@ fn cmd_list_installed(game_dir: &std::path::Path, launcher: &MinecraftLauncher) 
     }
 
     println!("\n  Total: {} instance(s)", instances.len());
-    if let Some(acc) = launcher.accounts.get_default() {
+    if let Some((_, acc)) = &account {
         println!(
             "  Account: {} ({})",
             acc["username"].as_str().unwrap_or("?"),
@@ -1093,12 +1186,28 @@ fn cmd_list_installed(game_dir: &std::path::Path, launcher: &MinecraftLauncher) 
     }
 }
 
-fn cmd_list_mods(game_dir: &std::path::Path, mc_version: Option<String>) {
-    let mc_version = resolve_mc_version(mc_version, game_dir);
-    crate::log::header(&format!("Mods for {}", mc_version));
-
+fn cmd_list_mods(game_dir: &std::path::Path, mc_version: Option<String>, json: bool) {
+    let mc_version = resolve_mc_version_quiet(mc_version, game_dir, json);
     let mm = ModManager::new(game_dir);
     let mods = mm.list_mods(&mc_version);
+    if json {
+        let value = serde_json::json!({
+            "instance": mc_version,
+            "mods": mods.iter().map(|(name, enabled, size)| serde_json::json!({
+                "file": name,
+                "enabled": enabled,
+                "size": size,
+            })).collect::<Vec<_>>(),
+            "enabled": mods.iter().filter(|(_, enabled, _)| *enabled).count(),
+            "disabled": mods.iter().filter(|(_, enabled, _)| !*enabled).count(),
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&value).unwrap_or_default()
+        );
+        return;
+    }
+    crate::log::header(&format!("Mods for {}", mc_version));
     if mods.is_empty() {
         crate::warn_msg!("No mods installed for {}.", mc_version);
         crate::info!(
@@ -2315,11 +2424,18 @@ fn instance_arg(query: &Option<String>, mc_version: &Option<String>) -> String {
 }
 
 fn format_size(bytes: u64) -> String {
-    let mb = bytes as f64 / 1_048_576.0;
-    if mb >= 1024.0 {
-        format!("{:.1} GB", mb / 1024.0)
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    let value = bytes as f64;
+    if value >= GB {
+        format!("{:.1} GB", value / GB)
+    } else if value >= MB {
+        format!("{:.1} MB", value / MB)
+    } else if value >= KB {
+        format!("{:.1} KB", value / KB)
     } else {
-        format!("{:.1} MB", mb)
+        format!("{bytes} B")
     }
 }
 
@@ -2338,13 +2454,12 @@ fn sync_active_version(game_dir: &std::path::Path, from: &str, to: Option<&str>)
     }
 }
 
-fn cmd_list_java(game_dir: &std::path::Path, mc_version: Option<String>) {
-    crate::log::header("Detected Java Runtimes");
-    let required = mc_version.and_then(|id| {
+fn cmd_list_java(game_dir: &std::path::Path, mc_version: Option<String>, json: bool) {
+    let required = mc_version.as_ref().and_then(|id| {
         std::fs::read(
             game_dir
                 .join("versions")
-                .join(&id)
+                .join(id)
                 .join(format!("{id}.json")),
         )
         .ok()
@@ -2353,6 +2468,29 @@ fn cmd_list_java(game_dir: &std::path::Path, mc_version: Option<String>) {
         .map(|major| major as u32)
     });
     let infos = java::detect_java(Some(game_dir));
+    let recommended = required
+        .and_then(|major| java::best_java(&infos, Some(major)).map(|info| info.path.clone()));
+    if json {
+        let value = serde_json::json!({
+            "required": required,
+            "recommended": recommended,
+            "javas": infos.iter().map(|info| serde_json::json!({
+                "path": info.path,
+                "major": info.major,
+                "version": info.version,
+                "vendor": info.vendor,
+                "arch": info.arch,
+                "origin": info.origin.label(),
+                "recommended": Some(&info.path) == recommended.as_ref(),
+            })).collect::<Vec<_>>(),
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&value).unwrap_or_default()
+        );
+        return;
+    }
+    crate::log::header("Detected Java Runtimes");
     if infos.is_empty() {
         crate::warn_msg!("No Java runtime found.");
         crate::info!("Install Mojang's runtime: hot-rs-launcher install-java --java-major 21");
@@ -2360,8 +2498,6 @@ fn cmd_list_java(game_dir: &std::path::Path, mc_version: Option<String>) {
     }
     // Only mark a recommendation when a version requirement is known; without
     // one the newest runtime is not necessarily the right choice.
-    let recommended = required
-        .and_then(|major| java::best_java(&infos, Some(major)).map(|info| info.path.clone()));
     for info in &infos {
         let marker = if Some(&info.path) == recommended.as_ref() {
             " *"
@@ -2615,7 +2751,7 @@ fn cmd_update_mods(
     }
 }
 
-fn cmd_diagnose(game_dir: &std::path::Path, id: Option<String>) {
+fn cmd_diagnose(game_dir: &std::path::Path, id: Option<String>, json: bool) {
     let id = id.unwrap_or_else(|| {
         let installed = ModManager::list_installed_versions(game_dir);
         installed.last().cloned().unwrap_or_else(|| {
@@ -2625,13 +2761,257 @@ fn cmd_diagnose(game_dir: &std::path::Path, id: Option<String>) {
             )
         })
     });
+    let diagnosis = crate::diagnose::analyze_instance(game_dir, &id);
+    if json {
+        let value = match &diagnosis {
+            Some(diagnosis) => serde_json::json!({
+                "instance": id,
+                "source": diagnosis.source,
+                "findings": diagnosis.findings.iter().map(|finding| serde_json::json!({
+                    "severity": match finding.severity {
+                        crate::diagnose::Severity::Info => "info",
+                        crate::diagnose::Severity::Warn => "warn",
+                        crate::diagnose::Severity::Error => "error",
+                    },
+                    "title": finding.title,
+                    "title_en": finding.title_en,
+                    "detail": finding.detail,
+                    "hint": finding.hint,
+                    "hint_en": finding.hint_en,
+                })).collect::<Vec<_>>(),
+                "excerpt": diagnosis.excerpt,
+            }),
+            None => serde_json::json!({
+                "instance": id,
+                "source": null,
+                "findings": [],
+                "excerpt": [],
+            }),
+        };
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&value).unwrap_or_default()
+        );
+        return;
+    }
     crate::log::header(&format!("Diagnose {}", id));
-    match crate::diagnose::analyze_instance(game_dir, &id) {
+    match diagnosis {
         Some(diagnosis) => print!("{}", crate::diagnose::render(&diagnosis)),
         None => {
             crate::warn_msg!("No crash report or logs/latest.log found for '{}'.", id);
             crate::info!("Launch the instance once, then run diagnose again.");
         }
+    }
+}
+
+fn cmd_doctor(game_dir: &std::path::Path, json: bool) {
+    let report = maintenance::doctor(game_dir);
+    if json {
+        let value = serde_json::json!({
+            "ok": report.failures() == 0,
+            "failures": report.failures(),
+            "warnings": report.warnings(),
+            "checks": report.checks.iter().map(|check| serde_json::json!({
+                "name": check.name,
+                "status": check.status.as_str(),
+                "detail": check.detail,
+                "hint": check.hint,
+            })).collect::<Vec<_>>(),
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&value).unwrap_or_default()
+        );
+        if report.failures() > 0 {
+            std::process::exit(1);
+        }
+        return;
+    }
+    crate::log::header("Environment Check");
+    for check in &report.checks {
+        let color = match check.status {
+            maintenance::Status::Ok => "\x1b[92m",
+            maintenance::Status::Warn => "\x1b[93m",
+            maintenance::Status::Fail => "\x1b[91m",
+            maintenance::Status::Skip => "\x1b[90m",
+        };
+        println!(
+            "  {} {:<22} {}",
+            crate::log::clr(color, &format!("[{}]", check.status.label())),
+            check.name,
+            check.detail
+        );
+        if let Some(hint) = &check.hint {
+            println!("       {} {}", crate::log::clr("\x1b[90m", "→"), hint);
+        }
+    }
+    println!();
+    if report.failures() > 0 {
+        crate::warn_msg!(
+            "{} failure(s), {} warning(s).",
+            report.failures(),
+            report.warnings()
+        );
+        std::process::exit(1);
+    }
+    crate::success!(
+        "{} check(s) passed, {} warning(s).",
+        report.checks.len(),
+        report.warnings()
+    );
+}
+
+fn cmd_prune(game_dir: &std::path::Path, json: bool, apply: bool) {
+    let plan = maintenance::plan_prune(game_dir)
+        .unwrap_or_else(|e| crate::die!(format!("Prune scan failed: {e}")));
+    if !plan.unreadable.is_empty() {
+        crate::die!(format!(
+            "Refusing to prune: {} instance(s) have unreadable metadata ({}). \
+             Repair them first; deleting libraries they might use could break launching.",
+            plan.unreadable.len(),
+            plan.unreadable.join(", ")
+        ));
+    }
+    let outcome = if apply {
+        Some(
+            maintenance::apply_prune(&plan)
+                .unwrap_or_else(|e| crate::die!(format!("Prune failed: {e}"))),
+        )
+    } else {
+        None
+    };
+    if json {
+        let value = serde_json::json!({
+            "applied": apply,
+            "reclaimable": plan.bytes,
+            "libraries": plan.libraries,
+            "assets": plan.assets,
+            "deleted": outcome.map(|(deleted, _)| deleted),
+            "freed": outcome.map(|(_, bytes)| bytes),
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&value).unwrap_or_default()
+        );
+        return;
+    }
+    crate::log::header("Prune Unused Cache");
+    if plan.is_empty() {
+        crate::success!("Nothing to prune: every cached library and asset is referenced.");
+        return;
+    }
+    println!("  Libraries:   {} file(s)", plan.libraries.len());
+    println!("  Assets:      {} file(s)", plan.assets.len());
+    println!("  Reclaimable: {}", format_size(plan.bytes));
+    if let Some((deleted, bytes)) = outcome {
+        crate::success!("Deleted {} file(s), freed {}.", deleted, format_size(bytes));
+    } else {
+        crate::info!("Dry run: nothing was deleted. Re-run with --yes to clean up.");
+    }
+}
+
+fn cmd_repair(
+    launcher: &mut MinecraftLauncher,
+    game_dir: &std::path::Path,
+    json: bool,
+    deep: bool,
+    apply: bool,
+) {
+    let health = maintenance::inspect_instances(game_dir, deep);
+    let broken: Vec<&maintenance::InstanceHealth> =
+        health.iter().filter(|item| !item.healthy()).collect();
+    let mut repaired = Vec::new();
+    let mut failed = Vec::new();
+    if apply {
+        for item in &broken {
+            crate::info!("Repairing {}...", item.id);
+            match launcher.download_version(Some(&item.id), false) {
+                Ok(_) => repaired.push(item.id.clone()),
+                Err(error) => failed.push(format!("{}: {error}", item.id)),
+            }
+        }
+        crate::verify::flush();
+    }
+    if json {
+        let value = serde_json::json!({
+            "checked": health.len(),
+            "apply": apply,
+            "instances": health.iter().map(|item| serde_json::json!({
+                "id": item.id,
+                "healthy": item.healthy(),
+                "issues": item.issues,
+            })).collect::<Vec<_>>(),
+            "repaired": repaired,
+            "failed": failed,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&value).unwrap_or_default()
+        );
+        if !failed.is_empty() {
+            std::process::exit(1);
+        }
+        return;
+    }
+    crate::log::header("Repair Instances");
+    if health.is_empty() {
+        crate::warn_msg!("No instances installed; nothing to check.");
+        return;
+    }
+    for item in &health {
+        if item.healthy() {
+            println!("  [OK]   {}", item.id);
+        } else {
+            println!("  [FAIL] {}", item.id);
+            for issue in &item.issues {
+                println!("         - {issue}");
+            }
+        }
+    }
+    if broken.is_empty() {
+        crate::success!("All {} instance(s) are complete.", health.len());
+        return;
+    }
+    if !apply {
+        crate::info!(
+            "Dry run: {} instance(s) need repair. Re-run with --yes to download missing files.",
+            broken.len()
+        );
+        return;
+    }
+    if failed.is_empty() {
+        crate::success!("Repaired {} instance(s).", repaired.len());
+    } else {
+        crate::error_msg!(
+            "{} instance(s) repaired, {} failed: {}",
+            repaired.len(),
+            failed.len(),
+            failed.join("; ")
+        );
+        std::process::exit(1);
+    }
+}
+
+fn cmd_completions(shell: Option<&str>) {
+    use clap_complete::{generate, shells};
+    let shell = shell.unwrap_or_else(|| {
+        crate::die!(
+            "Specify a shell.",
+            "Example: hot-rs-launcher completions fish > ~/.config/fish/completions/hot-rs-launcher.fish"
+        )
+    });
+    let mut command = build_cli();
+    let bin = command.get_name().to_string();
+    let mut stdout = std::io::stdout();
+    match shell {
+        "bash" => generate(shells::Bash, &mut command, bin, &mut stdout),
+        "zsh" => generate(shells::Zsh, &mut command, bin, &mut stdout),
+        "fish" => generate(shells::Fish, &mut command, bin, &mut stdout),
+        "powershell" | "pwsh" => generate(shells::PowerShell, &mut command, bin, &mut stdout),
+        "elvish" => generate(shells::Elvish, &mut command, bin, &mut stdout),
+        other => crate::die!(format!(
+            "Unsupported shell '{other}'. Use bash, zsh, fish, powershell or elvish."
+        )),
     }
 }
 
@@ -2649,9 +3029,26 @@ fn cmd_backup(game_dir: &std::path::Path, id: &str, with_mods: bool) {
     );
 }
 
-fn cmd_list_backups(game_dir: &std::path::Path) {
+fn cmd_list_backups(game_dir: &std::path::Path, json: bool) {
     let manager = InstanceManager::new(game_dir);
     let backups = manager.list_backups();
+    if json {
+        let value = serde_json::json!({
+            "directory": manager.game_dir.join("backups"),
+            "total": backups.len(),
+            "backups": backups.iter().map(|(path, size, modified)| serde_json::json!({
+                "name": path.file_name().map(|name| name.to_string_lossy().to_string()),
+                "path": path,
+                "size": size,
+                "created": modified.and_then(|time| time.duration_since(UNIX_EPOCH).ok()).map(|age| age.as_secs()),
+            })).collect::<Vec<_>>(),
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&value).unwrap_or_default()
+        );
+        return;
+    }
     crate::log::header("Backups");
     if backups.is_empty() {
         crate::warn_msg!("No backups yet.");

@@ -17,16 +17,63 @@ const USER_AGENT: &str = concat!("hot-rs-launcher/", env!("CARGO_PKG_VERSION"));
 /// to pay a fresh TCP+TLS handshake per file. ureq's default per-host idle
 /// limit is one, so raise it to cover the worker pool.
 static HTTP_AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+/// Optional explicit proxy (`--proxy` or `HTTPS_PROXY`). Must be set before the
+/// first request; the agent is built lazily and kept for the process lifetime.
+static PROXY_URL: OnceLock<Option<String>> = OnceLock::new();
+
+/// Configure an HTTP(S) proxy for every subsequent request. Socks proxies need
+/// ureq's optional `socks` feature, so they are rejected with a clear message.
+pub fn set_proxy(url: Option<&str>) -> Result<(), String> {
+    let cleaned = url.map(str::trim).filter(|value| !value.is_empty());
+    if let Some(value) = cleaned {
+        let lower = value.to_ascii_lowercase();
+        if lower.starts_with("socks") {
+            return Err(
+                "SOCKS proxies are not supported by this build; use an HTTP(S) proxy".into(),
+            );
+        }
+        if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+            return Err(format!("Invalid proxy URL: {value}"));
+        }
+    }
+    let _ = PROXY_URL.set(cleaned.map(String::from));
+    Ok(())
+}
+
+fn env_proxy() -> Option<String> {
+    [
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ]
+    .iter()
+    .find_map(|name| {
+        std::env::var(name)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    })
+}
 
 fn http_agent() -> &'static ureq::Agent {
     HTTP_AGENT.get_or_init(|| {
-        ureq::AgentBuilder::new()
+        let mut builder = ureq::AgentBuilder::new()
             .max_idle_connections(512)
             .max_idle_connections_per_host(128)
             .timeout_connect(Duration::from_secs(10))
             .timeout_read(Duration::from_secs(60))
-            .timeout_write(Duration::from_secs(30))
-            .build()
+            .timeout_write(Duration::from_secs(30));
+        let proxy = PROXY_URL.get().cloned().flatten().or_else(env_proxy);
+        if let Some(url) = proxy {
+            match ureq::Proxy::new(&url) {
+                Ok(proxy) => builder = builder.proxy(proxy),
+                Err(error) => crate::warn_msg!("Ignoring unusable proxy {url}: {error}"),
+            }
+        }
+        builder.build()
     })
 }
 
@@ -172,9 +219,16 @@ pub fn http_request_no_mirror(
         } else {
             request.call()
         };
+        let mut retry_after = None;
         last = match response {
             Ok(response) | Err(ureq::Error::Status(_, response)) => {
                 let status = response.status();
+                // Honour server back-pressure instead of guessing: 429/503 often
+                // carry the delay the server actually wants.
+                retry_after = response
+                    .header("Retry-After")
+                    .and_then(|value| value.trim().parse::<u64>().ok())
+                    .map(|seconds| seconds.min(30));
                 let mut body = Vec::new();
                 match response.into_reader().read_to_end(&mut body) {
                     Ok(_) => Ok((status, body)),
@@ -191,7 +245,10 @@ pub fn http_request_no_mirror(
             return last;
         }
         if attempt + 1 < max_retries {
-            std::thread::sleep(Duration::from_secs(1 << attempt.min(4)));
+            let backoff = retry_after.unwrap_or(1u64 << attempt.min(4));
+            std::thread::sleep(Duration::from_millis(
+                backoff.saturating_mul(1000) + retry_jitter_ms(),
+            ));
         }
     }
     // Preserve the actual status and body (OAuth callers need error bodies).
@@ -211,18 +268,67 @@ pub fn http_post_form(url: &str, data: &[u8]) -> HttpResult {
     http_request_no_mirror("POST", url, Some(data), None, None, 30, 3)
 }
 
+/// Reachability probe for diagnostics. Returns the status even for 4xx/5xx;
+/// only transport failures are errors.
+pub fn probe_url(url: &str, timeout_secs: u64) -> Result<u16, String> {
+    match http_agent()
+        .get(url)
+        .timeout(Duration::from_secs(timeout_secs))
+        .set("User-Agent", USER_AGENT)
+        .call()
+    {
+        Ok(response) => Ok(response.status()),
+        Err(ureq::Error::Status(status, _)) => Ok(status),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn retry_jitter_ms() -> u64 {
+    let mut bytes = [0u8; 2];
+    if getrandom::getrandom(&mut bytes).is_ok() {
+        u64::from(u16::from_le_bytes(bytes)) % 400
+    } else {
+        0
+    }
+}
+
 pub fn cached_file_valid(path: &Path, sha1: Option<&str>) -> bool {
     if !path.is_file() {
         return false;
     }
     if let Some(hash) = sha1 {
-        return util::sha1_file(path).is_ok_and(|actual| actual.eq_ignore_ascii_case(hash));
+        if crate::verify::is_verified(path, hash) {
+            return true;
+        }
+        let valid = util::sha1_file(path).is_ok_and(|actual| actual.eq_ignore_ascii_case(hash));
+        if valid {
+            crate::verify::record(path, hash);
+        }
+        return valid;
     }
     match path.extension().and_then(|e| e.to_str()) {
-        Some("jar" | "zip") => util::is_jar_intact(path),
-        Some("json") => fs::read(path)
-            .ok()
-            .is_some_and(|data| serde_json::from_slice::<serde_json::Value>(&data).is_ok()),
+        Some("jar" | "zip") => {
+            if crate::verify::is_verified(path, crate::verify::ZIP_MARKER) {
+                return true;
+            }
+            let valid = util::is_jar_intact(path);
+            if valid {
+                crate::verify::record(path, crate::verify::ZIP_MARKER);
+            }
+            valid
+        }
+        Some("json") => {
+            if crate::verify::is_verified(path, crate::verify::JSON_MARKER) {
+                return true;
+            }
+            let valid = fs::read(path)
+                .ok()
+                .is_some_and(|data| serde_json::from_slice::<serde_json::Value>(&data).is_ok());
+            if valid {
+                crate::verify::record(path, crate::verify::JSON_MARKER);
+            }
+            valid
+        }
         // No hash/format information: do not trust arbitrary pre-existing bytes.
         _ => false,
     }
@@ -483,6 +589,20 @@ fn download_once(
                 .map_err(|e| format!("Invalid JSON: {e}"))?;
         }
         temp.persist(dest).map_err(|e| e.error.to_string())?;
+        // The temp file was just verified; record that state so the next run
+        // does not re-hash the whole cache.
+        match sha1 {
+            Some(expected) => crate::verify::record(dest, expected),
+            None => {
+                if let Some(marker) = match dest.extension().and_then(|v| v.to_str()) {
+                    Some("jar" | "zip") => Some(crate::verify::ZIP_MARKER),
+                    Some("json") => Some(crate::verify::JSON_MARKER),
+                    _ => None,
+                } {
+                    crate::verify::record(dest, marker);
+                }
+            }
+        }
         progress::transfer(&transfer_id, label, copied, Some(copied), true);
         Ok(())
     })();

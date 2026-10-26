@@ -1,8 +1,11 @@
 //! Java detection and Mojang runtime download.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
 
@@ -12,8 +15,49 @@ use crate::util;
 const MOJANG_JAVA_MANIFEST: &str =
     "https://launchermeta.mojang.com/v1/products/java-runtime/2ec0cc96c44e5a76b9c8b7c39df7210883d12871/all.json";
 
+/// Spawning `java -version` costs 30–200 ms and a launcher asks for the same
+/// answer several times per run (candidate scan, selection, logging). Keep the
+/// answer in memory, and persist it next to the other verification records so
+/// the second run does not spawn anything at all. A Java upgrade changes the
+/// binary's size/mtime, which invalidates the record automatically.
+const JAVA_PROBE_TTL: Duration = Duration::from_secs(30);
+const JAVA_MARKER: &str = "!java:";
+
+type MajorCache = Mutex<HashMap<String, Option<u32>>>;
+
+fn process_cache() -> &'static MajorCache {
+    static CACHE: OnceLock<MajorCache> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 /// Get the Java major version number.
 pub fn java_major(java_path: &str) -> Option<u32> {
+    if let Ok(cache) = process_cache().lock() {
+        if let Some(&value) = cache.get(java_path) {
+            return value;
+        }
+    }
+    if let Some(major) = crate::verify::lookup(Path::new(java_path))
+        .as_deref()
+        .and_then(|record| record.strip_prefix(JAVA_MARKER))
+        .and_then(|value| value.parse::<u32>().ok())
+    {
+        if let Ok(mut cache) = process_cache().lock() {
+            cache.insert(java_path.to_string(), Some(major));
+        }
+        return Some(major);
+    }
+    let value = probe_java_major(java_path);
+    if let Ok(mut cache) = process_cache().lock() {
+        cache.insert(java_path.to_string(), value);
+    }
+    if let Some(major) = value {
+        crate::verify::record(Path::new(java_path), &format!("{JAVA_MARKER}{major}"));
+    }
+    value
+}
+
+fn probe_java_major(java_path: &str) -> Option<u32> {
     let output = Command::new(java_path).arg("-version").output().ok()?;
 
     if !output.status.success() {
@@ -25,9 +69,14 @@ pub fn java_major(java_path: &str) -> Option<u32> {
         String::from_utf8_lossy(&output.stdout)
     );
     // Match "version "1.8.0_..." or "version "17.0.1"..."
-    let re = regex::Regex::new(r#"version "(?:1\.)?(\d+)"#).ok()?;
+    let re = java_version_regex();
     let cap = re.captures(&text)?;
     cap.get(1)?.as_str().parse().ok()
+}
+
+fn java_version_regex() -> &'static regex::Regex {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| regex::Regex::new(r#"version "(?:1\.)?(\d+)"#).expect("static regex"))
 }
 
 /// Resolve relative executable paths before the game's working directory changes.
@@ -40,8 +89,29 @@ pub fn executable_path(path: &str) -> std::io::Result<String> {
     }
 }
 
-/// Find all Java candidates on the system.
+/// Find all Java candidates on the system. Cached briefly: a picker or a
+/// settings change must not rescan the filesystem on every key press, while an
+/// installed JDK still shows up within half a minute.
+type CandidateCache = Mutex<Option<(Instant, Vec<String>)>>;
+
 pub fn find_java_candidates() -> Vec<String> {
+    static CACHE: OnceLock<CandidateCache> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    if let Ok(guard) = cache.lock() {
+        if let Some((at, list)) = guard.as_ref() {
+            if at.elapsed() < JAVA_PROBE_TTL {
+                return list.clone();
+            }
+        }
+    }
+    let list = scan_java_candidates();
+    if let Ok(mut guard) = cache.lock() {
+        *guard = Some((Instant::now(), list.clone()));
+    }
+    list
+}
+
+fn scan_java_candidates() -> Vec<String> {
     let java_bin = if cfg!(windows) { "java.exe" } else { "java" };
     let mut candidates: Vec<String> = Vec::new();
 
@@ -393,27 +463,33 @@ pub fn download_mojang_java(
     );
 
     let total = downloads.len();
-    let done = std::sync::atomic::AtomicUsize::new(0);
+    let completed = std::sync::atomic::AtomicUsize::new(0);
     let fail = std::sync::atomic::AtomicUsize::new(0);
+    let workers = max_workers.clamp(1, 64);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(workers)
+        .build()
+        .ok()?;
 
-    downloads.par_iter().for_each(|(url, dest, sha1)| {
-        match http::download_file(url, dest, "", sha1.as_deref(), 2, false) {
-            Ok(()) => {
-                let n = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                let f = fail.load(std::sync::atomic::Ordering::Relaxed);
-                let pct = (n + f) * 100 / total;
+    pool.install(|| {
+        downloads.par_iter().for_each(|(url, dest, sha1)| {
+            if http::download_file(url, dest, "", sha1.as_deref(), 2, false).is_err() {
+                fail.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            let n = completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            // Redraw every tenth file (and the last one) instead of for every
+            // completion, so the progress line does not become the bottleneck.
+            if n == total || n.is_multiple_of(10) {
+                let pct = n * 100 / total.max(1);
                 let filled = pct * 25 / 100;
                 let bar: String = (0..25)
                     .map(|i| if i < filled { '\u{2588}' } else { '\u{2591}' })
                     .collect();
-                print!("\r  [{:3}%] {} {}/{} files", pct, bar, n + f, total);
+                print!("\r  [{:3}%] {} {}/{} files", pct, bar, n, total);
                 use std::io::Write;
                 std::io::stdout().flush().ok();
             }
-            Err(_) => {
-                fail.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
-        }
+        });
     });
     println!();
 

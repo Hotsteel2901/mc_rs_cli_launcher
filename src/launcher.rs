@@ -214,6 +214,7 @@ pub struct MinecraftLauncher {
 impl MinecraftLauncher {
     pub fn new(game_dir: &Path, threads: usize) -> AppResult<Self> {
         let game_dir = util::absolute_path(game_dir)?;
+        crate::verify::configure(&game_dir);
         Ok(MinecraftLauncher {
             game_dir: game_dir.to_path_buf(),
             accounts: crate::account::AccountManager::new(&game_dir)?,
@@ -934,6 +935,8 @@ impl MinecraftLauncher {
         // Get Java
         let java_path = self.select_java(&version_data)?;
         let java_ver = java::java_major(&java_path);
+        // Persist the Java probe result along with any verification records.
+        crate::verify::flush();
 
         // GC presets are inserted after Java selection because ZGC flags depend
         // on the runtime version.
