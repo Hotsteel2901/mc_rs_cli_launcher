@@ -1,5 +1,36 @@
 # 验证记录
 
+## 2026-10-26 · Hot-RS-Launcher 2.8.0（本地 Linux）
+
+本轮是加固与性能专项：安全解压、校验缓存、维护命令、代理支持和一批 TUI 修复。
+
+| 验证项目 | 结果 |
+| --- | --- |
+| `cargo fmt --all -- --check` | 通过 |
+| 单元测试 | 146 / 146（另 1 个 `#[ignore]` 手动预览） |
+| CLI 集成测试 | 17 / 17 |
+| `cargo clippy --locked --all-targets -- -D warnings` | 通过 |
+| `cargo build --locked --release` | 通过 |
+| 手动 CLI 冒烟 | `doctor --json`（离线模式）、`prune --json` / `--yes`（保留被引用库与 profile JSON、删除无用库与资源）、`repair --json`（缺 client jar 时报告 FAIL）、`list-installed/list-mods/list-backups --json`、`completions fish` |
+| 真实网络（1.20.6，本机 SSD） | 首次 `download`（含 3921 个资源对象，727 MB）186 s；重复执行 0.06 s（校验缓存命中，跳过镜像探测）；`MC_LAUNCHER_NO_VERIFY_CACHE=1` 时 1.46 s（全量重算 SHA-1） |
+
+本轮改动：
+
+- **安全解压**：`.mrpack`、备份恢复、世界导入统一走 `util::extract_zip_entries`，限制条目数（10 万）、单文件（512 MiB）与总展开量（16 GiB），拒绝符号链接、绝对路径、盘符路径和 `..`，流式写入而非 `read_to_end`。世界导入先解压到 `saves/.import-*` 暂存目录，成功后才改名为可见世界，失败自动清理。
+- **集成包导入**：失败时用 `PartialDir` 删除半成品实例；`{id}.json` 与 `instance.json` 改为所有文件下载完成后才写入，避免出现「已安装但缺模组」的实例。
+- **备份原子性**：`backup`、`backup-save` 与 `.mrpack` 导出改为同目录临时文件 + `persist`，同秒重名自动追加 `-2`；失败不会截断已有归档。
+- **校验缓存**：新增 `.launcher_verify.json`，按「路径 + 大小 + 修改时间」记录已验证摘要；重复启动不再重算数万个资源对象的 SHA-1。缓存只跳过哈希，下载仍校验后原子替换；`MC_LAUNCHER_NO_VERIFY_CACHE=1` 可关闭。Java 主版本探测结果也写入同一缓存，第二次启动不再 spawn `java -version`。
+- **维护命令**：`doctor`（平台/权限/账号/实例/Java/网络/代理/孤儿存档，`--json`）、`prune`（默认预览，`--yes` 删除未引用库与资源对象，元数据不可解析时拒绝执行）、`repair`（`--deep` 重算 SHA-1，`--yes` 幂等补下）、`completions`（bash/zsh/fish/powershell/elvish）。
+- **代理**：`--proxy` 或 `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY`，拒绝 SOCKS（本构建未启用该特性）。
+- **下载健壮性**：429/503 尊重 `Retry-After`，重试加入抖动避免并发同步重试；模组文件同名但内容不同时拒绝静默覆盖；`update` 的文件名在计划阶段即校验。
+- **依赖判定**：改为读取 jar 内 `fabric.mod.json` / `mods.toml` 的 modId，文件名回退只接受版本样式后缀；`sodium-extra.jar` 不再被误判为 `sodium`。`incompatible` 依赖不再作为「可选推荐」提示安装。
+- **TUI**：加载器安装任务补上 `set_job`（下载进度不再恒为 0）；退出与 panic 路径补 `DisableMouseCapture`；`resume` 失败回滚 raw mode；退出时恢复原 panic hook；失败任务不再让界面永久保持 30 FPS；光影详情页的加载器探测改为 1.5 秒缓存并只扫描一次 mods/。
+- **实例与存储**：删除/重命名基础版本时保留仍被其他实例继承的加载器 profile；实例大小改为单次迭代遍历并缓存 5 秒；`mods_dir` 遇到非法实例 id 不再 `process::exit`，避免 TUI 线程直接终止进程。
+
+未覆盖：真实 zip bomb 的端到端下载测试（仅构造条目验证限制）、Windows/macOS 的代理与文件锁差异、真实大型整合包导入的耗时基线。
+
+---
+
 ## 2026-10-24 · Hot-RS-Launcher 2.7.0（本地 Linux）
 
 本轮新增 Modrinth 浏览下载层（模组 / 资源包 / 光影包）、光影加载器识别与提示、优化模组推荐安装，以及依赖自动安装。

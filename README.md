@@ -4,7 +4,7 @@
 
 # Hot-RS-Launcher
 
-Rust 编写的 Minecraft 命令行启动器。支持 Microsoft / 离线账号、按 Minecraft 版本隔离游戏目录、Fabric / Forge / NeoForge、Java 运行时管理、实例重命名/复制/删除、Modrinth 模组/资源包/光影包浏览与下载、优化模组推荐安装、模组更新、.mrpack 整合包导入导出、崩溃诊断、存档与资源包管理，以及备份恢复。内置可选的全屏终端前端 `hot-rs-launcher tui`，仍然只依赖 CLI 核心，不引入 GUI。
+Rust 编写的 Minecraft 命令行启动器。支持 Microsoft / 离线账号、按 Minecraft 版本隔离游戏目录、Fabric / Forge / NeoForge、Java 运行时管理、实例重命名/复制/删除、Modrinth 模组/资源包/光影包浏览与下载、优化模组推荐安装、模组更新、.mrpack 整合包导入导出、崩溃诊断、存档与资源包管理，以及备份恢复。还提供环境自检、缓存清理、实例修复和 shell 补全。内置可选的全屏终端前端 `hot-rs-launcher tui`，仍然只依赖 CLI 核心，不引入 GUI。
 
 > 离线账号不提供正版认证，不能进入要求正版认证的服务器。Microsoft 登录需要拥有 Minecraft Java Edition 的账号。
 
@@ -61,6 +61,13 @@ hot-rs-launcher search --browse -v 1.21.4 --dir ./minecraft
 hot-rs-launcher search-resourcepacks -v 1.21.4 --dir ./minecraft
 hot-rs-launcher search-shaders -v 1.21.4 --dir ./minecraft
 hot-rs-launcher optimize-mods -v 1.21.4 --limit 8 --dir ./minecraft
+
+# 自检、清理与修复
+hot-rs-launcher doctor --dir ./minecraft
+hot-rs-launcher prune --dir ./minecraft            # 只预览
+hot-rs-launcher prune --yes --dir ./minecraft      # 真正删除未引用缓存
+hot-rs-launcher repair --dir ./minecraft --deep    # 校验并重下损坏文件
+hot-rs-launcher completions fish > ~/.config/fish/completions/hot-rs-launcher.fish
 ```
 
 默认目录是可执行文件所在目录下的 `minecraft/`。`-v` / `--version` 指 **Minecraft 版本**；启动器版本使用 `--launcher-version`。`latest` 和 `latest-snapshot` 分别解析最新正式版和快照版。省略命令等同 `play`。
@@ -119,6 +126,8 @@ hot-rs-launcher download -v 1.21.4 --no-assets
 - 下载先写同目录临时文件，检查读取/写入错误、长度和元数据提供的 SHA-1，再替换目标。无摘要的 JAR/JSON 检查结构。失败保留原文件，不发布半成品。
 - 客户端、库和资源的已有缓存会重新校验可用摘要。指定已安装版本可以不访问全局版本列表；离线启动仍要求所需文件齐全，Microsoft 账号仍须有有效会话。
 - `--threads` 范围 1–64（默认 16）；`--ram` 范围 128–65536 MB（TUI 与 CLI 一致）；`--no-assets` 仅用于 `download`，后续正常启动仍会补全资源。
+- 校验结果缓存在游戏目录的 `.launcher_verify.json`，记录「路径 + 大小 + 修改时间 → 已验证摘要」。缓存命中只是跳过重复哈希，下载仍然先校验再原子替换；文件被修改后大小/时间变化会自动重新校验。删除该文件或设置 `MC_LAUNCHER_NO_VERIFY_CACHE=1` 可回到每次全量校验。
+- 代理可用 `--proxy http://127.0.0.1:7890`，未指定时读取 `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY`。SOCKS 代理需要 ureq 的额外特性，本版本会明确拒绝。
 
 ### 加载器和模组
 
@@ -216,7 +225,7 @@ hot-rs-launcher delete-resourcepack MyPack.zip -v 1.21.4 --yes
 - `backup-save` 把单个世界压成 ZIP（含 `level.dat`、区域文件和图标），默认写入 `backups/saves/`；`import-save` 接受启动器备份或原版世界压缩包，自动处理顶层文件夹、`__MACOSX` 和重名（追加 `-2`），并校验解压后存在 `level.dat`。
 - `delete-save` 需要 `--yes`；TUI 中对应操作为确认框。
 - 资源包启用状态直接读写实例 `options.txt` 的 `resourcePacks` 列表（启用时置顶，并清理 `incompatibleResourcePacks`），不会重命名文件。`import-resourcepack` 接受 `.zip` 或文件夹并校验根目录 `pack.mcmeta`；删除时同步清理 options.txt 中的引用。
-- `--json` 可用于脚本读取存档/资源包列表。
+- `--json` 可用于脚本读取存档/资源包/光影列表，以及 `list-installed`、`list-mods`、`list-java`、`list-backups`、`doctor`、`prune`、`repair`。
 
 ## 资源包、光影包与优化模组
 
@@ -273,6 +282,23 @@ hot-rs-launcher optimize-mods -v 1.21.4 --apply --yes
 - 从 Modrinth 的 `optimization` 分类按下载量取推荐项，按当前版本与加载器过滤，并标注已安装；Iris/Oculus 属于光影加载器，不会出现在该列表。
 - `--apply --yes` 批量安装缺失项，已安装的跳过，必需依赖自动安装；TUI 模组页按 `O` 触发同样的流程。
 
+## 环境自检与磁盘维护
+
+```sh
+hot-rs-launcher doctor                 # 平台、目录权限、账号、实例、Java、网络、代理
+hot-rs-launcher doctor --json          # 脚本可读；有 FAIL 时退出码为 1
+hot-rs-launcher prune                  # 列出不被任何实例引用的库和资源（只预览）
+hot-rs-launcher prune --yes            # 删除它们并报告回收空间
+hot-rs-launcher repair                 # 只检查实例是否缺文件
+hot-rs-launcher repair --yes --deep    # 重新校验 SHA-1 并补下缺失/损坏的文件
+hot-rs-launcher completions bash|zsh|fish|powershell|elvish
+```
+
+- `doctor` 从不访问钥匙串，也不会创建账号或密钥文件；网络检查失败只记为警告，离线实例仍可启动。设置 `MC_LAUNCHER_NO_NETWORK=1` 可完全跳过联网探测。
+- `prune` 默认只预览，`--yes` 才删除。它先解析每个已安装实例的版本 JSON，只删除没有任何实例引用的 `libraries/**`（保留加载器 profile JSON）与 `assets/objects/**`；任一实例元数据无法解析时会拒绝执行，避免误删。
+- `repair` 的默认检查只看文件是否存在，`--deep` 会重算 SHA-1。确认损坏后按 `--yes` 调用与 `download` 相同的幂等下载流程，不会改变实例存档或模组。
+- `completions` 输出对应 shell 的补全脚本，包含全部动作与参数。
+
 ## 启动参数
 
 ```sh
@@ -292,6 +318,7 @@ hot-rs-launcher play -v 1.21.4 --dry-run
 
 ```text
 minecraft/
+  .launcher_verify.json        # 可选：校验结果缓存（可安全删除）
   launcher_accounts.json       # 非敏感账号元数据
   launcher_tui.json            # 可选：TUI 偏好（语言、内存、窗口、源、Java 等）
   launcher_secrets.enc         # 可选：钥匙串不可用时的加密令牌（需用户同意）
