@@ -228,6 +228,18 @@ pub fn download_version_files(
         crate::util::validate_component(filename)?;
         let file_path = dest.join(filename);
         let url = f["url"].as_str().unwrap_or("");
+        // Two different projects can publish the same filename. Overwriting
+        // silently would leave a mod that looks installed but contains another
+        // project's jar.
+        if file_path.exists()
+            && !crate::http::cached_file_valid(&file_path, f["hashes"]["sha1"].as_str())
+        {
+            return Err(format!(
+                "{} already exists with different contents; move it aside or pick another version",
+                file_path.display()
+            )
+            .into());
+        }
 
         http::download_file(
             url,

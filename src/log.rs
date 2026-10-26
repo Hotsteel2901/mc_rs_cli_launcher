@@ -99,16 +99,28 @@ macro_rules! success {
 
 #[macro_export]
 macro_rules! warn_msg {
-    ($($t:tt)*) => {
-        println!("  {} {}", $crate::log::clr("\x1b[93m", "[WARN]"), format!($($t)*));
-    };
+    ($($t:tt)*) => {{
+        let message = format!($($t)*);
+        if !$crate::log::is_quiet() {
+            println!("  {} {}", $crate::log::clr("\x1b[93m", "[WARN]"), message);
+        } else {
+            // A full-screen frontend owns the terminal; a raw println would
+            // corrupt it. Frontends receive this through the notice sink.
+            $crate::progress::notice($crate::progress::NoticeLevel::Warn, &message);
+        }
+    }};
 }
 
 #[macro_export]
 macro_rules! error_msg {
-    ($($t:tt)*) => {
-        eprintln!("  {} {}", $crate::log::clr("\x1b[91m", "[ERROR]"), format!($($t)*));
-    };
+    ($($t:tt)*) => {{
+        let message = format!($($t)*);
+        if !$crate::log::is_quiet() {
+            eprintln!("  {} {}", $crate::log::clr("\x1b[91m", "[ERROR]"), message);
+        } else {
+            $crate::progress::notice($crate::progress::NoticeLevel::Error, &message);
+        }
+    }};
 }
 
 #[macro_export]
@@ -123,11 +135,13 @@ macro_rules! debug_msg {
 #[macro_export]
 macro_rules! die {
     ($msg:expr) => {{
-        $crate::error_msg!("{}", $msg);
+        // Fatal errors must always reach stderr, even in a full-screen frontend
+        // that set the quiet flag.
+        eprintln!("  {} {}", $crate::log::clr("\x1b[91m", "[ERROR]"), $msg);
         std::process::exit(1);
     }};
     ($msg:expr, $hint:expr) => {{
-        $crate::error_msg!("{}", $msg);
+        eprintln!("  {} {}", $crate::log::clr("\x1b[91m", "[ERROR]"), $msg);
         eprintln!("         {}", $crate::log::clr("\x1b[90m", $hint));
         std::process::exit(1);
     }};

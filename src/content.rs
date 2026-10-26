@@ -8,7 +8,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::Mutex;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -283,6 +284,7 @@ impl ContentManager {
                 crate::instance::utc_stamp(SystemTime::now())
             ))
         });
+        let dest = util::unique_path(&dest);
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -294,14 +296,18 @@ impl ContentManager {
             "name": info.name.unwrap_or_else(|| folder.to_string()),
             "created_at": now_epoch(),
         });
-        let file = fs::File::create(&dest)?;
-        let mut zip = zip::ZipWriter::new(file);
+        let parent = dest.parent().unwrap_or(Path::new("."));
+        let temp = tempfile::NamedTempFile::new_in(parent)?;
+        let mut zip = zip::ZipWriter::new(temp.as_file().try_clone()?);
         let options = file_options();
         zip.start_file(BACKUP_MANIFEST, options)
             .map_err(zip_error)?;
         zip.write_all(&serde_json::to_vec_pretty(&manifest)?)?;
         add_world_tree(&mut zip, &world, Path::new(""), options)?;
         zip.finish().map_err(zip_error)?;
+        temp.persist(&dest).map_err(|error| {
+            AppError::Generic(format!("Cannot write {}: {}", dest.display(), error.error))
+        })?;
         Ok(dest)
     }
 
@@ -352,43 +358,35 @@ impl ContentManager {
         fs::create_dir_all(&saves)?;
         let folder = unique_world_folder(&saves, &base);
         let target = saves.join(&folder);
-        fs::create_dir_all(&target)?;
-
-        for index in 0..zip.len() {
-            let mut entry = match zip.by_index(index) {
-                Ok(entry) => entry,
-                Err(_) => continue,
-            };
-            let entry_name = entry.name().to_string();
-            if entry_name == BACKUP_MANIFEST
-                || entry_name.ends_with('/')
-                || entry_name.starts_with("__MACOSX/")
-            {
-                continue;
-            }
-            let relative = match &prefix {
-                Some(prefix) => match entry_name.strip_prefix(&format!("{prefix}/")) {
-                    Some(relative) => relative.to_string(),
-                    None => continue,
-                },
-                None => entry_name,
-            };
-            if relative.is_empty() {
-                continue;
-            }
-            let dest = util::safe_join(&target, &relative)?;
-            if let Some(parent) = dest.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            let mut bytes = Vec::new();
-            entry.read_to_end(&mut bytes)?;
-            util::atomic_write(&dest, &bytes)?;
-        }
-        if !target.join("level.dat").is_file() {
-            let _ = fs::remove_dir_all(&target);
+        // Extract into a private staging directory so a failed or truncated
+        // import never becomes a world that the list cannot even show.
+        let staging = tempfile::Builder::new()
+            .prefix(".import-")
+            .tempdir_in(&saves)?;
+        let prefix = prefix.clone();
+        util::extract_zip_entries(
+            &mut zip,
+            staging.path(),
+            util::ZipLimits::default(),
+            |name| {
+                if name == BACKUP_MANIFEST || name.starts_with("__MACOSX/") {
+                    return None;
+                }
+                match &prefix {
+                    Some(prefix) => name.strip_prefix(&format!("{prefix}/")).map(str::to_string),
+                    None => Some(name.to_string()),
+                }
+            },
+        )?;
+        if !staging.path().join("level.dat").is_file() {
             return Err(AppError::Generic(
                 "World archive did not produce a level.dat".into(),
             ));
+        }
+        let staging = staging.keep();
+        if let Err(error) = fs::rename(&staging, &target) {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(error.into());
         }
         Ok(folder)
     }
@@ -661,18 +659,56 @@ impl ContentManager {
     }
 
     pub fn shader_loader_status(&self, id: &str) -> ShaderLoaderStatus {
+        // Unit tests create and inspect the same instance within milliseconds;
+        // caching there would hide their own writes and leak between tests.
+        if cfg!(test) {
+            return self.read_shader_loader_status(id);
+        }
+        // The shader detail page calls this on every frame. Scan once per
+        // short window instead of walking mods/ at 30 FPS.
+        static CACHE: Mutex<Option<(String, Instant, ShaderLoaderStatus)>> = Mutex::new(None);
+        let key = format!("{}|{id}", self.game_dir.display());
+        if let Ok(guard) = CACHE.lock() {
+            if let Some((cached_key, at, status)) = guard.as_ref() {
+                if cached_key == &key && at.elapsed() < Duration::from_millis(1500) {
+                    return *status;
+                }
+            }
+        }
+        let status = self.read_shader_loader_status(id);
+        if let Ok(mut guard) = CACHE.lock() {
+            *guard = Some((key, Instant::now(), status));
+        }
+        status
+    }
+
+    fn read_shader_loader_status(&self, id: &str) -> ShaderLoaderStatus {
+        let Ok(dir) = self.instance_dir(id) else {
+            return ShaderLoaderStatus::default();
+        };
         let mut status = ShaderLoaderStatus {
-            optifine: self.optifine_installed(id),
+            optifine: dir.join("optionsof.txt").is_file(),
             iris: false,
         };
-        if let Ok(dir) = self.instance_dir(id) {
-            if let Ok(entries) = fs::read_dir(dir.join("mods")) {
-                for entry in entries.flatten() {
-                    let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
-                    if name.contains("iris") || name.contains("oculus") {
-                        status.iris = true;
-                    }
-                    if name.contains("optifine") {
+        // One pass over mods/ covers both loaders.
+        if let Ok(entries) = fs::read_dir(dir.join("mods")) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+                if name.contains("iris") || name.contains("oculus") {
+                    status.iris = true;
+                }
+                if name.contains("optifine") {
+                    status.optifine = true;
+                }
+            }
+        }
+        if !status.optifine {
+            if let Ok(bytes) = fs::read(dir.join(format!("{id}.json"))) {
+                if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                    if value["id"]
+                        .as_str()
+                        .is_some_and(|value| value.to_ascii_lowercase().contains("optifine"))
+                    {
                         status.optifine = true;
                     }
                 }
@@ -871,6 +907,9 @@ fn add_world_tree(
 ) -> AppResult<usize> {
     let mut added = 0;
     for entry in fs::read_dir(source)?.flatten() {
+        if crate::progress::is_cancelled() {
+            return Err("Cancelled".into());
+        }
         let kind = entry.file_type()?;
         if kind.is_symlink() {
             continue;
@@ -1042,6 +1081,10 @@ fn set_array(lines: &mut Vec<String>, key: &str, values: &[String]) {
 }
 
 fn read_level_info(path: &Path) -> Option<LevelInfo> {
+    // Refuse absurd files before reading them into memory.
+    if fs::metadata(path).ok()?.len() > 64 * 1024 * 1024 {
+        return None;
+    }
     let bytes = fs::read(path).ok()?;
     level_info_from_bytes(&bytes)
 }
@@ -1072,13 +1115,21 @@ fn level_info_from_bytes(bytes: &[u8]) -> Option<LevelInfo> {
     })
 }
 
+/// `level.dat` is a few kilobytes in practice. Refuse to inflate more than a
+/// few megabytes: a hostile world file must not be able to OOM the launcher
+/// every time the world list is refreshed.
+const MAX_LEVEL_DAT: u64 = 8 * 1024 * 1024;
+
 fn gunzip(bytes: &[u8]) -> Option<Vec<u8>> {
     if bytes.len() < 2 || bytes[0] != 0x1f || bytes[1] != 0x8b {
         return None;
     }
-    let mut decoder = flate2::read::GzDecoder::new(bytes);
+    let mut decoder = flate2::read::GzDecoder::new(bytes).take(MAX_LEVEL_DAT + 1);
     let mut output = Vec::new();
     decoder.read_to_end(&mut output).ok()?;
+    if output.len() as u64 > MAX_LEVEL_DAT {
+        return None;
+    }
     Some(output)
 }
 

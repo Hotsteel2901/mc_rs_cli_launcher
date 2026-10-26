@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::error::{AppError, AppResult};
 use crate::http;
@@ -261,8 +261,11 @@ impl InstanceManager {
             .metadata()
             .map(|meta| meta.len())
             .unwrap_or(0);
-        detail.total_size = dir_size(&dir);
-        detail.saves_size = dir_size(&dir.join("saves"));
+        // One pass for both numbers: the old code walked the whole instance
+        // and then walked saves/ again, which is the largest subtree.
+        let (total, saves) = detail_sizes(&dir, &dir.join("saves"));
+        detail.total_size = total;
+        detail.saves_size = saves;
         detail.loaders = self.loaders(id);
         detail.name = marker_for(&self.game_dir, id).and_then(|marker| marker.name);
         detail.last_played = dir
@@ -293,6 +296,26 @@ impl InstanceManager {
 
     /// Delete an instance. Loader profiles and natives are shared elsewhere and
     /// are cleaned up too; saves and mods can be preserved in place.
+    /// Whether another installed instance inherits its loader profile from
+    /// `profile_id`. Deleting or renaming that profile would break them.
+    fn profile_shared_by_others(&self, profile_id: &str, excluding: &[&str]) -> bool {
+        let Ok(entries) = fs::read_dir(self.versions_dir()) else {
+            return false;
+        };
+        for entry in entries.flatten() {
+            let other = entry.file_name().to_string_lossy().to_string();
+            if excluding.contains(&other.as_str())
+                || !entry.path().join(format!("{other}.json")).is_file()
+            {
+                continue;
+            }
+            if instance_base(&self.game_dir, &other) == profile_id {
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn remove(&self, id: &str, keep_saves: bool, keep_mods: bool) -> AppResult<RemoveReport> {
         let dir = self.instance_dir(id)?;
         let absolute = util::absolute_path(&dir)?;
@@ -333,17 +356,22 @@ impl InstanceManager {
         }
 
         for loader in LOADERS {
-            let profile = self
-                .game_dir
-                .join("libraries")
-                .join(loader)
-                .join(format!("{loader}-profile-{id}.json"));
-            if profile.exists() {
-                fs::remove_file(&profile)?;
-                report
-                    .removed
-                    .push(format!("libraries/{loader}/{loader}-profile-{id}.json"));
+            let name = format!("{loader}-profile-{id}.json");
+            let profile = self.game_dir.join("libraries").join(loader).join(&name);
+            if !profile.exists() {
+                continue;
             }
+            if self.profile_shared_by_others(id, &[id]) {
+                // Other instances inherit this profile through their base
+                // version; deleting it would make them launch as vanilla.
+                crate::warn_msg!(
+                    "Keeping libraries/{loader}/{name}: other instances still use it."
+                );
+                report.kept.push(format!("libraries/{loader}/{name}"));
+                continue;
+            }
+            fs::remove_file(&profile)?;
+            report.removed.push(format!("libraries/{loader}/{name}"));
         }
         let natives = self.game_dir.join("natives").join(id);
         if natives.exists() {
@@ -388,8 +416,16 @@ impl InstanceManager {
                 .join(loader)
                 .join(format!("{loader}-profile-{to}.json"));
             if profile_src.exists() && !profile_dst.exists() {
-                fs::rename(&profile_src, &profile_dst)?;
-                patch_profile(&profile_dst, from, to)?;
+                if self.profile_shared_by_others(from, &[from, to]) {
+                    // Keep the shared profile in place: the renamed instance
+                    // still resolves it through its base version.
+                    crate::warn_msg!(
+                        "Keeping libraries/{loader}/{loader}-profile-{from}.json: other instances still use it."
+                    );
+                } else {
+                    fs::rename(&profile_src, &profile_dst)?;
+                    patch_profile(&profile_dst, from, to)?;
+                }
             }
         }
         Ok(())
@@ -610,6 +646,9 @@ impl InstanceManager {
             .map_err(zip_error)?;
         zip.write_all(&serde_json::to_vec_pretty(&index)?)?;
         for (path, filename) in &overrides {
+            if crate::progress::is_cancelled() {
+                return Err("Cancelled".into());
+            }
             zip.start_file(format!("overrides/mods/{filename}"), options)
                 .map_err(zip_error)?;
             let bytes = fs::read(path)?;
@@ -696,32 +735,19 @@ impl InstanceManager {
             )));
         }
         fs::create_dir_all(&dir)?;
+        // Any failure below removes this half-created instance instead of
+        // leaving a directory that looks installed but misses its mods.
+        let guard = PartialDir::new(&dir);
 
         // Overrides first so launcher metadata cannot be overwritten by a pack.
-        let mut overrides = 0;
-        for prefix in ["overrides/", "client-overrides/"] {
-            for i in 0..zip.len() {
-                let mut entry = match zip.by_index(i) {
-                    Ok(entry) => entry,
-                    Err(_) => continue,
-                };
-                let entry_name = entry.name().to_string();
-                let Some(relative) = entry_name.strip_prefix(prefix) else {
-                    continue;
-                };
-                if relative.is_empty() || entry_name.ends_with('/') {
-                    continue;
-                }
-                let target = util::safe_join(&dir, relative)?;
-                if let Some(parent) = target.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                let mut bytes = Vec::new();
-                entry.read_to_end(&mut bytes)?;
-                util::atomic_write(&target, &bytes)?;
-                overrides += 1;
-            }
-        }
+        // One bounded pass handles both override roots and rejects zip bombs.
+        let overrides =
+            util::extract_zip_entries(&mut zip, &dir, util::ZipLimits::default(), |name| {
+                ["overrides/", "client-overrides/"]
+                    .iter()
+                    .find_map(|prefix| name.strip_prefix(prefix).map(str::to_string))
+                    .filter(|relative| !relative.is_empty())
+            })?;
         drop(zip);
 
         let base_dir = self.versions_dir().join(&base);
@@ -732,21 +758,6 @@ impl InstanceManager {
             // the base should not appear as a separately installed version.
             let _ = fs::remove_dir_all(&base_dir);
         }
-        let mut instance_json = base_json;
-        instance_json["id"] = serde_json::json!(id);
-        util::atomic_write(
-            &dir.join(format!("{id}.json")),
-            &serde_json::to_vec_pretty(&instance_json)?,
-        )?;
-        InstanceMarker {
-            base: Some(base.clone()),
-            loader: loader.clone(),
-            loader_version: loader_version.clone(),
-            name: Some(pack_name.to_string()),
-            pack: Some("modrinth".into()),
-        }
-        .write(&dir)?;
-
         let mut files = 0;
         for entry in index["files"].as_array().into_iter().flatten() {
             if entry["env"]["client"].as_str() == Some("unsupported") {
@@ -787,6 +798,24 @@ impl InstanceManager {
             files += 1;
         }
 
+        // Publish the instance only after every file is in place: a network
+        // failure must not leave something that `list-installed` calls ready.
+        let mut instance_json = base_json;
+        instance_json["id"] = serde_json::json!(id);
+        util::atomic_write(
+            &dir.join(format!("{id}.json")),
+            &serde_json::to_vec_pretty(&instance_json)?,
+        )?;
+        InstanceMarker {
+            base: Some(base.clone()),
+            loader: loader.clone(),
+            loader_version: loader_version.clone(),
+            name: Some(pack_name.to_string()),
+            pack: Some("modrinth".into()),
+        }
+        .write(&dir)?;
+        guard.keep();
+
         Ok(ModpackImport {
             id,
             base,
@@ -823,9 +852,11 @@ impl InstanceManager {
         let backups = self.game_dir.join("backups");
         fs::create_dir_all(&backups)?;
         let stamp = utc_stamp(SystemTime::now());
-        let path = backups.join(format!("{id}-{stamp}.zip"));
-        let file = fs::File::create(&path)?;
-        let mut zip = zip::ZipWriter::new(file);
+        // Two backups in the same second must not overwrite each other, and a
+        // failed write must never replace an existing archive with a fragment.
+        let path = util::unique_path(&backups.join(format!("{id}-{stamp}.zip")));
+        let temp = tempfile::NamedTempFile::new_in(&backups)?;
+        let mut zip = zip::ZipWriter::new(temp.as_file().try_clone()?);
         let options = file_options();
         let manifest = serde_json::json!({
             "id": id,
@@ -865,6 +896,9 @@ impl InstanceManager {
             }
         }
         zip.finish().map_err(zip_error)?;
+        temp.persist(&path).map_err(|error| {
+            AppError::Generic(format!("Cannot write {}: {}", path.display(), error.error))
+        })?;
         if added == 0 {
             crate::warn_msg!("Nothing to back up in '{}'.", id);
         }
@@ -888,25 +922,14 @@ impl InstanceManager {
         })?;
         let dir = self.instance_dir(&id)?;
         fs::create_dir_all(&dir)?;
-        let mut restored = 0;
-        for i in 0..zip.len() {
-            let mut entry = match zip.by_index(i) {
-                Ok(entry) => entry,
-                Err(_) => continue,
-            };
-            let entry_name = entry.name().to_string();
-            if entry_name == "backup.json" || entry_name.ends_with('/') {
-                continue;
-            }
-            let target = util::safe_join(&dir, &entry_name)?;
-            if let Some(parent) = target.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            let mut bytes = Vec::new();
-            entry.read_to_end(&mut bytes)?;
-            util::atomic_write(&target, &bytes)?;
-            restored += 1;
-        }
+        let restored =
+            util::extract_zip_entries(&mut zip, &dir, util::ZipLimits::default(), |name| {
+                if name == "backup.json" || name.starts_with("__MACOSX/") {
+                    None
+                } else {
+                    Some(name.to_string())
+                }
+            })?;
         Ok((id, restored))
     }
 
@@ -933,6 +956,34 @@ fn zip_error(error: zip::result::ZipError) -> AppError {
     AppError::Generic(format!("Archive error: {error}"))
 }
 
+/// Deletes a directory that a failed install/modpack import left behind.
+struct PartialDir {
+    path: PathBuf,
+    keep: bool,
+}
+
+impl PartialDir {
+    fn new(path: &Path) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            keep: false,
+        }
+    }
+
+    /// Mark the directory as complete so it survives the drop.
+    fn keep(mut self) {
+        self.keep = true;
+    }
+}
+
+impl Drop for PartialDir {
+    fn drop(&mut self) {
+        if !self.keep {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+}
+
 fn file_options() -> zip::write::FileOptions {
     zip::write::FileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated)
@@ -947,6 +998,9 @@ fn add_tree(
 ) -> AppResult<usize> {
     let mut added = 0;
     for entry in fs::read_dir(source)?.flatten() {
+        if crate::progress::is_cancelled() {
+            return Err("Cancelled".into());
+        }
         let path = entry.path();
         let name = entry.file_name();
         let child = relative.join(&name);
@@ -968,29 +1022,68 @@ fn add_tree(
 
 /// Recursive size of regular files; symlinks are not followed.
 pub fn dir_size(path: &Path) -> u64 {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(_) => return 0,
-    };
-    if metadata.is_file() {
-        return metadata.len();
-    }
-    if !metadata.is_dir() {
-        return 0;
-    }
+    tree_sizes(path, Path::new("")).0
+}
+
+/// Iterative walk that also reports how many bytes live under `watch`.
+/// Iterative (rather than recursive) so a pathological archive cannot blow
+/// the stack, and single-pass so `saves/` is not traversed twice.
+fn tree_sizes(root: &Path, watch: &Path) -> (u64, u64) {
     let mut total = 0;
-    if let Ok(entries) = fs::read_dir(path) {
-        for entry in entries.flatten() {
-            total += dir_size(&entry.path());
+    let mut watched = 0;
+    let mut stack = vec![(root.to_path_buf(), false)];
+    while let Some((path, inside)) = stack.pop() {
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        let inside = inside || (!watch.as_os_str().is_empty() && path == watch);
+        if metadata.is_file() {
+            total += metadata.len();
+            if inside {
+                watched += metadata.len();
+            }
+        } else if metadata.is_dir() {
+            if let Ok(entries) = fs::read_dir(&path) {
+                for entry in entries.flatten() {
+                    stack.push((entry.path(), inside));
+                }
+            }
         }
     }
-    total
+    (total, watched)
+}
+
+/// Instance sizes are shown in the list and recomputed after every job. A few
+/// seconds of caching avoids re-walking gigabytes when the user just installed
+/// a mod; the CLI always gets a fresh number.
+fn detail_sizes(root: &Path, watch: &Path) -> (u64, u64) {
+    if cfg!(test) {
+        return tree_sizes(root, watch);
+    }
+    type SizeCache = std::sync::Mutex<std::collections::HashMap<PathBuf, (Instant, u64, u64)>>;
+    static CACHE: std::sync::OnceLock<SizeCache> = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    if let Ok(guard) = cache.lock() {
+        if let Some((at, total, saves)) = guard.get(root) {
+            if at.elapsed() < Duration::from_secs(5) {
+                return (*total, *saves);
+            }
+        }
+    }
+    let sizes = tree_sizes(root, watch);
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(root.to_path_buf(), (Instant::now(), sizes.0, sizes.1));
+    }
+    sizes
 }
 
 fn copy_dir(src: &Path, dst: &Path) -> AppResult<u64> {
     fs::create_dir_all(dst)?;
     let mut total = 0;
     for entry in fs::read_dir(src)?.flatten() {
+        if crate::progress::is_cancelled() {
+            return Err("Cancelled".into());
+        }
         let kind = entry.file_type()?;
         if kind.is_symlink() {
             continue;

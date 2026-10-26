@@ -7,7 +7,7 @@
 
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 /// A single transfer update. `id` is stable for the lifetime of one file.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -19,12 +19,21 @@ pub struct TransferEvent {
     pub done: bool,
 }
 
-type Sink = Box<dyn Fn(TransferEvent) + Send + Sync + 'static>;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoticeLevel {
+    Warn,
+    Error,
+}
+
+type Sink = Arc<dyn Fn(TransferEvent) + Send + Sync + 'static>;
+type NoticeSink = Arc<dyn Fn(NoticeLevel, String) + Send + Sync + 'static>;
 
 static SINK: Mutex<Option<Sink>> = Mutex::new(None);
+static NOTICE_SINK: Mutex<Option<NoticeSink>> = Mutex::new(None);
+static SINK_ACTIVE: AtomicBool = AtomicBool::new(false);
 static CANCEL: AtomicBool = AtomicBool::new(false);
 static CURRENT_JOB: AtomicU64 = AtomicU64::new(0);
-static ENV_ENABLED: OnceLock<bool> = OnceLock::new();
+static ENV_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 fn env_enabled() -> bool {
     *ENV_ENABLED.get_or_init(|| {
@@ -36,9 +45,10 @@ fn env_enabled() -> bool {
 }
 
 /// Install (or replace) the in-process progress sink.
-pub fn set_sink(sink: Sink) {
+pub fn set_sink(sink: Box<dyn Fn(TransferEvent) + Send + Sync + 'static>) {
     if let Ok(mut slot) = SINK.lock() {
-        *slot = Some(sink);
+        *slot = Some(Arc::from(sink));
+        SINK_ACTIVE.store(true, Ordering::Release);
     }
 }
 
@@ -46,12 +56,28 @@ pub fn set_sink(sink: Sink) {
 pub fn clear_sink() {
     if let Ok(mut slot) = SINK.lock() {
         *slot = None;
+        SINK_ACTIVE.store(false, Ordering::Release);
+    }
+}
+
+/// Install a sink for warnings raised deep inside backend code. The TUI turns
+/// these into activity-log entries instead of printing over the alternate
+/// screen; the CLI leaves it unset and prints normally.
+pub fn set_notice_sink(sink: Box<dyn Fn(NoticeLevel, String) + Send + Sync + 'static>) {
+    if let Ok(mut slot) = NOTICE_SINK.lock() {
+        *slot = Some(Arc::from(sink));
+    }
+}
+
+pub fn clear_notice_sink() {
+    if let Ok(mut slot) = NOTICE_SINK.lock() {
+        *slot = None;
     }
 }
 
 /// True when a frontend is consuming progress, either in-process or via a pipe.
 pub fn capture_active() -> bool {
-    SINK.lock().map(|slot| slot.is_some()).unwrap_or(false) || env_enabled()
+    SINK_ACTIVE.load(Ordering::Acquire) || env_enabled()
 }
 
 /// Reset the cooperative cancellation flag before a new job.
@@ -79,6 +105,10 @@ pub fn current_job() -> u64 {
 }
 
 /// Publish one transfer update.
+///
+/// The sink is cloned out of the mutex before it runs: a sink that calls back
+/// into `progress` (or blocks on a bounded channel) must not deadlock the
+/// download workers, and a slow frontend must not serialise them.
 pub fn transfer(id: &str, label: &str, bytes: u64, total: Option<u64>, done: bool) {
     let event = TransferEvent {
         id: id.to_string(),
@@ -88,11 +118,10 @@ pub fn transfer(id: &str, label: &str, bytes: u64, total: Option<u64>, done: boo
         done,
     };
 
-    if let Ok(slot) = SINK.lock() {
-        if let Some(sink) = slot.as_ref() {
-            sink(event);
-            return;
-        }
+    let sink = SINK.lock().ok().and_then(|slot| slot.clone());
+    if let Some(sink) = sink {
+        sink(event);
+        return;
     }
 
     if env_enabled() {
@@ -106,6 +135,23 @@ pub fn transfer(id: &str, label: &str, bytes: u64, total: Option<u64>, done: boo
         });
         // A write error here only means the parent disappeared; never abort a
         // download because progress could not be reported.
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(stderr, "@@MC_TUI@@{payload}");
+        let _ = stderr.flush();
+    }
+}
+
+/// Report a warning/error that happened in backend code.
+pub fn notice(level: NoticeLevel, message: &str) {
+    let sink = NOTICE_SINK.lock().ok().and_then(|slot| slot.clone());
+    if let Some(sink) = sink {
+        sink(level, message.to_string());
+    } else if env_enabled() {
+        let payload = serde_json::json!({
+            "kind": "notice",
+            "level": match level { NoticeLevel::Warn => "warn", NoticeLevel::Error => "error" },
+            "text": message,
+        });
         let mut stderr = std::io::stderr().lock();
         let _ = writeln!(stderr, "@@MC_TUI@@{payload}");
         let _ = stderr.flush();

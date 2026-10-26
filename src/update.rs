@@ -101,7 +101,7 @@ pub fn check(
             let name = entry.file_name().to_string_lossy().to_string();
             let enabled = name.ends_with(".jar");
             let disabled = name.ends_with(".jar.disabled");
-            if !enabled && !(include_disabled && disabled) {
+            if !(enabled || include_disabled && disabled) {
                 continue;
             }
             files.push((entry.path(), enabled));
@@ -210,6 +210,9 @@ pub fn plan(
     let primary = modrinth::primary_file(latest)?;
     let url = primary["url"].as_str()?.to_string();
     let filename = primary["filename"].as_str()?.to_string();
+    // The filename comes from a remote API and is later joined into mods/.
+    // Reject traversal here so an update simply does not appear.
+    crate::util::validate_component(&filename).ok()?;
     Some(ModUpdate {
         file,
         filename: filename.clone(),
@@ -232,6 +235,8 @@ pub fn plan(
 /// Download and install an update. Disabled mods stay disabled.
 pub fn apply(game_dir: &Path, mc_version: &str, update: &ModUpdate) -> AppResult<PathBuf> {
     let manager = ModManager::new(game_dir);
+    // Defence in depth: never let a remote filename escape mods/.
+    crate::util::validate_component(&update.download_name)?;
     let mods_dir = manager.mods_dir(mc_version);
     std::fs::create_dir_all(&mods_dir)?;
     let target = mods_dir.join(&update.download_name);
@@ -323,6 +328,25 @@ mod tests {
         assert!(plan(&latest, &current, PathBuf::new(), true, "Mod".into()).is_none());
 
         latest["loaders"] = serde_json::json!(["fabric", "quilt"]);
+        assert!(plan(&latest, &current, PathBuf::new(), true, "Mod".into()).is_some());
+    }
+
+    #[test]
+    fn traversal_filenames_never_plan_an_update() {
+        let current = version("v1", "1.0.0", "2024-01-01T00:00:00Z", "mod-1.jar");
+        for name in [
+            "../evil.jar",
+            "../../.config/autostart/x.jar",
+            "a/b.jar",
+            "",
+        ] {
+            let latest = version("v2", "2.0.0", "2024-02-01T00:00:00Z", name);
+            assert!(
+                plan(&latest, &current, PathBuf::new(), true, "Mod".into()).is_none(),
+                "{name:?} must be rejected"
+            );
+        }
+        let latest = version("v2", "2.0.0", "2024-02-01T00:00:00Z", "mod-2.jar");
         assert!(plan(&latest, &current, PathBuf::new(), true, "Mod".into()).is_some());
     }
 }

@@ -418,6 +418,10 @@ fn newest_file(dir: &Path, extension: &str) -> Option<(PathBuf, SystemTime)> {
 
 /// Find and analyze the newest crash report (or latest.log) of an instance.
 pub fn analyze_instance(game_dir: &Path, version: &str) -> Option<Diagnosis> {
+    // `version` is user input and is joined into versions/<id>.
+    if crate::util::validate_component(version).is_err() {
+        return None;
+    }
     let instance = game_dir.join("versions").join(version);
     let crash = newest_file(&instance.join("crash-reports"), ".txt")
         .or_else(|| newest_file(&game_dir.join("crash-reports"), ".txt"));
@@ -431,25 +435,27 @@ pub fn analyze_instance(game_dir: &Path, version: &str) -> Option<Diagnosis> {
             (log, "最新日志")
         }
     };
-    let bytes = std::fs::read(&path).ok()?;
-    // Logs can be large; keep the tail where the failure is.
-    let text = String::from_utf8_lossy(&bytes);
-    let text = if text.len() > 512 * 1024 {
-        let start = text.len() - 512 * 1024;
-        let start = text
-            .char_indices()
-            .map(|(index, _)| index)
-            .find(|index| *index >= start)
-            .unwrap_or(0);
-        text[start..].to_string()
-    } else {
-        text.to_string()
-    };
+    // Logs can be several gigabytes after a mod loops; only the tail matters.
+    let text = read_text_tail(&path, 512 * 1024)?;
     Some(Diagnosis {
         source: format!("{kind}: {}", path.display()),
         findings: analyze_text(&text),
         excerpt: excerpt(&text, 12),
     })
+}
+
+/// Read at most `limit` bytes from the end of a file.
+fn read_text_tail(path: &Path, limit: usize) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let start = len.saturating_sub(limit as u64);
+    if start > 0 {
+        file.seek(SeekFrom::Start(start)).ok()?;
+    }
+    let mut bytes = Vec::with_capacity(limit.min(1024 * 1024));
+    file.take(limit as u64).read_to_end(&mut bytes).ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// Format a diagnosis for the CLI.

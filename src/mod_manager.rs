@@ -19,6 +19,70 @@ pub struct ModManager {
     pub game_dir: PathBuf,
 }
 
+/// Whether an installed jar file satisfies a Modrinth slug.
+///
+/// `sodium-extra.jar` must not count as `sodium`: a dependency would then be
+/// silently skipped and the game would crash on a missing mod.
+fn jar_matches_slug(file: &str, slug: &str) -> bool {
+    if slug.is_empty() {
+        return false;
+    }
+    let stem = file.strip_suffix(".jar").unwrap_or(file);
+    if stem == slug {
+        return true;
+    }
+    let Some(rest) = stem.strip_prefix(slug) else {
+        return false;
+    };
+    let rest = rest
+        .strip_prefix('-')
+        .or_else(|| rest.strip_prefix('_'))
+        .or_else(|| rest.strip_prefix('.'));
+    // Only a version suffix counts. `sodium-extra` is a different mod and
+    // must not satisfy a `sodium` dependency; the jar metadata check below
+    // covers names like `sodium-fabric-0.5.8.jar`.
+    rest.is_some_and(|rest| rest.chars().next().is_some_and(|c| c.is_ascii_digit()))
+}
+
+/// Read the mod id from a jar's metadata, so dependency detection does not
+/// depend on guessing from filenames.
+fn read_mod_id(path: &Path) -> Option<String> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut archive = zip::ZipArchive::new(file).ok()?;
+    for name in [
+        "fabric.mod.json",
+        "META-INF/neoforge.mods.toml",
+        "META-INF/mods.toml",
+    ] {
+        let Ok(mut entry) = archive.by_name(name) else {
+            continue;
+        };
+        if entry.size() > 1024 * 1024 {
+            continue;
+        }
+        let mut text = String::new();
+        if std::io::Read::read_to_string(&mut entry, &mut text).is_err() {
+            continue;
+        }
+        if name.ends_with(".json") {
+            return serde_json::from_str::<serde_json::Value>(&text)
+                .ok()?
+                .get("id")?
+                .as_str()
+                .map(|value| value.to_ascii_lowercase());
+        }
+        for line in text.lines() {
+            let line = line.trim();
+            if let Some(rest) = line.strip_prefix("modId") {
+                if let Some((_, value)) = rest.split_once('=') {
+                    return Some(value.trim().trim_matches('"').to_ascii_lowercase());
+                }
+            }
+        }
+    }
+    None
+}
+
 impl ModManager {
     pub fn new(game_dir: &Path) -> Self {
         ModManager {
@@ -27,9 +91,19 @@ impl ModManager {
     }
 
     /// Get the mods directory for a Minecraft version.
+    ///
+    /// Never exits the process: this is called from TUI worker threads where a
+    /// `die!` would tear down the terminal. An unsafe id maps to a directory
+    /// that cannot escape `versions/` and is reported instead of used silently.
     pub fn mods_dir(&self, mc_version: &str) -> PathBuf {
-        crate::util::validate_component(mc_version).unwrap_or_else(|e| crate::die!(e));
-        self.game_dir.join("versions").join(mc_version).join("mods")
+        let safe = match crate::util::validate_component(mc_version) {
+            Ok(()) => mc_version,
+            Err(_) => {
+                crate::warn_msg!("Unsafe instance id in mods path: {mc_version:?}");
+                "__invalid_instance__"
+            }
+        };
+        self.game_dir.join("versions").join(safe).join("mods")
     }
 
     /// List installed Minecraft versions.
@@ -427,19 +501,24 @@ impl ModManager {
         }
 
         let dest_dir = self.mods_dir(mc_version);
-        let existing_jars: Vec<String> = std::fs::read_dir(&dest_dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter(|e| {
-                let name = e.file_name().to_string_lossy().to_lowercase();
-                name.ends_with(".jar")
-                    && !name.ends_with("-sources.jar")
-                    && !name.ends_with("-javadoc.jar")
-                    && !name.ends_with(".disabled")
-            })
-            .map(|e| e.file_name().to_string_lossy().to_lowercase())
-            .collect();
+        let mut existing_jars: Vec<String> = Vec::new();
+        let mut installed_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        if let Ok(entries) = std::fs::read_dir(&dest_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_lowercase();
+                if !name.ends_with(".jar")
+                    || name.ends_with("-sources.jar")
+                    || name.ends_with("-javadoc.jar")
+                    || name.ends_with(".disabled")
+                {
+                    continue;
+                }
+                if let Some(id) = read_mod_id(&entry.path()) {
+                    installed_ids.insert(id);
+                }
+                existing_jars.push(name);
+            }
+        }
 
         let mut required_missing: Vec<(String, String, String, String)> = Vec::new();
         let mut optional_list: Vec<(String, String, String, String, bool)> = Vec::new();
@@ -487,9 +566,11 @@ impl ModManager {
 
             let dep_key_lower = dep_slug.to_lowercase();
             let dep_title_lower = dep_title.to_lowercase().replace(' ', "_");
-            let present = existing_jars
-                .iter()
-                .any(|n| n.contains(&dep_key_lower) || n.contains(&dep_title_lower));
+            let present = installed_ids.contains(&dep_key_lower)
+                || installed_ids.contains(&dep_title_lower)
+                || existing_jars
+                    .iter()
+                    .any(|name| jar_matches_slug(name, &dep_key_lower));
 
             match dep_type {
                 "required" => {
@@ -503,6 +584,15 @@ impl ModManager {
                             dep_mc,
                         ));
                     }
+                }
+                "incompatible" => {
+                    crate::warn_msg!(
+                        "[dep: incompatible] {} must not be installed alongside this mod",
+                        dep_title
+                    );
+                }
+                "embedded" => {
+                    crate::info!("[dep: embedded] {} is bundled with this mod", dep_title);
                 }
                 _ => {
                     if present {
@@ -750,5 +840,16 @@ mod tests {
         let manager = ModManager::new(dir.path());
         assert!(manager.list_mods("1.21.4").is_empty());
         assert!(!dir.path().join("versions").exists());
+    }
+
+    #[test]
+    fn dependency_matching_requires_a_separator() {
+        assert!(!jar_matches_slug("sodium-fabric-0.5.8.jar", "sodium"));
+        assert!(jar_matches_slug("sodium-0.5.8.jar", "sodium"));
+        assert!(jar_matches_slug("sodium.jar", "sodium"));
+        assert!(!jar_matches_slug("sodium_extra.jar", "sodium"));
+        assert!(!jar_matches_slug("sodium-extra.jar", "sodium"));
+        assert!(!jar_matches_slug("not-sodium.jar", "sodium"));
+        assert!(!jar_matches_slug("", "sodium"));
     }
 }
