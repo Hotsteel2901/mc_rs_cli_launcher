@@ -936,8 +936,10 @@ mod tests {
     #[test]
     fn runtime_lookup_survives_glob_metacharacters_in_the_game_dir() {
         let dir = tempfile::tempdir().unwrap();
-        // `[` and `*` are legal in directory names but special to glob.
-        let runtime = dir.path().join("mc[1]*x").join("java").join("gamma");
+        // `[` and `]` are legal on every platform but special to glob.
+        // (`*` would make this test impossible on Windows, where it is not a
+        // valid filename character.)
+        let runtime = dir.path().join("mc[1]x").join("java").join("gamma");
         let bin = runtime.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let java = bin.join("java");
@@ -945,7 +947,7 @@ mod tests {
         assert_eq!(
             find_java_in_dir(
                 dir.path()
-                    .join("mc[1]*x")
+                    .join("mc[1]x")
                     .join("java")
                     .join("gamma")
                     .as_path(),
