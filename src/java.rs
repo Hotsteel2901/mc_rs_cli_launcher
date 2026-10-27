@@ -544,11 +544,10 @@ pub fn download_mojang_java(
 
 fn find_java_in_dir(root: &Path, exe_name: &str) -> Option<String> {
     // Game directories may contain glob metacharacters such as `[` or `*`.
-    let pattern = format!(
-        "{}/**/bin/{}",
-        glob::Pattern::escape(&root.to_string_lossy()),
-        exe_name
-    );
+    // `glob` treats `/` as the separator on every platform, so a Windows path
+    // must be normalised first; a literal `\` would be parsed as an escape.
+    let root = root.to_string_lossy().replace('\\', "/");
+    let pattern = format!("{}/**/bin/{}", glob::Pattern::escape(&root), exe_name);
     let matches = glob::glob(&pattern).ok()?;
     if let Some(entry) = matches.flatten().next() {
         return Some(entry.to_string_lossy().to_string());
@@ -742,11 +741,8 @@ pub fn inspect_java(path: &str, origin: JavaOrigin) -> JavaInfo {
 /// Managed runtimes live under <game_dir>/java/<component>/.../bin/java.
 pub fn scan_managed_javas(game_dir: &Path) -> Vec<String> {
     let exe_name = if cfg!(windows) { "java.exe" } else { "java" };
-    let pattern = format!(
-        "{}/java/**/bin/{}",
-        glob::Pattern::escape(&game_dir.to_string_lossy()),
-        exe_name
-    );
+    let root = game_dir.to_string_lossy().replace('\\', "/");
+    let pattern = format!("{}/java/**/bin/{}", glob::Pattern::escape(&root), exe_name);
     glob::glob(&pattern)
         .map(|entries| {
             entries

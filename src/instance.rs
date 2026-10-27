@@ -643,11 +643,15 @@ impl InstanceManager {
             "dependencies": dependencies,
         });
 
-        if let Some(parent) = output.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let file = fs::File::create(output)?;
-        let mut zip = zip::ZipWriter::new(file);
+        let parent = output
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        fs::create_dir_all(parent)?;
+        // A failed export must not leave a truncated .mrpack where the caller
+        // (or an earlier export) expects a valid pack.
+        let temp = tempfile::NamedTempFile::new_in(parent)?;
+        let mut zip = zip::ZipWriter::new(temp.as_file().try_clone()?);
         let options = file_options();
         zip.start_file("modrinth.index.json", options)
             .map_err(zip_error)?;
@@ -662,6 +666,13 @@ impl InstanceManager {
             std::io::copy(&mut file, &mut zip)?;
         }
         zip.finish().map_err(zip_error)?;
+        temp.persist(output).map_err(|error| {
+            AppError::Generic(format!(
+                "Cannot write {}: {}",
+                output.display(),
+                error.error
+            ))
+        })?;
 
         Ok(ModpackExport {
             path: output.to_path_buf(),
