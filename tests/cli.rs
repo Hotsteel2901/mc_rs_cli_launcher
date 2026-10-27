@@ -670,8 +670,22 @@ fn prune_deletes_only_unreferenced_library_files() {
     assert!(plan.status.success());
     let value: serde_json::Value = serde_json::from_slice(&plan.stdout).unwrap();
     let libraries = value["libraries"].as_array().unwrap();
-    assert!(libraries.iter().any(|path| path.as_str() == junk.to_str()));
-    assert!(!libraries.iter().any(|path| path.as_str() == keep.to_str()));
+    // Compare by file name: the launcher may print absolute, short (8.3) or
+    // mixed-separator paths on Windows, and none of that changes the meaning.
+    let listed: Vec<String> = libraries
+        .iter()
+        .filter_map(|value| value.as_str())
+        .filter_map(|text| std::path::Path::new(text).file_name())
+        .map(|name| name.to_string_lossy().to_string())
+        .collect();
+    assert!(
+        listed.iter().any(|name| name == "x-1.jar"),
+        "unreferenced library was not listed; got {libraries:?}"
+    );
+    assert!(
+        !listed.iter().any(|name| name == "a-1.jar"),
+        "referenced library was listed for deletion; got {libraries:?}"
+    );
     assert!(junk.is_file(), "dry run must not delete anything");
 
     let applied = run(&game, &["prune", "--yes"]);
