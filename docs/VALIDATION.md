@@ -13,6 +13,7 @@
 | `cargo build --locked --release` | 通过 |
 | 手动 CLI 冒烟 | `doctor --json`（离线模式）、`prune --json` / `--yes`（保留被引用库与 profile JSON、删除无用库与资源）、`repair --json`（缺 client jar 时报告 FAIL）、`list-installed/list-mods/list-backups --json`、`completions fish` |
 | 真实网络（1.20.6，本机 SSD） | 首次 `download`（含 3921 个资源对象，727 MB）186 s；重复执行 0.06 s（校验缓存命中，跳过镜像探测）；`MC_LAUNCHER_NO_VERIFY_CACHE=1` 时 1.46 s（全量重算 SHA-1） |
+| Windows 交叉验证 | `x86_64-pc-windows-gnu` + Wine 9.0：145 个单元测试、15 个 CLI 集成测试全部通过（2 个 Unix 专属测试按 `cfg` 跳过） |
 
 本轮改动：
 
@@ -27,7 +28,14 @@
 - **TUI**：加载器安装任务补上 `set_job`（下载进度不再恒为 0）；退出与 panic 路径补 `DisableMouseCapture`；`resume` 失败回滚 raw mode；退出时恢复原 panic hook；失败任务不再让界面永久保持 30 FPS；光影详情页的加载器探测改为 1.5 秒缓存并只扫描一次 mods/；实例复制与删除改在后台任务中执行，并复用任务面板。
 - **实例与存储**：删除/重命名基础版本时保留仍被其他实例继承的加载器 profile；实例大小改为单次迭代遍历并缓存 5 秒；`mods_dir` 遇到非法实例 id 不再 `process::exit`，避免 TUI 线程直接终止进程。
 
-未覆盖：真实 zip bomb 的端到端下载测试（仅构造条目验证限制）、Windows/macOS 的代理与文件锁差异、真实大型整合包导入的耗时基线。
+Windows 兼容修正：
+
+- `glob` 在所有平台上都以 `/` 为分隔符；`find_java_in_dir` / `scan_managed_javas` 先把根路径中的 `\` 正常化为 `/`，否则 Windows 路径会被当作转义序列，托管运行时查找失败。
+- `prune` 集成测试改为按文件名断言：Windows 可能返回绝对路径、8.3 短名或混合分隔符，路径字符串相等不是可靠的判断依据。
+- 测试目录不再使用 `*`（Windows 非法文件名字符），保留 `[`/`]` 继续覆盖 glob 元字符。
+- `.mrpack` 导出改为临时文件 + `persist`，与备份一致。
+
+未覆盖：真实 zip bomb 的端到端下载测试（仅构造条目验证限制）、macOS 实机与 Windows 真实文件系统的文件锁差异、真实大型整合包导入的耗时基线。
 
 ---
 
