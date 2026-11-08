@@ -1,0 +1,78 @@
+# Claude Code GitHub Action, authenticated through OpenCode Go.
+#
+# OpenCode Go exposes an Anthropic Messages-compatible gateway, so Claude Code
+# only needs ANTHROPIC_BASE_URL plus a Bearer token. The Action's own credential
+# check requires anthropic_api_key, so the same OpenCode key is supplied there
+# too; the settings file below adds the AUTH_TOKEN that OpenCode documents.
+# Claude Code sends x-claude-code-session-id natively, which OpenCode Go
+# recognizes, so no header relay is needed here.
+name: Claude Code
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  issues:
+    types: [opened, assigned]
+  pull_request_review:
+    types: [submitted]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  actions: read
+
+jobs:
+  claude:
+    if: |
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
+      (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # OpenCode Go's Anthropic Messages gateway. Claude Code appends
+      # /v1/messages to this base URL.
+      ANTHROPIC_BASE_URL: https://opencode.ai/inference/go/anthropic
+      # Map Claude Code's model aliases onto models OpenCode Go serves.
+      # deepseek-v4.1-flash requires Privacy > Regions to include Global in the
+      # OpenCode workspace; otherwise use another Go model such as
+      # glm-5.3-flash.
+      ANTHROPIC_DEFAULT_OPUS_MODEL: deepseek-v4.1-flash
+      ANTHROPIC_DEFAULT_SONNET_MODEL: deepseek-v4.1-flash
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: deepseek-v4.1-flash
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 1
+      - name: Run Claude Code
+        id: claude
+        uses: anthropics/claude-code-action@61a9c274fa7110a66dfafc1bbbced03833eb25fe # v1
+        with:
+          # Use the workflow token instead of the Claude GitHub App OIDC
+          # exchange, so the workflow works without installing the app. To use
+          # the claude[bot] identity instead, install https://github.com/apps/claude,
+          # remove github_token, and add `id-token: write` above.
+          github_token: ${{ github.token }}
+          bot_name: github-actions[bot]
+          # Required by the Action's credential validation. OpenCode Go
+          # authenticates the same key through the Bearer header configured in
+          # settings below.
+          anthropic_api_key: ${{ secrets.OPENCODE_API_KEY }}
+          settings: |
+            {
+              "env": {
+                "ANTHROPIC_AUTH_TOKEN": "${{ secrets.OPENCODE_API_KEY }}",
+                "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1000000"
+              }
+            }
+          claude_args: |
+            --model deepseek-v4.1-flash
+          # The built-in inline-comment classifier posts to
+          # https://api.anthropic.com directly, which would send the OpenCode
+          # key to Anthropic. Post inline comments without classification.
+          classify_inline_comments: "false"
